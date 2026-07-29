@@ -1,0 +1,24 @@
+{
+  "events": [
+    {
+      "source_url": "https://hyrox.com/event/hyrox-rome/",
+      "shop_url": "https://italy.hyrox.com/event/hyrox-rome-season-26-27-ny5kx9?useEmbed=true",
+      "event_id": "69c15f9717adbb5c17e9c3b5",
+      "event_name": "HYROX Rome | Season 26/27",
+      "watched_tickets": {
+        "CHARITY | HYROX WOMEN | Thursday": {
+          "last_status": "sold_out"
+        },
+        "HYROX PRO MEN | Friday": {
+          "last_status": "sold_out"
+        },
+        "CHARITY | HYROX PRO WOMEN | Friday": {
+          "last_status": "available"
+        },
+        "CHARITY | HYROX PRO MEN | Friday": {
+          "last_status": "sold_out"
+        }
+      }
+    }
+  ]
+}
