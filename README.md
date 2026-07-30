@@ -122,6 +122,38 @@ shared with anyone or uploaded anywhere.
 
 ---
 
+## 2b. (Optional) Also get alerts by email
+
+Telegram alone is enough - only do this if you'd like a backup channel or
+just prefer email. This uses your own Gmail account to send the email, so
+it's free and needs no new signup.
+
+1. Go to **[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)**
+   and sign in if asked. (If you don't see this page, your account needs
+   2-Step Verification turned on first - Google will prompt you to enable it
+   at **[myaccount.google.com/security](https://myaccount.google.com/security)**,
+   then come back to the App Passwords link above.)
+2. Under "App name", type something like `hyrox-alert` and click **Create**.
+3. Google shows a 16-character password (four groups of 4 letters, e.g.
+   `abcd efgh ijkl mnop`). Copy it - this is **not** your normal Gmail
+   password, and Google only shows it once.
+4. Open your `.env` file in Notepad and add these three lines (using your
+   own Gmail address and the app password you just copied, with the spaces
+   removed):
+   ```
+   EMAIL_FROM=youraddress@gmail.com
+   EMAIL_APP_PASSWORD=abcdefghijklmnop
+   EMAIL_TO=youraddress@gmail.com
+   ```
+   `EMAIL_TO` is who receives the alert - use the same address to email
+   yourself, or a different address if you'd rather it land somewhere else.
+5. Save and close.
+
+That's it - `check` will now email you (in addition to Telegram) every time
+a watched ticket becomes available.
+
+---
+
 ## 3. Add an event to watch
 
 ```bash

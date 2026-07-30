@@ -91,6 +91,49 @@ def send_telegram_message(text):
         return False
 
 
+def send_email_message(subject, body):
+    import os
+    import smtplib
+    from email.mime.text import MIMEText
+
+    email_from = os.environ.get("EMAIL_FROM")
+    email_password = os.environ.get("EMAIL_APP_PASSWORD")
+    email_to = os.environ.get("EMAIL_TO") or email_from
+
+    if not email_from or not email_password:
+        log("Email not configured (missing .env values) - email not sent: " + subject)
+        return False
+
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = email_to
+
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as server:
+            server.starttls()
+            server.login(email_from, email_password)
+            server.sendmail(email_from, [email_to], msg.as_string())
+        return True
+    except Exception as e:
+        log(f"Email send error: {e}")
+        return False
+
+
+def send_alert(event_name, ticket_name, link):
+    """Send the same alert over every configured channel; log each independently."""
+    text = f"Ticket available!\n{event_name}\n{ticket_name}\n{link}"
+    subject = f"Ticket available: {ticket_name}"
+    sent = False
+    if send_telegram_message(text):
+        sent = True
+        log(f"ALERT SENT (Telegram) | {event_name} | {ticket_name}")
+    if send_email_message(subject, text):
+        sent = True
+        log(f"ALERT SENT (Email) | {event_name} | {ticket_name}")
+    return sent
+
+
 # ---------------------------------------------------------------------------
 # Vivenu event resolution
 # ---------------------------------------------------------------------------
@@ -413,13 +456,9 @@ def run_check():
             log(f"{ev.get('event_name')} | {name} | {new_status}")
 
             if old_status == "sold_out" and new_status == "available":
-                text = (
-                    f"Ticket available!\n{ev.get('event_name')}\n{name}\n"
-                    f"{ev.get('shop_url') or ev.get('source_url')}"
-                )
-                if send_telegram_message(text):
+                link = ev.get("shop_url") or ev.get("source_url")
+                if send_alert(ev.get("event_name"), name, link):
                     total_alerts += 1
-                    log(f"ALERT SENT | {ev.get('event_name')} | {name}")
 
             watched["last_status"] = new_status
 
