@@ -3,3 +3,6 @@ logs/
 __pycache__/
 *.pyc
 .claude/
+worker/node_modules/
+worker/.wrangler/
+worker/dist/

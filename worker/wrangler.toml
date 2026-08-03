@@ -1,0 +1,25 @@
+name = "roxracealerts"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "roxracealerts-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[vars]
+CONFIG_URL = "https://raw.githubusercontent.com/fbiviano/hyrox-ticket-alert/master/config.json"
+SEND_FROM = "RoxRaceAlerts <alerts@alerts.roxracealerts.com>"
+SITE_URL = "https://roxracealerts.com"
+
+# Secrets (set via `wrangler secret put`, not stored here):
+#   RESEND_API_KEY
+#   WEBHOOK_SECRET
+
+[[routes]]
+pattern = "roxracealerts.com/*"
+zone_name = "roxracealerts.com"
+
+[[routes]]
+pattern = "www.roxracealerts.com/*"
+zone_name = "roxracealerts.com"

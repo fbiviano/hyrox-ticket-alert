@@ -120,6 +120,31 @@ def send_email_message(subject, body):
         return False
 
 
+def notify_subscribers_webhook(event_name, ticket_name, link):
+    """Fan out to public roxracealerts.com subscribers via the Cloudflare Worker."""
+    import os
+
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    webhook_secret = os.environ.get("WEBHOOK_SECRET")
+    if not webhook_url or not webhook_secret:
+        return  # public subscriber alerts not configured - not an error, just optional
+
+    try:
+        resp = requests.post(
+            f"{webhook_url}/notify",
+            headers={"Authorization": f"Bearer {webhook_secret}"},
+            json={"event_name": event_name, "ticket_name": ticket_name, "link": link},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            sent = resp.json().get("sent", 0)
+            log(f"SUBSCRIBER ALERTS SENT | {event_name} | {ticket_name} | {sent} subscriber(s)")
+        else:
+            log(f"Subscriber webhook failed: HTTP {resp.status_code} {resp.text[:200]}")
+    except requests.RequestException as e:
+        log(f"Subscriber webhook error: {e}")
+
+
 def send_alert(event_name, ticket_name, link):
     """Send the same alert over every configured channel; log each independently."""
     text = f"Ticket available!\n{event_name}\n{ticket_name}\n{link}"
@@ -131,6 +156,7 @@ def send_alert(event_name, ticket_name, link):
     if send_email_message(subject, text):
         sent = True
         log(f"ALERT SENT (Email) | {event_name} | {ticket_name}")
+    notify_subscribers_webhook(event_name, ticket_name, link)
     return sent
 
 
