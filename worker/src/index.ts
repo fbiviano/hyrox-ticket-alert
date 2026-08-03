@@ -315,8 +315,8 @@ const RESOLVE_SCRIPT = `<script>
   var eventList = document.getElementById('eventList');
   var eventsLoaded = false;
   if (browseDetails && eventList) {
-    browseDetails.addEventListener('toggle', async function() {
-      if (!browseDetails.open || eventsLoaded) return;
+    async function loadEvents() {
+      if (eventsLoaded) return;
       eventsLoaded = true;
       try {
         var resp = await fetch('/events');
@@ -327,7 +327,10 @@ const RESOLVE_SCRIPT = `<script>
         }
         function rowHtml(ev) {
           var dateLabel = ev.event_date || 'Date TBA';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span></div>';
+          var badge = ev.on_sale
+            ? '<span class="event-badge on">On sale</span>'
+            : '<span class="event-badge off">Not on sale</span>';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + badge + '</div>';
         }
         function groupHtml(title, rows) {
           if (!rows.length) return '';
@@ -340,6 +343,10 @@ const RESOLVE_SCRIPT = `<script>
       } catch (e) {
         eventList.innerHTML = '<p>Something went wrong loading events.</p>';
       }
+    }
+    if (browseDetails.open) loadEvents();
+    browseDetails.addEventListener('toggle', function() {
+      if (browseDetails.open) loadEvents();
     });
     eventList.addEventListener('click', function(e) {
       var row = e.target.closest ? e.target.closest('.event-row') : null;
@@ -441,8 +448,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       <button type="button" id="findBtn">Find tickets</button>
     </div>
     <div id="resolveResult"></div>
-    <details class="browse" id="browseEvents">
-      <summary class="browse-toggle">Browse all HYROX events <span class="chev">&#9656;</span></summary>
+    <details class="browse" id="browseEvents" open>
+      <summary class="browse-toggle">All HYROX races &mdash; on sale and upcoming <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
     </details>`;
 
