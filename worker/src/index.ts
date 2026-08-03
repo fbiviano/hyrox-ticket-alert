@@ -311,6 +311,30 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
   );
 }
 
+async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<string> {
+  const { results } = await env.DB.prepare(
+    `SELECT w.id, sw.event_title, sw.resolved FROM sale_watchers w
+     JOIN sale_watch sw ON sw.event_url = w.event_url
+     WHERE w.subscriber_id = ? ORDER BY sw.event_title`
+  )
+    .bind(subscriberId)
+    .all<any>();
+  return (
+    (results || [])
+      .map(
+        (r: any) => `<div class="ticket-row">
+      <span>${escapeHtml(r.event_title)} - ${r.resolved ? "on sale, alert sent" : "not yet on sale"}</span>
+      <form method="POST" action="/remove-sale-watch">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <input type="hidden" name="watcher_id" value="${r.id}">
+        <button type="submit">Remove</button>
+      </form>
+    </div>`
+      )
+      .join("") || "<p>None yet.</p>"
+  );
+}
+
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
 
@@ -325,12 +349,15 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
 
   if (subscriber) {
     const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
+    const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
     return page(
       "RoxRaceAlerts",
       `<div class="card">
         <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
         <h2>Your watched tickets</h2>
         ${rows}
+        <h2>Waiting for tickets to go on sale</h2>
+        ${saleRows}
       </div>
       <div class="card">
         <h2>Add another ticket</h2>
@@ -610,12 +637,15 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
   }
   const rows = await renderTicketRows(subscriber.id, token, env);
+  const saleRows = await renderSaleWatchRows(subscriber.id, token, env);
   return page(
     "My alerts",
     `<div class="card">
       <p>Signed in as <b>${escapeHtml(subscriber.email)}</b></p>
       <h2>Your watched tickets</h2>
       ${rows}
+      <h2>Waiting for tickets to go on sale</h2>
+      ${saleRows}
     </div>
     <div class="card">
       <p><a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a> &middot; <a href="/">Add another ticket</a></p>
@@ -635,6 +665,25 @@ async function handleRemoveSubscription(req: Request, env: Env): Promise<Respons
   }
   await env.DB.prepare("DELETE FROM subscriptions WHERE id = ? AND subscriber_id = ?")
     .bind(subscriptionId, subscriber.id)
+    .run();
+
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/my-alerts?token=${token}`, "Set-Cookie": sessionCookieHeader(token) },
+  });
+}
+
+async function handleRemoveSaleWatch(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const watcherId = String(form.get("watcher_id") || "");
+
+  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!subscriber) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+  await env.DB.prepare("DELETE FROM sale_watchers WHERE id = ? AND subscriber_id = ?")
+    .bind(watcherId, subscriber.id)
     .run();
 
   return new Response(null, {
@@ -819,6 +868,7 @@ export default {
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
       if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
       if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
+      if (url.pathname === "/remove-sale-watch" && req.method === "POST") return await handleRemoveSaleWatch(req, env);
       if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
       if (url.pathname === "/search-events" && req.method === "GET") return await handleSearchEvents(req, env);
