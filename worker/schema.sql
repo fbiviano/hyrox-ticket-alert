@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   event_name TEXT NOT NULL,
   ticket_name TEXT NOT NULL,
   shop_url TEXT,
+  event_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_name, ticket_name)
 );
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS community_tickets (
   ticket_name TEXT NOT NULL,
   shop_url TEXT NOT NULL,
   last_status TEXT NOT NULL DEFAULT 'sold_out',
+  event_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(event_id, ticket_name)
 );
@@ -41,10 +43,14 @@ CREATE TABLE IF NOT EXISTS community_tickets (
 CREATE TABLE IF NOT EXISTS event_directory (
   url TEXT PRIMARY KEY,
   title TEXT NOT NULL,
+  event_date TEXT,
+  on_sale INTEGER NOT NULL DEFAULT 0,
+  last_sale_check TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_directory_title ON event_directory(title);
+CREATE INDEX IF NOT EXISTS idx_event_directory_date ON event_directory(event_date);
 
 -- Events someone wants to be told about the moment ticket sales open
 -- (resolveEvent() currently fails for them - no vivenu shop live yet).
@@ -53,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   event_url TEXT PRIMARY KEY,
   event_title TEXT NOT NULL,
   resolved INTEGER NOT NULL DEFAULT 0,
+  event_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

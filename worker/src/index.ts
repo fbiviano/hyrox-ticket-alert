@@ -3,6 +3,11 @@ import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS } fro
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
 const INDEX_BATCH_SIZE = 30;
 const INDEX_STALE_DAYS = 7;
+// Kept conservative (rather than the ~15 the math alone would allow) since
+// this shares the same 2-minute invocation - and its 50-subrequest cap -
+// with checkCommunityTickets and checkSaleWatches. Revisit if either of
+// those grows to watching many more rows.
+const SALE_STATUS_BATCH_SIZE = 10;
 
 export interface Env {
   DB: D1Database;
@@ -18,6 +23,7 @@ interface TrackedTicket {
   shop_url: string;
   event_id: string;
   status: "available" | "sold_out";
+  event_date?: string | null;
 }
 
 const SESSION_COOKIE = "rra_session";
@@ -154,6 +160,15 @@ a{color:#111}
 .ticket-row form{margin:0}
 .ticket-row button{margin:0;background:#fff;color:#b00;border:1px solid #e2b3b3;padding:6px 12px;font-size:0.85rem}
 .ticket-row button:hover{background:#fee}
+details.browse{margin-top:14px}
+details.browse summary{cursor:pointer;font-size:0.9rem;font-weight:600}
+.event-list{max-height:320px;overflow-y:auto;margin-top:10px}
+.event-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #eee;cursor:pointer;font-size:0.9rem}
+.event-row:last-child{border-bottom:0}
+.event-row:hover{background:#f7f7f7}
+.event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.event-badge.on{background:#e6f4ea;color:#1e7e34}
+.event-badge.off{background:#f1f1f1;color:#777}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
@@ -212,6 +227,7 @@ const RESOLVE_SCRIPT = `<script>
               var fd = new FormData();
               fd.set('event_url', url);
               fd.set('event_title', data.event_title);
+              fd.set('event_date', data.event_date || '');
               fd.set('email', email);
               var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
               if (subResp.redirected) {
@@ -286,17 +302,81 @@ const RESOLVE_SCRIPT = `<script>
   document.addEventListener('click', function(e) {
     if (e.target !== input) suggestions.innerHTML = '';
   });
+
+  var browseDetails = document.getElementById('browseEvents');
+  var eventList = document.getElementById('eventList');
+  var eventsLoaded = false;
+  if (browseDetails && eventList) {
+    browseDetails.addEventListener('toggle', async function() {
+      if (!browseDetails.open || eventsLoaded) return;
+      eventsLoaded = true;
+      try {
+        var resp = await fetch('/events');
+        var data = await resp.json();
+        if (!data.results || !data.results.length) {
+          eventList.innerHTML = '<p>No events found.</p>';
+          return;
+        }
+        var html = '';
+        for (var i = 0; i < data.results.length; i++) {
+          var ev = data.results[i];
+          var dateLabel = ev.event_date || 'Date TBA';
+          var badge = ev.on_sale
+            ? '<span class="event-badge on">On sale</span>'
+            : '<span class="event-badge off">Not on sale</span>';
+          html += '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + badge + '</div>';
+        }
+        eventList.innerHTML = html;
+      } catch (e) {
+        eventList.innerHTML = '<p>Something went wrong loading events.</p>';
+      }
+    });
+    eventList.addEventListener('click', function(e) {
+      var row = e.target.closest ? e.target.closest('.event-row') : null;
+      if (!row) return;
+      var url = row.getAttribute('data-url');
+      if (!url) return;
+      input.value = url;
+      browseDetails.open = false;
+      doFind(url);
+    });
+  }
 })();
 </script>`;
 
-async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<string> {
+interface ActivePast {
+  active: string;
+  past: string;
+}
+
+function splitByEventDate<T extends { event_date?: string | null }>(rows: T[]): { active: T[]; past: T[] } {
+  const today = todayIso();
+  const active: T[] = [];
+  const past: T[] = [];
+  for (const r of rows) {
+    (r.event_date && r.event_date < today ? past : active).push(r);
+  }
+  return { active, past };
+}
+
+function pastEventsSection(pastTickets: string, pastSales: string): string {
+  if (!pastTickets && !pastSales) return "";
+  return `<div class="card">
+    <h2>Past events</h2>
+    ${pastTickets}
+    ${pastSales}
+  </div>`;
+}
+
+async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
   const { results } = await env.DB.prepare(
-    "SELECT id, event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? ORDER BY event_name, ticket_name"
+    "SELECT id, event_name, ticket_name, event_date FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name"
   )
     .bind(subscriberId)
     .all<any>();
-  return (
-    (results || [])
+  const { active, past } = splitByEventDate(results || []);
+  const render = (rows: any[], emptyMsg?: string) => {
+    const html = rows
       .map(
         (r: any) => `<div class="ticket-row">
       <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
@@ -307,20 +387,23 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
       </form>
     </div>`
       )
-      .join("") || "<p>No active subscriptions yet.</p>"
-  );
+      .join("");
+    return html || (emptyMsg ? `<p>${emptyMsg}</p>` : "");
+  };
+  return { active: render(active, "No active subscriptions yet."), past: render(past) };
 }
 
-async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<string> {
+async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
   const { results } = await env.DB.prepare(
-    `SELECT w.id, sw.event_title, sw.resolved FROM sale_watchers w
+    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date FROM sale_watchers w
      JOIN sale_watch sw ON sw.event_url = w.event_url
-     WHERE w.subscriber_id = ? ORDER BY sw.event_title`
+     WHERE w.subscriber_id = ? ORDER BY sw.event_date IS NULL, sw.event_date, sw.event_title`
   )
     .bind(subscriberId)
     .all<any>();
-  return (
-    (results || [])
+  const { active, past } = splitByEventDate(results || []);
+  const render = (rows: any[], emptyMsg?: string) => {
+    const html = rows
       .map(
         (r: any) => `<div class="ticket-row">
       <span>${escapeHtml(r.event_title)} - ${r.resolved ? "on sale, alert sent" : "not yet on sale"}</span>
@@ -331,8 +414,10 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
       </form>
     </div>`
       )
-      .join("") || "<p>None yet.</p>"
-  );
+      .join("");
+    return html || (emptyMsg ? `<p>${emptyMsg}</p>` : "");
+  };
+  return { active: render(active, "None yet."), past: render(past) };
 }
 
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
@@ -345,7 +430,11 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       </div>
       <button type="button" id="findBtn">Find tickets</button>
     </div>
-    <div id="resolveResult"></div>`;
+    <div id="resolveResult"></div>
+    <details class="browse" id="browseEvents">
+      <summary>Browse all events</summary>
+      <div id="eventList" class="event-list"><p>Loading...</p></div>
+    </details>`;
 
   if (subscriber) {
     const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
@@ -355,10 +444,11 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       `<div class="card">
         <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
         <h2>Your watched tickets</h2>
-        ${rows}
+        ${rows.active}
         <h2>Waiting for tickets to go on sale</h2>
-        ${saleRows}
+        ${saleRows.active}
       </div>
+      ${pastEventsSection(rows.past, saleRows.past)}
       <div class="card">
         <h2>Add another ticket</h2>
         <form method="POST" action="/subscribe" id="signupForm">
@@ -418,17 +508,21 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
   if (!isFetchableUrl(url)) {
     return jsonResponse({ error: "Please enter a valid http(s) URL." }, 400);
   }
+  // Looked up by the original marketing URL (event_directory's key), not the
+  // vivenu shop URL resolveEvent() finds - carried along so a subscriber's
+  // watches can later tell whether their event's date has passed.
+  const known = await env.DB.prepare("SELECT title, event_date FROM event_directory WHERE url = ?").bind(url).first<any>();
+
   const found = await resolveEvent(url);
   if (!found) {
     // Page loaded fine, just no vivenu shop live yet - most likely tickets
-    // simply haven't gone on sale, not a broken URL. Look up a friendly
-    // title if this URL is a known event (from the sitemap-backed directory).
-    const known = await env.DB.prepare("SELECT title FROM event_directory WHERE url = ?").bind(url).first<any>();
+    // simply haven't gone on sale, not a broken URL.
     return jsonResponse(
       {
         error: "Could not find an active vivenu shop on that page - tickets may not be on sale yet.",
         not_on_sale: true,
         event_title: known ? known.title : url,
+        event_date: known ? known.event_date : null,
       },
       404
     );
@@ -441,6 +535,7 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
       shop_url: found.shopUrl,
       event_id: found.event._id,
       status,
+      event_date: known ? known.event_date : null,
     });
     return { name: t.name, status, encoded };
   });
@@ -531,14 +626,14 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     const t = decodeTicket(val);
     if (!t) continue;
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO subscriptions (subscriber_id, event_name, ticket_name, shop_url) VALUES (?, ?, ?, ?)"
+      "INSERT OR IGNORE INTO subscriptions (subscriber_id, event_name, ticket_name, shop_url, event_date) VALUES (?, ?, ?, ?, ?)"
     )
-      .bind(subscriber.id, t.event_name, t.ticket_name, t.shop_url)
+      .bind(subscriber.id, t.event_name, t.ticket_name, t.shop_url, t.event_date || null)
       .run();
     await env.DB.prepare(
-      "INSERT OR IGNORE INTO community_tickets (event_id, event_name, ticket_name, shop_url, last_status) VALUES (?, ?, ?, ?, ?)"
+      "INSERT OR IGNORE INTO community_tickets (event_id, event_name, ticket_name, shop_url, last_status, event_date) VALUES (?, ?, ?, ?, ?, ?)"
     )
-      .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out")
+      .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out", t.event_date || null)
       .run();
   }
 
@@ -553,6 +648,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const eventUrl = String(form.get("event_url") || "").trim();
   const eventTitle = String(form.get("event_title") || eventUrl).trim();
+  const eventDate = String(form.get("event_date") || "").trim() || null;
   if (!isFetchableUrl(eventUrl)) {
     return page("Something went wrong", `<div class="card"><p>That didn't work - go back and try again.</p></div>`);
   }
@@ -561,8 +657,8 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   if (result instanceof Response) return result;
   const { subscriber, needsVerification, verifyToken } = result;
 
-  await env.DB.prepare("INSERT OR IGNORE INTO sale_watch (event_url, event_title) VALUES (?, ?)")
-    .bind(eventUrl, eventTitle)
+  await env.DB.prepare("INSERT OR IGNORE INTO sale_watch (event_url, event_title, event_date) VALUES (?, ?, ?)")
+    .bind(eventUrl, eventTitle, eventDate)
     .run();
   await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
     .bind(subscriber.id, eventUrl)
@@ -643,10 +739,11 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     `<div class="card">
       <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
       <h2>Your watched tickets</h2>
-      ${rows}
+      ${rows.active}
       <h2>Waiting for tickets to go on sale</h2>
-      ${saleRows}
+      ${saleRows.active}
     </div>
+    ${pastEventsSection(rows.past, saleRows.past)}
     <div class="card">
       <p><a href="/">Home</a> &middot; <a href="/">Add another ticket</a> &middot; <a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a></p>
     </div>`,
@@ -716,7 +813,11 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
  * fan out alerts on sold_out -> available. Every subscription flows through
  * here (there's no separate curated list on the public site). */
 async function checkCommunityTickets(env: Env): Promise<void> {
-  const { results } = await env.DB.prepare("SELECT * FROM community_tickets").all<any>();
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM community_tickets WHERE event_date IS NULL OR event_date >= ?"
+  )
+    .bind(todayIso())
+    .all<any>();
   for (const row of results || []) {
     const event = await getEventData(row.event_id, row.shop_url);
     if (!event) continue;
@@ -738,7 +839,11 @@ async function checkCommunityTickets(env: Env): Promise<void> {
  * be small, well under the 50-subrequest cap (unlike the 116-event sitemap
  * crawl, which needs its own batched daily job). */
 async function checkSaleWatches(env: Env): Promise<void> {
-  const { results } = await env.DB.prepare("SELECT * FROM sale_watch WHERE resolved = 0").all<any>();
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM sale_watch WHERE resolved = 0 AND (event_date IS NULL OR event_date >= ?)"
+  )
+    .bind(todayIso())
+    .all<any>();
   for (const row of results || []) {
     const found = await resolveEvent(row.event_url);
     if (!found) continue; // still not on sale
@@ -772,6 +877,32 @@ async function checkSaleWatches(env: Env): Promise<void> {
   }
 }
 
+/** Keeps the browsable homepage list's on-sale status fresh for *every*
+ * known event, not just ones someone explicitly asked to be notified
+ * about (that's sale_watch, unchanged, above). Rotates through ~15
+ * not-yet-passed events per 2-minute tick, oldest-checked-first, so the
+ * full ~116-event directory cycles roughly every 16 minutes - well under
+ * the 50-subrequest cap, and reuses the existing trigger rather than
+ * adding a fourth schedule. */
+async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
+  const today = todayIso();
+  const { results } = await env.DB.prepare(
+    `SELECT url FROM event_directory
+     WHERE (event_date IS NULL OR event_date >= ?)
+     ORDER BY last_sale_check IS NOT NULL, last_sale_check ASC
+     LIMIT ?`
+  )
+    .bind(today, SALE_STATUS_BATCH_SIZE)
+    .all<any>();
+
+  for (const row of results || []) {
+    const found = await resolveEvent(row.url);
+    await env.DB.prepare("UPDATE event_directory SET on_sale = ?, last_sale_check = datetime('now') WHERE url = ?")
+      .bind(found ? 1 : 0, row.url)
+      .run();
+  }
+}
+
 function decodeHtmlEntities(s: string): string {
   return s
     .replace(/&#0?39;/g, "'")
@@ -787,6 +918,30 @@ function decodeHtmlEntities(s: string): string {
  * bounded (INDEX_BATCH_SIZE) to stay well under Cloudflare's free-plan cap
  * of 50 outbound subrequests per invocation - converges to a full index
  * over a handful of runs, then just keeps entries fresh. */
+const MONTH_ABBR: Record<string, string> = {
+  jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06",
+  jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12",
+};
+
+/** HYROX event marketing pages show the race's start date in a
+ * "event_date_1"-classed element, e.g. "23. Sep. 2026" - confirmed
+ * consistent across every event page checked (Milan, Rome, Rio). Returns
+ * ISO YYYY-MM-DD, or null if the page doesn't have a parseable date. */
+function parseEventDate(html: string): string | null {
+  const fieldMatch = html.match(/event_date_1[^>]*>\s*<span class="w-post-elm-value">([^<]+)</i);
+  if (!fieldMatch) return null;
+  const dateMatch = fieldMatch[1].match(/(\d{1,2})\.\s*([A-Za-z]+)\.?\s*(\d{4})/);
+  if (!dateMatch) return null;
+  const [, day, monthAbbr, year] = dateMatch;
+  const month = MONTH_ABBR[monthAbbr.slice(0, 3).toLowerCase()];
+  if (!month) return null;
+  return `${year}-${month}-${day.padStart(2, "0")}`;
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 async function indexEvents(env: Env): Promise<number> {
   let sitemapXml: string;
   try {
@@ -816,11 +971,12 @@ async function indexEvents(env: Env): Promise<number> {
       if (!m) continue;
       const title = decodeHtmlEntities(m[1]).replace(/\s*\|\s*HYROX\s*$/i, "").trim();
       if (!title) continue;
+      const eventDate = parseEventDate(html);
       await env.DB.prepare(
-        `INSERT INTO event_directory (url, title, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(url) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at`
+        `INSERT INTO event_directory (url, title, event_date, updated_at) VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT(url) DO UPDATE SET title = excluded.title, event_date = excluded.event_date, updated_at = excluded.updated_at`
       )
-        .bind(url, title)
+        .bind(url, title, eventDate)
         .run();
       indexed++;
     } catch (e) {
@@ -843,6 +999,21 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
   return jsonResponse({ results: results || [] });
 }
 
+/** Full browsable list for the homepage dropdown: every not-yet-passed
+ * event, sorted by race date, with the cached on-sale status kept fresh by
+ * refreshEventDirectorySaleStatus(). Undated entries (date not parsed yet)
+ * sort last rather than being hidden, since they're still real events. */
+async function handleListEvents(env: Env): Promise<Response> {
+  const { results } = await env.DB.prepare(
+    `SELECT url, title, event_date, on_sale FROM event_directory
+     WHERE event_date IS NULL OR event_date >= ?
+     ORDER BY event_date IS NULL, event_date, title`
+  )
+    .bind(todayIso())
+    .all<any>();
+  return jsonResponse({ results: results || [] });
+}
+
 /** Manual trigger for the indexing job (same bearer-secret pattern as
  * /notify) - lets a batch be run on demand instead of waiting for the daily
  * schedule, e.g. to bring a fresh event_directory up to speed quickly. */
@@ -853,6 +1024,17 @@ async function handleReindex(req: Request, env: Env): Promise<Response> {
   }
   const indexed = await indexEvents(env);
   return jsonResponse({ indexed });
+}
+
+/** Manual trigger for refreshEventDirectorySaleStatus, same pattern as
+ * /admin/reindex - useful for testing without waiting on the real cron. */
+async function handleRefreshSaleStatus(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  await refreshEventDirectorySaleStatus(env);
+  return jsonResponse({ ok: true });
 }
 
 export default {
@@ -872,7 +1054,9 @@ export default {
       if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
       if (url.pathname === "/search-events" && req.method === "GET") return await handleSearchEvents(req, env);
+      if (url.pathname === "/events" && req.method === "GET") return await handleListEvents(env);
       if (url.pathname === "/admin/reindex" && req.method === "POST") return await handleReindex(req, env);
+      if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
       console.error(e);
@@ -886,6 +1070,7 @@ export default {
     if (event.cron === "*/2 * * * *") {
       ctx.waitUntil(checkCommunityTickets(env));
       ctx.waitUntil(checkSaleWatches(env));
+      ctx.waitUntil(refreshEventDirectorySaleStatus(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }
