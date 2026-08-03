@@ -9,7 +9,6 @@ database_name = "roxracealerts-db"
 database_id = "8b3ea91c-590a-4bb7-9ebd-24f732c85afb"
 
 [vars]
-CONFIG_URL = "https://raw.githubusercontent.com/fbiviano/hyrox-ticket-alert/master/config.json"
 SEND_FROM = "RoxRaceAlerts <alerts@alerts.roxracealerts.com>"
 SITE_URL = "https://roxracealerts.com"
 

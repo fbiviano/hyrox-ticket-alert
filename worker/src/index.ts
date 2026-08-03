@@ -4,7 +4,6 @@ export interface Env {
   DB: D1Database;
   RESEND_API_KEY: string;
   WEBHOOK_SECRET: string;
-  CONFIG_URL: string;
   SEND_FROM: string;
   SITE_URL: string;
 }
@@ -13,11 +12,8 @@ interface TrackedTicket {
   event_name: string;
   ticket_name: string;
   shop_url: string;
-  // Present only for tickets resolved via /resolve (the public "paste any
-  // URL" flow) - curated tickets from config.json don't need these, since
-  // that list is checked by the existing Python pipeline, not by us.
-  event_id?: string;
-  status?: "available" | "sold_out";
+  event_id: string;
+  status: "available" | "sold_out";
 }
 
 function escapeHtml(s: string): string {
@@ -43,23 +39,6 @@ function decodeTicket(s: string): TrackedTicket | null {
   } catch {
     return null;
   }
-}
-
-async function fetchTrackedTickets(env: Env): Promise<TrackedTicket[]> {
-  const resp = await fetch(env.CONFIG_URL, { cf: { cacheTtl: 60 } as any });
-  if (!resp.ok) return [];
-  const config = await resp.json<any>();
-  const tickets: TrackedTicket[] = [];
-  for (const ev of config.events || []) {
-    for (const name of Object.keys(ev.watched_tickets || {})) {
-      tickets.push({
-        event_name: ev.event_name,
-        ticket_name: name,
-        shop_url: ev.shop_url || ev.source_url,
-      });
-    }
-  }
-  return tickets;
 }
 
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
@@ -89,14 +68,15 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
 
   let sent = 0;
   for (const row of results || []) {
+    const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
     const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
     try {
       await sendEmail(
         env,
         row.email,
         `Ticket available: ${ticketName}`,
-        `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${unsubLink}">Unsubscribe</a></small></p>`,
-        `${eventName}\n${ticketName} is now available.\n${link}\n\nUnsubscribe: ${unsubLink}`
+        `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
+        `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
       );
       sent++;
     } catch (e) {
@@ -128,6 +108,11 @@ a{color:#111}
 .consent{font-size:0.85rem;color:#555;margin-top:14px}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
+.ticket-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #eee}
+.ticket-row:last-child{border-bottom:0}
+.ticket-row form{margin:0}
+.ticket-row button{margin:0;background:#fff;color:#b00;border:1px solid #e2b3b3;padding:6px 12px;font-size:0.85rem}
+.ticket-row button:hover{background:#fee}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
@@ -136,26 +121,12 @@ a{color:#111}
   );
 }
 
-async function handleSignupPage(env: Env): Promise<Response> {
-  const tickets = await fetchTrackedTickets(env);
-  const options = tickets
-    .map(
-      (t) =>
-        `<label><input type="checkbox" name="ticket" value="${escapeHtml(encodeTicket(t))}"> ${escapeHtml(
-          t.event_name
-        )} &mdash; ${escapeHtml(t.ticket_name)}</label>`
-    )
-    .join("\n");
-
+async function handleSignupPage(): Promise<Response> {
   return page(
     "Get notified when sold-out HYROX tickets become available",
     `<div class="card">
-      <p>Free alerts the moment a sold-out ticket type becomes available again. Pick one or more, enter your email, confirm it, done.</p>
+      <p>Free alerts the moment a sold-out ticket type becomes available again. Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
       <form method="POST" action="/subscribe" id="signupForm">
-        <h2>Currently tracked</h2>
-        <div>${options || "<p>No tickets currently tracked.</p>"}</div>
-
-        <h2>Or find another HYROX event</h2>
         <div class="row">
           <input type="text" id="urlInput" placeholder="https://hyrox.com/event/...">
           <button type="button" id="findBtn">Find tickets</button>
@@ -165,7 +136,7 @@ async function handleSignupPage(env: Env): Promise<Response> {
         <label>Your email
           <input type="email" name="email" required placeholder="you@example.com">
         </label>
-        <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time via the link in every email. We don't share your email with anyone.</p>
+        <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
         <button type="submit">Subscribe</button>
       </form>
     </div>
@@ -204,7 +175,7 @@ async function handleSignupPage(env: Env): Promise<Response> {
   );
 }
 
-async function handleResolve(req: Request, env: Env): Promise<Response> {
+async function handleResolve(req: Request): Promise<Response> {
   const url = new URL(req.url).searchParams.get("url") || "";
   if (!isFetchableUrl(url)) {
     return new Response(JSON.stringify({ error: "Please enter a valid http(s) URL." }), {
@@ -270,17 +241,14 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     )
       .bind(subscriber.id, t.event_name, t.ticket_name, t.shop_url)
       .run();
-
-    // Community-resolved ticket (has event_id) - register it for the Worker's
-    // own Cron Trigger to keep checking, independent of the curated list.
-    if (t.event_id) {
-      await env.DB.prepare(
-        "INSERT OR IGNORE INTO community_tickets (event_id, event_name, ticket_name, shop_url, last_status) VALUES (?, ?, ?, ?, ?)"
-      )
-        .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out")
-        .run();
-    }
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO community_tickets (event_id, event_name, ticket_name, shop_url, last_status) VALUES (?, ?, ?, ?, ?)"
+    )
+      .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out")
+      .run();
   }
+
+  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${unsubToken}`;
 
   if (!subscriber.verified) {
     const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
@@ -301,7 +269,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
 
   return page(
     "Subscribed",
-    `<div class="card"><p>You're already verified — added the selected ticket(s) to your alerts.</p></div>`
+    `<div class="card"><p>You're already verified — added the selected ticket(s) to your alerts. <a href="${myAlertsLink}">Manage my alerts</a></p></div>`
   );
 }
 
@@ -312,9 +280,10 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
     return page("Invalid or expired link", `<div class="card"><p>This confirmation link is invalid or already used.</p></div>`);
   }
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
+  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${subscriber.unsubscribe_token}`;
   return page(
     "Confirmed",
-    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p></div>`
+    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="${myAlertsLink}">Manage my alerts</a></p></div>`
   );
 }
 
@@ -326,6 +295,61 @@ async function handleUnsubscribe(req: Request, env: Env): Promise<Response> {
   }
   await env.DB.prepare("DELETE FROM subscribers WHERE id = ?").bind(subscriber.id).run();
   return page("Unsubscribed", `<div class="card"><p>You've been unsubscribed from all alerts. Sorry to see you go.</p></div>`);
+}
+
+async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!subscriber) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+  const { results } = await env.DB.prepare(
+    "SELECT id, event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? ORDER BY event_name, ticket_name"
+  )
+    .bind(subscriber.id)
+    .all<any>();
+
+  const rows =
+    (results || [])
+      .map(
+        (r: any) => `<div class="ticket-row">
+      <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
+      <form method="POST" action="/remove-subscription">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <input type="hidden" name="subscription_id" value="${r.id}">
+        <button type="submit">Remove</button>
+      </form>
+    </div>`
+      )
+      .join("") || "<p>No active subscriptions.</p>";
+
+  return page(
+    "My alerts",
+    `<div class="card">
+      <p>Signed in as <b>${escapeHtml(subscriber.email)}</b></p>
+      <h2>Your watched tickets</h2>
+      ${rows}
+    </div>
+    <div class="card">
+      <p><a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a> &middot; <a href="/">Add another ticket</a></p>
+    </div>`
+  );
+}
+
+async function handleRemoveSubscription(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const subscriptionId = String(form.get("subscription_id") || "");
+
+  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!subscriber) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+  await env.DB.prepare("DELETE FROM subscriptions WHERE id = ? AND subscriber_id = ?")
+    .bind(subscriptionId, subscriber.id)
+    .run();
+
+  return Response.redirect(`${env.SITE_URL}/my-alerts?token=${token}`, 303);
 }
 
 async function handleNotify(req: Request, env: Env): Promise<Response> {
@@ -342,8 +366,8 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
 }
 
 /** Cron Trigger entry point: re-check every community-requested ticket and
- * fan out alerts on sold_out -> available, mirroring monitor.py's run_check()
- * for the curated list but fully independent of it. */
+ * fan out alerts on sold_out -> available. Every subscription now flows
+ * through here (there's no separate curated list on the public site). */
 async function checkCommunityTickets(env: Env): Promise<void> {
   const { results } = await env.DB.prepare("SELECT * FROM community_tickets").all<any>();
   for (const row of results || []) {
@@ -366,11 +390,13 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     try {
-      if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(env);
-      if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
+      if (url.pathname === "/" && req.method === "GET") return await handleSignupPage();
+      if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
+      if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
+      if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
