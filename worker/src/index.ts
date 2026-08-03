@@ -191,7 +191,39 @@ const RESOLVE_SCRIPT = `<script>
       var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
       var data = await resp.json();
       if (!resp.ok || !data.tickets || !data.tickets.length) {
-        out.innerHTML = '<p>' + esc(data.error || 'Could not find tickets for that page. Double check the URL.') + '</p>';
+        if (data.not_on_sale) {
+          // Not a native <form> here - this already lives inside the page's
+          // main <form>, and HTML forms can't nest. Submitted via fetch()
+          // instead, from the click handler wired up right below.
+          out.innerHTML = '<p><b>' + esc(data.event_title) + '</b>: tickets aren\\'t on sale yet.</p>' +
+            '<div class="row">' +
+            '<input type="email" id="saleEmail" placeholder="you@example.com">' +
+            '<button type="button" id="saleBtn">Notify me when on sale</button>' +
+            '</div>';
+          document.getElementById('saleBtn').addEventListener('click', async function() {
+            var emailInput = document.getElementById('saleEmail');
+            var email = emailInput.value.trim();
+            if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+              out.innerHTML = '<p>Please enter a valid email address.</p>';
+              return;
+            }
+            out.innerHTML = '<p>Submitting...</p>';
+            try {
+              var fd = new FormData();
+              fd.set('event_url', url);
+              fd.set('event_title', data.event_title);
+              fd.set('email', email);
+              var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
+              out.innerHTML = subResp.ok
+                ? '<p>Done! We\\'ll email you the moment tickets go on sale (check your email if you need to confirm your address first).</p>'
+                : '<p>Something went wrong. Try again.</p>';
+            } catch (e) {
+              out.innerHTML = '<p>Something went wrong. Try again.</p>';
+            }
+          });
+        } else {
+          out.innerHTML = '<p>' + esc(data.error || 'Could not find tickets for that page. Double check the URL.') + '</p>';
+        }
         return;
       }
       var html = '<p><b>' + esc(data.event_name) + '</b></p>';
@@ -337,20 +369,35 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   );
 }
 
-async function handleResolve(req: Request): Promise<Response> {
+/** All JSON API responses go through here - ticket/event status can change
+ * from one check to the next, so none of it may ever be cached at the edge
+ * (the same lesson as page()'s Cache-Control, applied to the JSON side). */
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json", "cache-control": "private, no-store" },
+  });
+}
+
+async function handleResolve(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url).searchParams.get("url") || "";
   if (!isFetchableUrl(url)) {
-    return new Response(JSON.stringify({ error: "Please enter a valid http(s) URL." }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+    return jsonResponse({ error: "Please enter a valid http(s) URL." }, 400);
   }
   const found = await resolveEvent(url);
   if (!found) {
-    return new Response(JSON.stringify({ error: "Could not find a HYROX/vivenu event on that page." }), {
-      status: 404,
-      headers: { "content-type": "application/json" },
-    });
+    // Page loaded fine, just no vivenu shop live yet - most likely tickets
+    // simply haven't gone on sale, not a broken URL. Look up a friendly
+    // title if this URL is a known event (from the sitemap-backed directory).
+    const known = await env.DB.prepare("SELECT title FROM event_directory WHERE url = ?").bind(url).first<any>();
+    return jsonResponse(
+      {
+        error: "Could not find an active vivenu shop on that page - tickets may not be on sale yet.",
+        not_on_sale: true,
+        event_title: known ? known.title : url,
+      },
+      404
+    );
   }
   const tickets = found.event.tickets.map((t) => {
     const status = ticketStatus(t);
@@ -363,18 +410,20 @@ async function handleResolve(req: Request): Promise<Response> {
     });
     return { name: t.name, status, encoded };
   });
-  return new Response(JSON.stringify({ event_name: found.event.name, tickets }), {
-    headers: { "content-type": "application/json" },
-  });
+  return jsonResponse({ event_name: found.event.name, tickets });
 }
 
-async function handleSubscribe(req: Request, env: Env): Promise<Response> {
-  const form = await req.formData();
-  const ticketValues = form.getAll("ticket").map(String);
-  if (ticketValues.length === 0) {
-    return page("Pick a ticket", `<div class="card"><p>Please select at least one ticket to watch. <a href="/">Go back</a></p></div>`);
-  }
+interface SubscriberLookup {
+  subscriber: any;
+  needsVerification: boolean;
+  verifyToken: string;
+}
 
+/** Shared by handleSubscribe and handleWatchSale: use the session if there
+ * is one, otherwise look up/create a subscriber by the submitted email,
+ * same verification-gating either way. Returns a Response directly if the
+ * email was missing/invalid, so callers can just `return` it. */
+async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Promise<SubscriberLookup | Response> {
   let subscriber = await getSessionSubscriber(req, env);
   let needsVerification = false;
   let verifyToken = "";
@@ -402,6 +451,37 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     }
   }
 
+  return { subscriber, needsVerification, verifyToken };
+}
+
+async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: string): Promise<Response> {
+  const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
+  await sendEmail(
+    env,
+    subscriber.email,
+    "Confirm your RoxRaceAlerts subscription",
+    `<p>Click to confirm you want ticket-availability alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
+    `Confirm your subscription: ${link}\n\nIf you didn't request this, ignore this email.`
+  );
+  return page(
+    "Check your email",
+    `<div class="card"><p>Almost done — we've sent a confirmation link to <b>${escapeHtml(
+      subscriber.email
+    )}</b>. Click it to start receiving alerts.</p></div>`
+  );
+}
+
+async function handleSubscribe(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const ticketValues = form.getAll("ticket").map(String);
+  if (ticketValues.length === 0) {
+    return page("Pick a ticket", `<div class="card"><p>Please select at least one ticket to watch. <a href="/">Go back</a></p></div>`);
+  }
+
+  const result = await getOrCreateSubscriber(req, env, form);
+  if (result instanceof Response) return result;
+  const { subscriber, needsVerification, verifyToken } = result;
+
   for (const val of ticketValues) {
     const t = decodeTicket(val);
     if (!t) continue;
@@ -418,25 +498,42 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
   }
 
   if (needsVerification) {
-    const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
-    await sendEmail(
-      env,
-      subscriber.email,
-      "Confirm your RoxRaceAlerts subscription",
-      `<p>Click to confirm you want ticket-availability alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
-      `Confirm your subscription: ${link}\n\nIf you didn't request this, ignore this email.`
-    );
-    return page(
-      "Check your email",
-      `<div class="card"><p>Almost done — we've sent a confirmation link to <b>${escapeHtml(
-        subscriber.email
-      )}</b>. Click it to start receiving alerts.</p></div>`
-    );
+    return sendVerificationEmail(env, subscriber, verifyToken);
   }
 
   return page("Subscribed", `<div class="card"><p>Added. <a href="/">Manage my alerts</a></p></div>`, {
     "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token),
   });
+}
+
+async function handleWatchSale(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const eventUrl = String(form.get("event_url") || "").trim();
+  const eventTitle = String(form.get("event_title") || eventUrl).trim();
+  if (!isFetchableUrl(eventUrl)) {
+    return page("Something went wrong", `<div class="card"><p>That didn't work - go back and try again.</p></div>`);
+  }
+
+  const result = await getOrCreateSubscriber(req, env, form);
+  if (result instanceof Response) return result;
+  const { subscriber, needsVerification, verifyToken } = result;
+
+  await env.DB.prepare("INSERT OR IGNORE INTO sale_watch (event_url, event_title) VALUES (?, ?)")
+    .bind(eventUrl, eventTitle)
+    .run();
+  await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
+    .bind(subscriber.id, eventUrl)
+    .run();
+
+  if (needsVerification) {
+    return sendVerificationEmail(env, subscriber, verifyToken);
+  }
+
+  return page(
+    "You're set",
+    `<div class="card"><p>We'll email you the moment <b>${escapeHtml(eventTitle)}</b> tickets go on sale. <a href="/">Manage my alerts</a></p></div>`,
+    { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
+  );
 }
 
 async function handleVerify(req: Request, env: Env): Promise<Response> {
@@ -551,7 +648,7 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
     return new Response("Missing event_name/ticket_name", { status: 400 });
   }
   const sent = await notifySubscribers(env, event_name, ticket_name, link);
-  return new Response(JSON.stringify({ sent }), { headers: { "content-type": "application/json" } });
+  return jsonResponse({ sent });
 }
 
 /** Cron Trigger entry point: re-check every community-requested ticket and
@@ -571,6 +668,45 @@ async function checkCommunityTickets(env: Env): Promise<void> {
     }
     if (newStatus !== row.last_status) {
       await env.DB.prepare("UPDATE community_tickets SET last_status = ? WHERE id = ?").bind(newStatus, row.id).run();
+    }
+  }
+}
+
+/** Checked alongside checkCommunityTickets in the same 2-minute cron -
+ * the number of not-yet-on-sale events being watched at once is expected to
+ * be small, well under the 50-subrequest cap (unlike the 116-event sitemap
+ * crawl, which needs its own batched daily job). */
+async function checkSaleWatches(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare("SELECT * FROM sale_watch WHERE resolved = 0").all<any>();
+  for (const row of results || []) {
+    const found = await resolveEvent(row.event_url);
+    if (!found) continue; // still not on sale
+
+    await env.DB.prepare("UPDATE sale_watch SET resolved = 1, updated_at = datetime('now') WHERE event_url = ?")
+      .bind(row.event_url)
+      .run();
+
+    const { results: watchers } = await env.DB.prepare(
+      `SELECT s.email, s.unsubscribe_token FROM subscribers s
+       JOIN sale_watchers w ON w.subscriber_id = s.id
+       WHERE s.verified = 1 AND w.event_url = ?`
+    )
+      .bind(row.event_url)
+      .all<any>();
+
+    for (const watcher of watchers || []) {
+      const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+      try {
+        await sendEmail(
+          env,
+          watcher.email,
+          `Tickets on sale now: ${row.event_title}`,
+          `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+          `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
+        );
+      } catch (e) {
+        console.error(`Failed to email ${watcher.email}:`, e);
+      }
     }
   }
 }
@@ -636,16 +772,14 @@ async function indexEvents(env: Env): Promise<number> {
 async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
   const q = (new URL(req.url).searchParams.get("q") || "").trim();
   if (q.length < 2) {
-    return new Response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } });
+    return jsonResponse({ results: [] });
   }
   const { results } = await env.DB.prepare(
     "SELECT url, title FROM event_directory WHERE title LIKE ? ORDER BY title LIMIT 8"
   )
     .bind(`%${q}%`)
     .all<any>();
-  return new Response(JSON.stringify({ results: results || [] }), {
-    headers: { "content-type": "application/json" },
-  });
+  return jsonResponse({ results: results || [] });
 }
 
 /** Manual trigger for the indexing job (same bearer-secret pattern as
@@ -657,7 +791,7 @@ async function handleReindex(req: Request, env: Env): Promise<Response> {
     return new Response("Unauthorized", { status: 401 });
   }
   const indexed = await indexEvents(env);
-  return new Response(JSON.stringify({ indexed }), { headers: { "content-type": "application/json" } });
+  return jsonResponse({ indexed });
 }
 
 export default {
@@ -665,9 +799,10 @@ export default {
     const url = new URL(req.url);
     try {
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
-      if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req);
+      if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
       if (url.pathname === "/login" && req.method === "POST") return await handleLogin(req, env);
+      if (url.pathname === "/watch-sale" && req.method === "POST") return await handleWatchSale(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
       if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
@@ -688,6 +823,7 @@ export default {
     // checks tickets, the infrequent one indexes the event directory.
     if (event.cron === "*/2 * * * *") {
       ctx.waitUntil(checkCommunityTickets(env));
+      ctx.waitUntil(checkSaleWatches(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }
