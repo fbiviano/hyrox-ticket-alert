@@ -18,3 +18,18 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_subscriptions_ticket ON subscriptions(event_name, ticket_name);
+
+-- Tickets anyone has resolved/subscribed to via the public "paste any URL"
+-- flow, separate from the curated config.json list. Checked by the Worker's
+-- own Cron Trigger (see scheduled() in src/index.ts), independent of the
+-- Python/GitHub Actions pipeline that checks the curated list.
+CREATE TABLE IF NOT EXISTS community_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL,
+  event_name TEXT NOT NULL,
+  ticket_name TEXT NOT NULL,
+  shop_url TEXT NOT NULL,
+  last_status TEXT NOT NULL DEFAULT 'sold_out',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(event_id, ticket_name)
+);

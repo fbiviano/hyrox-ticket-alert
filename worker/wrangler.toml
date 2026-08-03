@@ -17,6 +17,9 @@ SITE_URL = "https://roxracealerts.com"
 #   RESEND_API_KEY
 #   WEBHOOK_SECRET
 
+[triggers]
+crons = ["*/2 * * * *"]
+
 [[routes]]
 pattern = "roxracealerts.com/*"
 zone_name = "roxracealerts.com"

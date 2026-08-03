@@ -1,3 +1,5 @@
+import { resolveEvent, getEventData, ticketStatus, isFetchableUrl } from "./resolve";
+
 export interface Env {
   DB: D1Database;
   RESEND_API_KEY: string;
@@ -11,6 +13,11 @@ interface TrackedTicket {
   event_name: string;
   ticket_name: string;
   shop_url: string;
+  // Present only for tickets resolved via /resolve (the public "paste any
+  // URL" flow) - curated tickets from config.json don't need these, since
+  // that list is checked by the existing Python pipeline, not by us.
+  event_id?: string;
+  status?: "available" | "sold_out";
 }
 
 function escapeHtml(s: string): string {
@@ -70,6 +77,35 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
   }
 }
 
+/** Email every verified subscriber watching this exact (event_name, ticket_name). */
+async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+     JOIN subscriptions sub ON sub.subscriber_id = s.id
+     WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ?`
+  )
+    .bind(eventName, ticketName)
+    .all<any>();
+
+  let sent = 0;
+  for (const row of results || []) {
+    const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
+    try {
+      await sendEmail(
+        env,
+        row.email,
+        `Ticket available: ${ticketName}`,
+        `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${unsubLink}">Unsubscribe</a></small></p>`,
+        `${eventName}\n${ticketName} is now available.\n${link}\n\nUnsubscribe: ${unsubLink}`
+      );
+      sent++;
+    } catch (e) {
+      console.error(`Failed to email ${row.email}:`, e);
+    }
+  }
+  return sent;
+}
+
 function page(title: string, body: string): Response {
   return new Response(
     `<!doctype html>
@@ -78,14 +114,20 @@ function page(title: string, body: string): Response {
 <style>
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#1a1a1a;background:#fafafa}
 h1{font-size:1.5rem}
+h2{font-size:1.1rem;margin-top:0}
 .card{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:24px;margin-top:16px}
 label{display:block;margin:10px 0;font-size:0.95rem}
-input[type=email]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
+input[type=email],input[type=text]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
 button{background:#111;color:#fff;border:0;border-radius:6px;padding:12px 20px;font-size:1rem;cursor:pointer;margin-top:16px}
 button:hover{background:#333}
+.row{display:flex;gap:8px;align-items:flex-start}
+.row input{margin-top:0}
+.row button{margin-top:0;white-space:nowrap}
 small{color:#666}
 a{color:#111}
 .consent{font-size:0.85rem;color:#555;margin-top:14px}
+#resolveResult{margin-top:12px}
+#resolveResult p{color:#666;font-size:0.9rem}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
@@ -109,16 +151,88 @@ async function handleSignupPage(env: Env): Promise<Response> {
     "Get notified when sold-out HYROX tickets become available",
     `<div class="card">
       <p>Free alerts the moment a sold-out ticket type becomes available again. Pick one or more, enter your email, confirm it, done.</p>
-      <form method="POST" action="/subscribe">
+      <form method="POST" action="/subscribe" id="signupForm">
+        <h2>Currently tracked</h2>
         <div>${options || "<p>No tickets currently tracked.</p>"}</div>
+
+        <h2>Or find another HYROX event</h2>
+        <div class="row">
+          <input type="text" id="urlInput" placeholder="https://hyrox.com/event/...">
+          <button type="button" id="findBtn">Find tickets</button>
+        </div>
+        <div id="resolveResult"></div>
+
         <label>Your email
           <input type="email" name="email" required placeholder="you@example.com">
         </label>
         <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time via the link in every email. We don't share your email with anyone.</p>
         <button type="submit">Subscribe</button>
       </form>
-    </div>`
+    </div>
+    <script>
+    (function() {
+      function esc(s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+      }
+      document.getElementById('findBtn').addEventListener('click', async function() {
+        var input = document.getElementById('urlInput');
+        var out = document.getElementById('resolveResult');
+        var url = input.value.trim();
+        if (!url) return;
+        out.innerHTML = '<p>Looking...</p>';
+        try {
+          var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
+          var data = await resp.json();
+          if (!resp.ok || !data.tickets || !data.tickets.length) {
+            out.innerHTML = '<p>' + esc(data.error || 'Could not find tickets for that page. Double check the URL.') + '</p>';
+            return;
+          }
+          var html = '<p><b>' + esc(data.event_name) + '</b></p>';
+          for (var i = 0; i < data.tickets.length; i++) {
+            var t = data.tickets[i];
+            html += '<label><input type="checkbox" name="ticket" value="' + esc(t.encoded) + '"> [' + esc(t.status.toUpperCase()) + '] ' + esc(t.name) + '</label>';
+          }
+          out.innerHTML = html;
+        } catch (e) {
+          out.innerHTML = '<p>Something went wrong. Try again.</p>';
+        }
+      });
+    })();
+    </script>`
   );
+}
+
+async function handleResolve(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url).searchParams.get("url") || "";
+  if (!isFetchableUrl(url)) {
+    return new Response(JSON.stringify({ error: "Please enter a valid http(s) URL." }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const found = await resolveEvent(url);
+  if (!found) {
+    return new Response(JSON.stringify({ error: "Could not find a HYROX/vivenu event on that page." }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const tickets = found.event.tickets.map((t) => {
+    const status = ticketStatus(t);
+    const encoded = encodeTicket({
+      event_name: found.event.name,
+      ticket_name: t.name,
+      shop_url: found.shopUrl,
+      event_id: found.event._id,
+      status,
+    });
+    return { name: t.name, status, encoded };
+  });
+  return new Response(JSON.stringify({ event_name: found.event.name, tickets }), {
+    headers: { "content-type": "application/json" },
+  });
 }
 
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
@@ -156,6 +270,16 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     )
       .bind(subscriber.id, t.event_name, t.ticket_name, t.shop_url)
       .run();
+
+    // Community-resolved ticket (has event_id) - register it for the Worker's
+    // own Cron Trigger to keep checking, independent of the curated list.
+    if (t.event_id) {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO community_tickets (event_id, event_name, ticket_name, shop_url, last_status) VALUES (?, ?, ?, ?, ?)"
+      )
+        .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out")
+        .run();
+    }
   }
 
   if (!subscriber.verified) {
@@ -213,33 +337,29 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
   if (!event_name || !ticket_name) {
     return new Response("Missing event_name/ticket_name", { status: 400 });
   }
+  const sent = await notifySubscribers(env, event_name, ticket_name, link);
+  return new Response(JSON.stringify({ sent }), { headers: { "content-type": "application/json" } });
+}
 
-  const { results } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token FROM subscribers s
-     JOIN subscriptions sub ON sub.subscriber_id = s.id
-     WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ?`
-  )
-    .bind(event_name, ticket_name)
-    .all<any>();
-
-  let sent = 0;
+/** Cron Trigger entry point: re-check every community-requested ticket and
+ * fan out alerts on sold_out -> available, mirroring monitor.py's run_check()
+ * for the curated list but fully independent of it. */
+async function checkCommunityTickets(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare("SELECT * FROM community_tickets").all<any>();
   for (const row of results || []) {
-    const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
-    try {
-      await sendEmail(
-        env,
-        row.email,
-        `Ticket available: ${ticket_name}`,
-        `<p><b>${escapeHtml(event_name)}</b><br>${escapeHtml(ticket_name)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${unsubLink}">Unsubscribe</a></small></p>`,
-        `${event_name}\n${ticket_name} is now available.\n${link}\n\nUnsubscribe: ${unsubLink}`
-      );
-      sent++;
-    } catch (e) {
-      console.error(`Failed to email ${row.email}:`, e);
+    const event = await getEventData(row.event_id, row.shop_url);
+    if (!event) continue;
+    const ticket = event.tickets.find((t) => t.name === row.ticket_name);
+    if (!ticket) continue;
+    const newStatus = ticketStatus(ticket);
+
+    if (row.last_status === "sold_out" && newStatus === "available") {
+      await notifySubscribers(env, row.event_name, row.ticket_name, row.shop_url);
+    }
+    if (newStatus !== row.last_status) {
+      await env.DB.prepare("UPDATE community_tickets SET last_status = ? WHERE id = ?").bind(newStatus, row.id).run();
     }
   }
-
-  return new Response(JSON.stringify({ sent }), { headers: { "content-type": "application/json" } });
 }
 
 export default {
@@ -247,6 +367,7 @@ export default {
     const url = new URL(req.url);
     try {
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(env);
+      if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
@@ -256,5 +377,9 @@ export default {
       console.error(e);
       return new Response(`Internal error: ${e.message}`, { status: 500 });
     }
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(checkCommunityTickets(env));
   },
 };
