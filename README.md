@@ -271,29 +271,30 @@ browser's Network tab and hand it to `add` directly:
 
 ## 7. Public signup site — roxracealerts.com
 
-Besides your own personal Telegram/email alerts, anyone can subscribe to alerts
-for the tickets currently being tracked, at **[roxracealerts.com](https://roxracealerts.com)**.
-This is a separate, self-contained system:
+Besides your own personal Telegram/email alerts, anyone can subscribe to
+alerts for any HYROX ticket at **[roxracealerts.com](https://roxracealerts.com)**.
+This is a separate, self-contained system with its own database - it doesn't
+read `config.json` or otherwise know about anything you're personally
+tracking, and your own alerts (Telegram/email via `monitor.py`) work exactly
+as before, untouched by any of this.
 
-- **The signup page** dynamically lists whatever's currently in `config.json`
-  in this repo — no manual syncing needed. Add a ticket with `monitor.py add`
-  and push, and it shows up there automatically.
-- **Real email verification**: visitors enter their email, get sent a
-  confirmation link, and only start receiving alerts once they click it.
-- **How curated-list alerts reach subscribers**: when `monitor.py`'s `check`
-  detects a sold_out → available transition, it calls a webhook
-  (`notify_subscribers_webhook` in `monitor.py`) which tells the site to email
-  everyone subscribed to that specific ticket — on top of your own Telegram/
-  email alert, unaffected either way.
-- **Anyone can also track a ticket you're not personally watching**: the
-  signup page has a "paste any HYROX event URL" field, backed by
-  `GET /resolve` (`worker/src/resolve.ts` - a TypeScript port of
-  `monitor.py`'s resolution logic). Whatever they subscribe to from there is
-  stored in D1's `community_tickets` table and re-checked by the Worker's
-  *own* Cloudflare Cron Trigger (`scheduled()` in `worker/src/index.ts`,
-  every 2 minutes) - a second, fully independent checking pipeline that
-  doesn't touch `config.json` or this repo at all.
-- **Unsubscribe**: every alert email includes a working unsubscribe link.
+- **One uniform flow for everyone, including you**: paste any HYROX event
+  URL, see the real live ticket list (`GET /resolve`, backed by
+  `worker/src/resolve.ts` - a TypeScript port of `monitor.py`'s resolution
+  logic), pick the ticket(s) you want, enter your email. Nothing is
+  pre-shown or shared between visitors - there's no "currently tracked" list
+  to browse, by design (a visitor never sees what anyone else, including the
+  site owner, is watching).
+- **Real email verification**: a confirmation link is sent before any alerts
+  start.
+- **"My alerts" self-service page** (`GET /my-alerts?token=...`, linked from
+  every confirmation/verify/alert email): lets a subscriber see and remove
+  individual subscriptions, not just an all-or-nothing unsubscribe.
+- **Checking pipeline**: every subscribed ticket lands in D1's
+  `community_tickets` table and is re-checked by the Worker's own Cloudflare
+  Cron Trigger (`scheduled()` in `worker/src/index.ts`, every 2 minutes) -
+  fully independent of, and more reliable than, the GitHub Actions schedule
+  used for your own personal alerts.
 - **Rate limiting**: a Cloudflare dashboard rate-limiting rule on `/subscribe`
   (Security → WAF → Rate limiting rules on the roxracealerts.com zone) guards
   against abuse - the free plan allows one such rule, used there since that's
@@ -303,8 +304,8 @@ This is a separate, self-contained system:
 
 - **Cloudflare Workers** (free tier) — hosts the site and its small API
   (`worker/src/index.ts`): the signup page, `/resolve`, `/subscribe`,
-  `/verify`, `/unsubscribe`, the internal `/notify` webhook, and the
-  `scheduled()` Cron Trigger handler for community-tracked tickets.
+  `/verify`, `/unsubscribe`, `/my-alerts`, `/remove-subscription`, the
+  internal `/notify` webhook, and the `scheduled()` Cron Trigger handler.
 - **Cloudflare D1** (free tier, SQLite) — stores subscribers, their chosen
   tickets, and community-tracked tickets (`worker/schema.sql`).
 - **Resend** (free tier) — sends the verification and alert emails, from
