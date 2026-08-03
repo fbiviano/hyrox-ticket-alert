@@ -150,7 +150,16 @@ a{color:#111}
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
 </body></html>`,
-    { headers: { "content-type": "text/html; charset=utf-8", ...extraHeaders } }
+    {
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        // Every page can vary by session cookie or contain another
+        // subscriber's email/tickets (e.g. after /verify, /my-alerts) -
+        // must never be cached at the edge or shared across visitors.
+        "cache-control": "private, no-store",
+        ...extraHeaders,
+      },
+    }
   );
 }
 
@@ -251,6 +260,22 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         <button type="submit">Subscribe</button>
       </form>
     </div>
+    <div class="card">
+      <p>Already subscribed? <a href="#" id="showLogin">Email me a sign-in link</a></p>
+      <form method="POST" action="/login" id="loginForm" style="display:none">
+        <div class="row">
+          <input type="email" name="email" required placeholder="you@example.com">
+          <button type="submit">Send link</button>
+        </div>
+      </form>
+    </div>
+    <script>
+    document.getElementById('showLogin').addEventListener('click', function(e) {
+      e.preventDefault();
+      this.style.display = 'none';
+      document.getElementById('loginForm').style.display = 'block';
+    });
+    </script>
     ${RESOLVE_SCRIPT}`
   );
 }
@@ -385,6 +410,33 @@ async function handleUnsubscribe(req: Request, env: Env): Promise<Response> {
   );
 }
 
+async function handleLogin(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const email = String(form.get("email") || "").trim().toLowerCase();
+
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ? AND verified = 1")
+      .bind(email)
+      .first<any>();
+    if (subscriber) {
+      const link = `${env.SITE_URL}/my-alerts?token=${subscriber.unsubscribe_token}`;
+      await sendEmail(
+        env,
+        email,
+        "Your RoxRaceAlerts sign-in link",
+        `<p>Click to sign in and manage your alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
+        `Sign in: ${link}\n\nIf you didn't request this, ignore this email.`
+      );
+    }
+  }
+
+  // Same response whether or not the email is registered - don't leak who's subscribed.
+  return page(
+    "Check your email",
+    `<div class="card"><p>If that email is subscribed, we've sent a sign-in link to it.</p></div>`
+  );
+}
+
 async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   const token = new URL(req.url).searchParams.get("token") || "";
   const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
@@ -473,6 +525,7 @@ export default {
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
+      if (url.pathname === "/login" && req.method === "POST") return await handleLogin(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
       if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
