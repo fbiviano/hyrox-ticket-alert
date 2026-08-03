@@ -214,9 +214,16 @@ const RESOLVE_SCRIPT = `<script>
               fd.set('event_title', data.event_title);
               fd.set('email', email);
               var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
-              out.innerHTML = subResp.ok
-                ? '<p>Done! We\\'ll email you the moment tickets go on sale (check your email if you need to confirm your address first).</p>'
-                : '<p>Something went wrong. Try again.</p>';
+              if (subResp.redirected) {
+                // Already-verified subscriber - server set the session
+                // cookie and redirected home; follow it for real so the
+                // page actually shows "Signed in as ...".
+                window.location.href = subResp.url;
+              } else if (subResp.ok) {
+                out.innerHTML = '<p>Almost done - we\\'ve sent a confirmation link to your email. Click it to start receiving alerts.</p>';
+              } else {
+                out.innerHTML = '<p>Something went wrong. Try again.</p>';
+              }
             } catch (e) {
               out.innerHTML = '<p>Something went wrong. Try again.</p>';
             }
@@ -471,6 +478,17 @@ async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: str
   );
 }
 
+/** Redirect to the homepage with the session cookie set - used whenever an
+ * action completes for an already-verified subscriber, so the browser lands
+ * on the personalized "Signed in as ..." view instead of a static
+ * confirmation page that doesn't visibly reflect being logged in. */
+function redirectHome(env: Env, unsubscribeToken: string): Response {
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(unsubscribeToken) },
+  });
+}
+
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const ticketValues = form.getAll("ticket").map(String);
@@ -501,9 +519,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     return sendVerificationEmail(env, subscriber, verifyToken);
   }
 
-  return page("Subscribed", `<div class="card"><p>Added. <a href="/">Manage my alerts</a></p></div>`, {
-    "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token),
-  });
+  return redirectHome(env, subscriber.unsubscribe_token);
 }
 
 async function handleWatchSale(req: Request, env: Env): Promise<Response> {
@@ -529,11 +545,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
     return sendVerificationEmail(env, subscriber, verifyToken);
   }
 
-  return page(
-    "You're set",
-    `<div class="card"><p>We'll email you the moment <b>${escapeHtml(eventTitle)}</b> tickets go on sale. <a href="/">Manage my alerts</a></p></div>`,
-    { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
-  );
+  return redirectHome(env, subscriber.unsubscribe_token);
 }
 
 async function handleVerify(req: Request, env: Env): Promise<Response> {
