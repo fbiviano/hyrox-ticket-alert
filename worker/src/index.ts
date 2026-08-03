@@ -913,7 +913,12 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     .all<any>();
 
   for (const row of results || []) {
-    const found = await resolveEvent(row.url);
+    // resolveEvent() failing can mean "genuinely no shop live yet" or just a
+    // transient fetch hiccup against hyrox.com/vivenu - retry once before
+    // concluding "not on sale", since a false negative here persists until
+    // this event's next rotation (~16 min) rather than self-correcting.
+    let found = await resolveEvent(row.url);
+    if (!found) found = await resolveEvent(row.url);
     await env.DB.prepare("UPDATE event_directory SET on_sale = ?, last_sale_check = datetime('now') WHERE url = ?")
       .bind(found ? 1 : 0, row.url)
       .run();
