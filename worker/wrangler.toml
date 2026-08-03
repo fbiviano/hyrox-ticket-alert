@@ -1,11 +1,12 @@
 name = "roxracealerts"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
+account_id = "57868dd73e0674a43c6ff3768d120883"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "roxracealerts-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "8b3ea91c-590a-4bb7-9ebd-24f732c85afb"
 
 [vars]
 CONFIG_URL = "https://raw.githubusercontent.com/fbiviano/hyrox-ticket-alert/master/config.json"
