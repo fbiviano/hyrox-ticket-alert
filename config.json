@@ -19,6 +19,17 @@
           "last_status": "sold_out"
         }
       }
+    },
+    {
+      "source_url": "https://hyrox.com/event/hyrox-rio-de-janeiro/",
+      "shop_url": "https://brazil.hyrox.com/event/hyrox-rio-de-janeiro-season-26-27-68hgcf?useEmbed=true",
+      "event_id": "6a180651bcf848efb34eaf78",
+      "event_name": "HYROX Rio de Janeiro | Season 26/27",
+      "watched_tickets": {
+        "HYROX PRO MEN | Saturday": {
+          "last_status": "sold_out"
+        }
+      }
     }
   ]
 }
