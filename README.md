@@ -278,13 +278,21 @@ read `config.json` or otherwise know about anything you're personally
 tracking, and your own alerts (Telegram/email via `monitor.py`) work exactly
 as before, untouched by any of this.
 
-- **One uniform flow for everyone, including you**: paste any HYROX event
-  URL, see the real live ticket list (`GET /resolve`, backed by
-  `worker/src/resolve.ts` - a TypeScript port of `monitor.py`'s resolution
-  logic), pick the ticket(s) you want, enter your email. Nothing is
-  pre-shown or shared between visitors - there's no "currently tracked" list
-  to browse, by design (a visitor never sees what anyone else, including the
-  site owner, is watching).
+- **One uniform flow for everyone, including you**: type a city name (or
+  paste a full HYROX event URL directly) to find the event, see the real
+  live ticket list (`GET /resolve`, backed by `worker/src/resolve.ts` - a
+  TypeScript port of `monitor.py`'s resolution logic), pick the ticket(s)
+  you want, enter your email. Nothing is pre-shown or shared between
+  visitors - there's no "currently tracked" list to browse, by design (a
+  visitor never sees what anyone else, including the site owner, is
+  watching).
+- **City-name search**: `GET /search-events` matches against
+  `event_directory`, a cache of all ~116 current HYROX event pages' titles,
+  built by crawling `hyrox.com/event-sitemap.xml` in small batches via a
+  separate daily Cron Trigger (`indexEvents()` in `worker/src/index.ts`) -
+  kept small per run to stay under Cloudflare's free-plan cap of 50 outbound
+  requests per invocation. `POST /admin/reindex` (same bearer-secret pattern
+  as `/notify`) forces a batch on demand instead of waiting for the schedule.
 - **Real email verification**: a confirmation link is sent before any alerts
   start.
 - **"My alerts" self-service page** (`GET /my-alerts?token=...`, linked from
