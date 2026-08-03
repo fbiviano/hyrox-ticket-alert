@@ -1,4 +1,8 @@
-import { resolveEvent, getEventData, ticketStatus, isFetchableUrl } from "./resolve";
+import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS } from "./resolve";
+
+const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
+const INDEX_BATCH_SIZE = 30;
+const INDEX_STALE_DAYS = 7;
 
 export interface Env {
   DB: D1Database;
@@ -141,6 +145,10 @@ a{color:#111}
 .consent{font-size:0.85rem;color:#555;margin-top:14px}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
+.urlWrap{position:relative;flex:1}
+.suggestions{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #ccc;border-top:0;border-radius:0 0 6px 6px;max-height:220px;overflow-y:auto;z-index:10}
+.suggestions div{padding:8px 10px;cursor:pointer;font-size:0.9rem}
+.suggestions div:hover{background:#f0f0f0}
 .ticket-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #eee}
 .ticket-row:last-child{border-bottom:0}
 .ticket-row form{margin:0}
@@ -170,11 +178,14 @@ const RESOLVE_SCRIPT = `<script>
     d.textContent = s;
     return d.innerHTML;
   }
-  document.getElementById('findBtn').addEventListener('click', async function() {
-    var input = document.getElementById('urlInput');
-    var out = document.getElementById('resolveResult');
-    var url = input.value.trim();
+  var input = document.getElementById('urlInput');
+  var out = document.getElementById('resolveResult');
+  var suggestions = document.getElementById('suggestions');
+
+  async function doFind(url) {
+    url = url.trim();
     if (!url) return;
+    suggestions.innerHTML = '';
     out.innerHTML = '<p>Looking...</p>';
     try {
       var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
@@ -192,6 +203,49 @@ const RESOLVE_SCRIPT = `<script>
     } catch (e) {
       out.innerHTML = '<p>Something went wrong. Try again.</p>';
     }
+  }
+
+  document.getElementById('findBtn').addEventListener('click', function() {
+    doFind(input.value);
+  });
+
+  var debounceTimer;
+  input.addEventListener('input', function() {
+    clearTimeout(debounceTimer);
+    var q = input.value.trim();
+    if (q.length < 2 || /^https?:\\/\\//i.test(q)) {
+      suggestions.innerHTML = '';
+      return;
+    }
+    debounceTimer = setTimeout(async function() {
+      try {
+        var resp = await fetch('/search-events?q=' + encodeURIComponent(q));
+        var data = await resp.json();
+        if (!data.results || !data.results.length) {
+          suggestions.innerHTML = '';
+          return;
+        }
+        var html = '';
+        for (var i = 0; i < data.results.length; i++) {
+          html += '<div data-url="' + esc(data.results[i].url) + '">' + esc(data.results[i].title) + '</div>';
+        }
+        suggestions.innerHTML = html;
+      } catch (e) {
+        suggestions.innerHTML = '';
+      }
+    }, 250);
+  });
+
+  suggestions.addEventListener('click', function(e) {
+    var url = e.target.getAttribute('data-url');
+    if (!url) return;
+    input.value = url;
+    suggestions.innerHTML = '';
+    doFind(url);
+  });
+
+  document.addEventListener('click', function(e) {
+    if (e.target !== input) suggestions.innerHTML = '';
   });
 })();
 </script>`;
@@ -222,7 +276,10 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
 
   const findForm = `<div class="row">
-      <input type="text" id="urlInput" placeholder="https://hyrox.com/event/...">
+      <div class="urlWrap">
+        <input type="text" id="urlInput" placeholder="Type a city (e.g. Geneva) or paste an event URL" autocomplete="off">
+        <div id="suggestions" class="suggestions"></div>
+      </div>
       <button type="button" id="findBtn">Find tickets</button>
     </div>
     <div id="resolveResult"></div>`;
@@ -518,6 +575,91 @@ async function checkCommunityTickets(env: Env): Promise<void> {
   }
 }
 
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#0?39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?34;/g, '"')
+    .trim();
+}
+
+/** Batched indexing job: crawl a slice of hyrox.com's event sitemap each run
+ * (missing or >7-days-stale entries first) and cache each page's title, so
+ * visitors can search by city name instead of pasting a URL. Deliberately
+ * bounded (INDEX_BATCH_SIZE) to stay well under Cloudflare's free-plan cap
+ * of 50 outbound subrequests per invocation - converges to a full index
+ * over a handful of runs, then just keeps entries fresh. */
+async function indexEvents(env: Env): Promise<number> {
+  let sitemapXml: string;
+  try {
+    const resp = await fetch(SITEMAP_URL, { headers: HEADERS });
+    if (!resp.ok) return 0;
+    sitemapXml = await resp.text();
+  } catch {
+    return 0;
+  }
+
+  const urls = Array.from(sitemapXml.matchAll(/<loc>([^<]+)<\/loc>/g)).map((m) => m[1].trim());
+  if (urls.length === 0) return 0;
+
+  const staleCutoff = new Date(Date.now() - INDEX_STALE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const { results: existing } = await env.DB.prepare("SELECT url, updated_at FROM event_directory").all<any>();
+  const existingMap = new Map((existing || []).map((r: any) => [r.url, r.updated_at]));
+
+  const toIndex = urls.filter((u) => !existingMap.has(u) || (existingMap.get(u) as string) < staleCutoff).slice(0, INDEX_BATCH_SIZE);
+
+  let indexed = 0;
+  for (const url of toIndex) {
+    try {
+      const resp = await fetch(url, { headers: HEADERS });
+      if (!resp.ok) continue;
+      const html = await resp.text();
+      const m = html.match(/<title>([^<]+)<\/title>/i);
+      if (!m) continue;
+      const title = decodeHtmlEntities(m[1]).replace(/\s*\|\s*HYROX\s*$/i, "").trim();
+      if (!title) continue;
+      await env.DB.prepare(
+        `INSERT INTO event_directory (url, title, updated_at) VALUES (?, ?, datetime('now'))
+         ON CONFLICT(url) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at`
+      )
+        .bind(url, title)
+        .run();
+      indexed++;
+    } catch (e) {
+      console.error(`Failed to index ${url}:`, e);
+    }
+  }
+  return indexed;
+}
+
+async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
+  const q = (new URL(req.url).searchParams.get("q") || "").trim();
+  if (q.length < 2) {
+    return new Response(JSON.stringify({ results: [] }), { headers: { "content-type": "application/json" } });
+  }
+  const { results } = await env.DB.prepare(
+    "SELECT url, title FROM event_directory WHERE title LIKE ? ORDER BY title LIMIT 8"
+  )
+    .bind(`%${q}%`)
+    .all<any>();
+  return new Response(JSON.stringify({ results: results || [] }), {
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** Manual trigger for the indexing job (same bearer-secret pattern as
+ * /notify) - lets a batch be run on demand instead of waiting for the daily
+ * schedule, e.g. to bring a fresh event_directory up to speed quickly. */
+async function handleReindex(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  const indexed = await indexEvents(env);
+  return new Response(JSON.stringify({ indexed }), { headers: { "content-type": "application/json" } });
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -532,6 +674,8 @@ export default {
       if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
       if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
+      if (url.pathname === "/search-events" && req.method === "GET") return await handleSearchEvents(req, env);
+      if (url.pathname === "/admin/reindex" && req.method === "POST") return await handleReindex(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
       console.error(e);
@@ -539,7 +683,13 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(checkCommunityTickets(env));
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Two schedules share this Worker (see wrangler.toml): the frequent one
+    // checks tickets, the infrequent one indexes the event directory.
+    if (event.cron === "*/2 * * * *") {
+      ctx.waitUntil(checkCommunityTickets(env));
+    } else {
+      ctx.waitUntil(indexEvents(env).then(() => undefined));
+    }
   },
 };

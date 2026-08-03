@@ -33,3 +33,15 @@ CREATE TABLE IF NOT EXISTS community_tickets (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(event_id, ticket_name)
 );
+
+-- Directory of known HYROX event pages (city/event name -> URL), built by
+-- periodically crawling https://hyrox.com/event-sitemap.xml in small
+-- batches (see the indexing job in scheduled(), src/index.ts) so people can
+-- search by city name instead of pasting an exact URL.
+CREATE TABLE IF NOT EXISTS event_directory (
+  url TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_directory_title ON event_directory(title);

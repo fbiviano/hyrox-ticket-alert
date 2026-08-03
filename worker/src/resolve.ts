@@ -7,7 +7,7 @@
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
-const HEADERS = { "User-Agent": USER_AGENT };
+export const HEADERS = { "User-Agent": USER_AGENT };
 const LINK_KEYWORDS = ["ticket", "shop", "buy", "vivenu", "useembed", "checkout", "register", "event"];
 
 export interface ResolvedTicket {

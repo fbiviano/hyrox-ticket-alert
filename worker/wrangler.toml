@@ -17,7 +17,9 @@ SITE_URL = "https://roxracealerts.com"
 #   WEBHOOK_SECRET
 
 [triggers]
-crons = ["*/2 * * * *"]
+# */2 * * * *  - re-checks watched tickets (checkCommunityTickets)
+# 0 3 * * *    - daily event-directory indexing batch (indexEvents)
+crons = ["*/2 * * * *", "0 3 * * *"]
 
 [[routes]]
 pattern = "roxracealerts.com/*"
