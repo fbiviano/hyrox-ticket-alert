@@ -290,6 +290,11 @@ as before, untouched by any of this.
 - **"My alerts" self-service page** (`GET /my-alerts?token=...`, linked from
   every confirmation/verify/alert email): lets a subscriber see and remove
   individual subscriptions, not just an all-or-nothing unsubscribe.
+- **Remembers you**: once verified, a session cookie (the same
+  `unsubscribe_token` already used for email links, set `HttpOnly`/`Secure`)
+  keeps you signed in - the homepage shows your current tickets directly and
+  lets you add more without re-entering your email each time. Sign out via
+  the link on the homepage.
 - **Checking pipeline**: every subscribed ticket lands in D1's
   `community_tickets` table and is re-checked by the Worker's own Cloudflare
   Cron Trigger (`scheduled()` in `worker/src/index.ts`, every 2 minutes) -
