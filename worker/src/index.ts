@@ -641,14 +641,14 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   return page(
     "My alerts",
     `<div class="card">
-      <p>Signed in as <b>${escapeHtml(subscriber.email)}</b></p>
+      <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
       <h2>Your watched tickets</h2>
       ${rows}
       <h2>Waiting for tickets to go on sale</h2>
       ${saleRows}
     </div>
     <div class="card">
-      <p><a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a> &middot; <a href="/">Add another ticket</a></p>
+      <p><a href="/">Home</a> &middot; <a href="/">Add another ticket</a> &middot; <a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a></p>
     </div>`,
     { "Set-Cookie": sessionCookieHeader(token) }
   );
