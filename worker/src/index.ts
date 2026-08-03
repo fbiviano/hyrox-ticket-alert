@@ -160,10 +160,18 @@ a{color:#111}
 .ticket-row form{margin:0}
 .ticket-row button{margin:0;background:#fff;color:#b00;border:1px solid #e2b3b3;padding:6px 12px;font-size:0.85rem}
 .ticket-row button:hover{background:#fee}
-details.browse{margin-top:14px}
-details.browse summary{cursor:pointer;font-size:0.9rem;font-weight:600}
-.event-list{max-height:320px;overflow-y:auto;margin-top:10px}
-.event-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #eee;cursor:pointer;font-size:0.9rem}
+details.browse{margin-top:16px}
+details.browse summary{cursor:pointer;list-style:none}
+details.browse summary::-webkit-details-marker{display:none}
+.browse-toggle{display:flex;justify-content:space-between;align-items:center;background:#f5f5f5;border:1px solid #ddd;border-radius:8px;padding:14px 16px;font-size:1rem;font-weight:600}
+.browse-toggle:hover{background:#eee}
+.browse-toggle .chev{transition:transform 0.15s}
+details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
+.event-list{margin-top:10px}
+.event-group h3{font-size:0.85rem;text-transform:uppercase;letter-spacing:0.03em;color:#555;margin:16px 0 4px}
+.event-group:first-child h3{margin-top:6px}
+.event-group-rows{max-height:280px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
+.event-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #eee;cursor:pointer;font-size:0.9rem}
 .event-row:last-child{border-bottom:0}
 .event-row:hover{background:#f7f7f7}
 .event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap}
@@ -317,16 +325,18 @@ const RESOLVE_SCRIPT = `<script>
           eventList.innerHTML = '<p>No events found.</p>';
           return;
         }
-        var html = '';
-        for (var i = 0; i < data.results.length; i++) {
-          var ev = data.results[i];
+        function rowHtml(ev) {
           var dateLabel = ev.event_date || 'Date TBA';
-          var badge = ev.on_sale
-            ? '<span class="event-badge on">On sale</span>'
-            : '<span class="event-badge off">Not on sale</span>';
-          html += '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + badge + '</div>';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span></div>';
         }
-        eventList.innerHTML = html;
+        function groupHtml(title, rows) {
+          if (!rows.length) return '';
+          return '<div class="event-group"><h3>' + esc(title) + ' (' + rows.length + ')</h3>' +
+            '<div class="event-group-rows">' + rows.map(rowHtml).join('') + '</div></div>';
+        }
+        var onSale = data.results.filter(function(ev) { return ev.on_sale; });
+        var notOnSale = data.results.filter(function(ev) { return !ev.on_sale; });
+        eventList.innerHTML = groupHtml('On sale now', onSale) + groupHtml('Not on sale yet', notOnSale);
       } catch (e) {
         eventList.innerHTML = '<p>Something went wrong loading events.</p>';
       }
@@ -432,7 +442,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     </div>
     <div id="resolveResult"></div>
     <details class="browse" id="browseEvents">
-      <summary>Browse all events</summary>
+      <summary class="browse-toggle">Browse all HYROX events <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
     </details>`;
 
