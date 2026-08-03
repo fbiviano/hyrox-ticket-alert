@@ -16,6 +16,8 @@ interface TrackedTicket {
   status: "available" | "sold_out";
 }
 
+const SESSION_COOKIE = "rra_session";
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -39,6 +41,37 @@ function decodeTicket(s: string): TrackedTicket | null {
   } catch {
     return null;
   }
+}
+
+function parseCookies(req: Request): Record<string, string> {
+  const header = req.headers.get("Cookie") || "";
+  const cookies: Record<string, string> = {};
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key) cookies[key] = part.slice(idx + 1).trim();
+  }
+  return cookies;
+}
+
+/** The session cookie is just the subscriber's existing unsubscribe_token -
+ * same access level a clicked email link already grants (view/edit which
+ * free ticket alerts an email is subscribed to). No separate session store. */
+async function getSessionSubscriber(req: Request, env: Env): Promise<any | null> {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  return (
+    (await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>()) || null
+  );
+}
+
+function sessionCookieHeader(token: string): string {
+  return `${SESSION_COOKIE}=${token}; Max-Age=31536000; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+function clearSessionCookieHeader(): string {
+  return `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
@@ -86,7 +119,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
   return sent;
 }
 
-function page(title: string, body: string): Response {
+function page(title: string, body: string, extraHeaders: Record<string, string> = {}): Response {
   return new Response(
     `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -117,22 +150,100 @@ a{color:#111}
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
 </body></html>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } }
+    { headers: { "content-type": "text/html; charset=utf-8", ...extraHeaders } }
   );
 }
 
-async function handleSignupPage(): Promise<Response> {
+const RESOLVE_SCRIPT = `<script>
+(function() {
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  document.getElementById('findBtn').addEventListener('click', async function() {
+    var input = document.getElementById('urlInput');
+    var out = document.getElementById('resolveResult');
+    var url = input.value.trim();
+    if (!url) return;
+    out.innerHTML = '<p>Looking...</p>';
+    try {
+      var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
+      var data = await resp.json();
+      if (!resp.ok || !data.tickets || !data.tickets.length) {
+        out.innerHTML = '<p>' + esc(data.error || 'Could not find tickets for that page. Double check the URL.') + '</p>';
+        return;
+      }
+      var html = '<p><b>' + esc(data.event_name) + '</b></p>';
+      for (var i = 0; i < data.tickets.length; i++) {
+        var t = data.tickets[i];
+        html += '<label><input type="checkbox" name="ticket" value="' + esc(t.encoded) + '"> [' + esc(t.status.toUpperCase()) + '] ' + esc(t.name) + '</label>';
+      }
+      out.innerHTML = html;
+    } catch (e) {
+      out.innerHTML = '<p>Something went wrong. Try again.</p>';
+    }
+  });
+})();
+</script>`;
+
+async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<string> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? ORDER BY event_name, ticket_name"
+  )
+    .bind(subscriberId)
+    .all<any>();
+  return (
+    (results || [])
+      .map(
+        (r: any) => `<div class="ticket-row">
+      <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
+      <form method="POST" action="/remove-subscription">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <input type="hidden" name="subscription_id" value="${r.id}">
+        <button type="submit">Remove</button>
+      </form>
+    </div>`
+      )
+      .join("") || "<p>No active subscriptions yet.</p>"
+  );
+}
+
+async function handleSignupPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+
+  const findForm = `<div class="row">
+      <input type="text" id="urlInput" placeholder="https://hyrox.com/event/...">
+      <button type="button" id="findBtn">Find tickets</button>
+    </div>
+    <div id="resolveResult"></div>`;
+
+  if (subscriber) {
+    const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
+    return page(
+      "RoxRaceAlerts",
+      `<div class="card">
+        <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
+        <h2>Your watched tickets</h2>
+        ${rows}
+      </div>
+      <div class="card">
+        <h2>Add another ticket</h2>
+        <form method="POST" action="/subscribe" id="signupForm">
+          ${findForm}
+          <button type="submit">Add selected ticket(s)</button>
+        </form>
+      </div>
+      ${RESOLVE_SCRIPT}`
+    );
+  }
+
   return page(
     "Get notified when sold-out HYROX tickets become available",
     `<div class="card">
       <p>Free alerts the moment a sold-out ticket type becomes available again. Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
       <form method="POST" action="/subscribe" id="signupForm">
-        <div class="row">
-          <input type="text" id="urlInput" placeholder="https://hyrox.com/event/...">
-          <button type="button" id="findBtn">Find tickets</button>
-        </div>
-        <div id="resolveResult"></div>
-
+        ${findForm}
         <label>Your email
           <input type="email" name="email" required placeholder="you@example.com">
         </label>
@@ -140,38 +251,7 @@ async function handleSignupPage(): Promise<Response> {
         <button type="submit">Subscribe</button>
       </form>
     </div>
-    <script>
-    (function() {
-      function esc(s) {
-        var d = document.createElement('div');
-        d.textContent = s;
-        return d.innerHTML;
-      }
-      document.getElementById('findBtn').addEventListener('click', async function() {
-        var input = document.getElementById('urlInput');
-        var out = document.getElementById('resolveResult');
-        var url = input.value.trim();
-        if (!url) return;
-        out.innerHTML = '<p>Looking...</p>';
-        try {
-          var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
-          var data = await resp.json();
-          if (!resp.ok || !data.tickets || !data.tickets.length) {
-            out.innerHTML = '<p>' + esc(data.error || 'Could not find tickets for that page. Double check the URL.') + '</p>';
-            return;
-          }
-          var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-          for (var i = 0; i < data.tickets.length; i++) {
-            var t = data.tickets[i];
-            html += '<label><input type="checkbox" name="ticket" value="' + esc(t.encoded) + '"> [' + esc(t.status.toUpperCase()) + '] ' + esc(t.name) + '</label>';
-          }
-          out.innerHTML = html;
-        } catch (e) {
-          out.innerHTML = '<p>Something went wrong. Try again.</p>';
-        }
-      });
-    })();
-    </script>`
+    ${RESOLVE_SCRIPT}`
   );
 }
 
@@ -208,29 +288,36 @@ async function handleResolve(req: Request): Promise<Response> {
 
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
-  const email = String(form.get("email") || "").trim().toLowerCase();
   const ticketValues = form.getAll("ticket").map(String);
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return page("Invalid email", `<div class="card"><p>That doesn't look like a valid email address. <a href="/">Go back</a></p></div>`);
-  }
   if (ticketValues.length === 0) {
     return page("Pick a ticket", `<div class="card"><p>Please select at least one ticket to watch. <a href="/">Go back</a></p></div>`);
   }
 
-  let subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
-  const verifyToken = randomToken();
-  const unsubToken = subscriber ? subscriber.unsubscribe_token : randomToken();
+  let subscriber = await getSessionSubscriber(req, env);
+  let needsVerification = false;
+  let verifyToken = "";
 
   if (!subscriber) {
-    await env.DB.prepare(
-      "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token) VALUES (?, 0, ?, ?)"
-    )
-      .bind(email, verifyToken, unsubToken)
-      .run();
+    const email = String(form.get("email") || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return page("Invalid email", `<div class="card"><p>That doesn't look like a valid email address. <a href="/">Go back</a></p></div>`);
+    }
     subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
-  } else if (!subscriber.verified) {
-    await env.DB.prepare("UPDATE subscribers SET verify_token = ? WHERE id = ?").bind(verifyToken, subscriber.id).run();
+    verifyToken = randomToken();
+    const unsubToken = subscriber ? subscriber.unsubscribe_token : randomToken();
+
+    if (!subscriber) {
+      await env.DB.prepare(
+        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token) VALUES (?, 0, ?, ?)"
+      )
+        .bind(email, verifyToken, unsubToken)
+        .run();
+      subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
+      needsVerification = true;
+    } else if (!subscriber.verified) {
+      await env.DB.prepare("UPDATE subscribers SET verify_token = ? WHERE id = ?").bind(verifyToken, subscriber.id).run();
+      needsVerification = true;
+    }
   }
 
   for (const val of ticketValues) {
@@ -248,13 +335,11 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
       .run();
   }
 
-  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${unsubToken}`;
-
-  if (!subscriber.verified) {
+  if (needsVerification) {
     const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
     await sendEmail(
       env,
-      email,
+      subscriber.email,
       "Confirm your RoxRaceAlerts subscription",
       `<p>Click to confirm you want ticket-availability alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
       `Confirm your subscription: ${link}\n\nIf you didn't request this, ignore this email.`
@@ -262,15 +347,14 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     return page(
       "Check your email",
       `<div class="card"><p>Almost done — we've sent a confirmation link to <b>${escapeHtml(
-        email
+        subscriber.email
       )}</b>. Click it to start receiving alerts.</p></div>`
     );
   }
 
-  return page(
-    "Subscribed",
-    `<div class="card"><p>You're already verified — added the selected ticket(s) to your alerts. <a href="${myAlertsLink}">Manage my alerts</a></p></div>`
-  );
+  return page("Subscribed", `<div class="card"><p>Added. <a href="/">Manage my alerts</a></p></div>`, {
+    "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token),
+  });
 }
 
 async function handleVerify(req: Request, env: Env): Promise<Response> {
@@ -280,10 +364,10 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
     return page("Invalid or expired link", `<div class="card"><p>This confirmation link is invalid or already used.</p></div>`);
   }
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
-  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${subscriber.unsubscribe_token}`;
   return page(
     "Confirmed",
-    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="${myAlertsLink}">Manage my alerts</a></p></div>`
+    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/">Manage my alerts</a></p></div>`,
+    { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
 
@@ -294,7 +378,11 @@ async function handleUnsubscribe(req: Request, env: Env): Promise<Response> {
     return page("Not found", `<div class="card"><p>This unsubscribe link is invalid.</p></div>`);
   }
   await env.DB.prepare("DELETE FROM subscribers WHERE id = ?").bind(subscriber.id).run();
-  return page("Unsubscribed", `<div class="card"><p>You've been unsubscribed from all alerts. Sorry to see you go.</p></div>`);
+  return page(
+    "Unsubscribed",
+    `<div class="card"><p>You've been unsubscribed from all alerts. Sorry to see you go.</p></div>`,
+    { "Set-Cookie": clearSessionCookieHeader() }
+  );
 }
 
 async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
@@ -303,26 +391,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (!subscriber) {
     return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
   }
-  const { results } = await env.DB.prepare(
-    "SELECT id, event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? ORDER BY event_name, ticket_name"
-  )
-    .bind(subscriber.id)
-    .all<any>();
-
-  const rows =
-    (results || [])
-      .map(
-        (r: any) => `<div class="ticket-row">
-      <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
-      <form method="POST" action="/remove-subscription">
-        <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <input type="hidden" name="subscription_id" value="${r.id}">
-        <button type="submit">Remove</button>
-      </form>
-    </div>`
-      )
-      .join("") || "<p>No active subscriptions.</p>";
-
+  const rows = await renderTicketRows(subscriber.id, token, env);
   return page(
     "My alerts",
     `<div class="card">
@@ -332,7 +401,8 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     </div>
     <div class="card">
       <p><a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a> &middot; <a href="/">Add another ticket</a></p>
-    </div>`
+    </div>`,
+    { "Set-Cookie": sessionCookieHeader(token) }
   );
 }
 
@@ -349,7 +419,17 @@ async function handleRemoveSubscription(req: Request, env: Env): Promise<Respons
     .bind(subscriptionId, subscriber.id)
     .run();
 
-  return Response.redirect(`${env.SITE_URL}/my-alerts?token=${token}`, 303);
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/my-alerts?token=${token}`, "Set-Cookie": sessionCookieHeader(token) },
+  });
+}
+
+function handleSignOut(env: Env): Response {
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": clearSessionCookieHeader() },
+  });
 }
 
 async function handleNotify(req: Request, env: Env): Promise<Response> {
@@ -366,8 +446,8 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
 }
 
 /** Cron Trigger entry point: re-check every community-requested ticket and
- * fan out alerts on sold_out -> available. Every subscription now flows
- * through here (there's no separate curated list on the public site). */
+ * fan out alerts on sold_out -> available. Every subscription flows through
+ * here (there's no separate curated list on the public site). */
 async function checkCommunityTickets(env: Env): Promise<void> {
   const { results } = await env.DB.prepare("SELECT * FROM community_tickets").all<any>();
   for (const row of results || []) {
@@ -390,13 +470,14 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     try {
-      if (url.pathname === "/" && req.method === "GET") return await handleSignupPage();
+      if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
       if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
       if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
+      if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
