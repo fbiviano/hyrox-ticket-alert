@@ -293,6 +293,13 @@ as before, untouched by any of this.
   kept small per run to stay under Cloudflare's free-plan cap of 50 outbound
   requests per invocation. `POST /admin/reindex` (same bearer-secret pattern
   as `/notify`) forces a batch on demand instead of waiting for the schedule.
+- **"Notify me when tickets go on sale"**: if `/resolve` finds a real event
+  page but no live vivenu shop yet, the signup page offers this instead of a
+  dead end. Tracked in `sale_watch`/`sale_watchers` and checked by
+  `checkSaleWatches()` alongside the regular 2-minute ticket cron - it just
+  re-runs `resolveEvent()` and treats success (where it previously failed)
+  as "tickets just went on sale." Confirmed live against a real event and a
+  real cron tick, not just a manual test call.
 - **Real email verification**: a confirmation link is sent before any alerts
   start.
 - **"My alerts" self-service page** (`GET /my-alerts?token=...`, linked from
