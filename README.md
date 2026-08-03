@@ -269,6 +269,62 @@ browser's Network tab and hand it to `add` directly:
 
 ---
 
+## 7. Public signup site — roxracealerts.com
+
+Besides your own personal Telegram/email alerts, anyone can subscribe to alerts
+for the tickets currently being tracked, at **[roxracealerts.com](https://roxracealerts.com)**.
+This is a separate, self-contained system:
+
+- **The signup page** dynamically lists whatever's currently in `config.json`
+  in this repo — no manual syncing needed. Add a ticket with `monitor.py add`
+  and push, and it shows up there automatically.
+- **Real email verification**: visitors enter their email, get sent a
+  confirmation link, and only start receiving alerts once they click it.
+- **How alerts reach subscribers**: when `monitor.py`'s `check` detects a
+  sold_out → available transition, it calls a webhook
+  (`notify_subscribers_webhook` in `monitor.py`) which tells the site to email
+  everyone subscribed to that specific ticket — on top of your own Telegram/
+  email alert, unaffected either way.
+- **Unsubscribe**: every alert email includes a working unsubscribe link.
+
+### Architecture
+
+- **Cloudflare Workers** (free tier) — hosts the site and its small API
+  (`worker/src/index.ts`): the signup page, `/subscribe`, `/verify`,
+  `/unsubscribe`, and the internal `/notify` webhook.
+- **Cloudflare D1** (free tier, SQLite) — stores subscribers and their chosen
+  tickets (`worker/schema.sql`).
+- **Resend** (free tier) — sends the verification and alert emails, from
+  `alerts.roxracealerts.com` (a subdomain kept separate from the root domain
+  so its sending reputation can't affect anything else on roxracealerts.com).
+- Cost: $0/month at this scale (all three services' free tiers), beyond the
+  domain's own yearly renewal.
+
+### Making changes to the site
+
+The Worker isn't redeployed automatically — after editing anything in
+`worker/src/index.ts` or `worker/schema.sql`, redeploy manually:
+
+```bash
+cd worker
+npx wrangler deploy
+```
+
+Secrets (`RESEND_API_KEY`, `WEBHOOK_SECRET`) are stored on Cloudflare, not in
+this repo — set/update them with `wrangler secret put <NAME>`. On Windows,
+pipe the value in through Bash/WSL rather than PowerShell if possible —
+PowerShell's pipeline can silently prepend an invisible character to piped
+input that corrupts secrets (this bit us once already).
+
+### Checking on subscribers
+
+```bash
+cd worker
+npx wrangler d1 execute roxracealerts-db --remote --command "SELECT email, verified FROM subscribers"
+```
+
+---
+
 ## How it works, briefly
 
 - `add` fetches the page you give it, looks for a vivenu shop link (or checks
