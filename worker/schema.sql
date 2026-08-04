@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS event_directory (
   -- instead of UTC/GMT, which reads as a foreign, confusing time to most
   -- people.
   presale_timezone TEXT,
+  -- True when Claude judged the caption to mean something is buyable RIGHT
+  -- NOW (an open early-access/gym link, or the sale itself already live),
+  -- as opposed to merely announcing a future date. Splits the browse list
+  -- into "live now" vs "going live soon" instead of one flat bucket.
+  presale_is_live INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -77,6 +82,7 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   presale_note TEXT,
   presale_live_at TEXT,
   presale_timezone TEXT,
+  presale_is_live INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -128,6 +134,7 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   -- below; null means "no specific time mentioned", not "never".
   live_at_utc TEXT,
   live_at_timezone TEXT,
+  presale_is_live INTEGER NOT NULL DEFAULT 0,
   reminder_1d_sent INTEGER NOT NULL DEFAULT 0,
   reminder_1h_sent INTEGER NOT NULL DEFAULT 0,
   reminder_5m_sent INTEGER NOT NULL DEFAULT 0,

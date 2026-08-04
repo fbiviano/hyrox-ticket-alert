@@ -186,6 +186,7 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-badge.on{background:#e6f4ea;color:#1e7e34}
 .event-badge.off{background:#f1f1f1;color:#777}
 .event-badge.presale{background:#fff4e0;color:#9a6700}
+.event-badge.soon{background:#e6eeff;color:#2851b8}
 .event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
@@ -342,14 +343,25 @@ const RESOLVE_SCRIPT = `<script>
             return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
           }
         }
+        function catOf(ev) {
+          if (ev.on_sale) return 'on';
+          if (ev.presale_is_live) return 'live';
+          if (ev.presale_note && ev.presale_live_at) return 'soon';
+          return 'waiting';
+        }
         function rowHtml(ev) {
           var dateLabel = ev.event_date || 'Date TBA';
-          var badge = ev.on_sale
-            ? '<span class="event-badge on">On sale</span>'
-            : (ev.presale_note ? '<span class="event-badge presale">Pre-sale live</span>' : '<span class="event-badge off">Not on sale</span>');
-          var subtitleText = ev.presale_note ? esc(ev.presale_note) : '';
-          if (ev.presale_note && ev.presale_live_at) subtitleText += '<br>Public sale: ' + esc(formatLocal(ev.presale_live_at, ev.presale_timezone));
-          var subtitle = (!ev.on_sale && ev.presale_note) ? '<div class="event-subtitle">' + subtitleText + '</div>' : '';
+          var cat = catOf(ev);
+          var badge = cat === 'on' ? '<span class="event-badge on">On sale</span>'
+            : cat === 'live' ? '<span class="event-badge on">Live now</span>'
+            : cat === 'soon' ? '<span class="event-badge soon">Going live soon</span>'
+            : '<span class="event-badge off">Not on sale</span>';
+          var subtitleText = '';
+          if (cat === 'live' || cat === 'soon') {
+            subtitleText = ev.presale_note ? esc(ev.presale_note) : '';
+            if (ev.presale_live_at) subtitleText += (subtitleText ? '<br>' : '') + 'Public sale: ' + esc(formatLocal(ev.presale_live_at, ev.presale_timezone));
+          }
+          var subtitle = subtitleText ? '<div class="event-subtitle">' + subtitleText + '</div>' : '';
           return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
         }
         function groupHtml(title, rows) {
@@ -357,9 +369,11 @@ const RESOLVE_SCRIPT = `<script>
           return '<div class="event-group"><h3>' + esc(title) + ' (' + rows.length + ')</h3>' +
             '<div class="event-group-rows">' + rows.map(rowHtml).join('') + '</div></div>';
         }
-        var onSale = data.results.filter(function(ev) { return ev.on_sale; });
-        var notOnSale = data.results.filter(function(ev) { return !ev.on_sale; });
-        eventList.innerHTML = groupHtml('On sale now', onSale) + groupHtml('Not on sale yet', notOnSale);
+        var onSale = data.results.filter(function(ev) { return catOf(ev) === 'on'; });
+        var liveNow = data.results.filter(function(ev) { return catOf(ev) === 'live'; });
+        var goingSoon = data.results.filter(function(ev) { return catOf(ev) === 'soon'; });
+        var notOnSale = data.results.filter(function(ev) { return catOf(ev) === 'waiting'; });
+        eventList.innerHTML = groupHtml('On sale now', onSale) + groupHtml('Live now', liveNow) + groupHtml('Going live soon', goingSoon) + groupHtml('Not on sale yet', notOnSale);
       } catch (e) {
         eventList.innerHTML = '<p>Something went wrong loading events.</p>';
       }
@@ -430,30 +444,54 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
   return { active: render(active, "No active subscriptions yet."), past: render(past) };
 }
 
-/** Once an Instagram-derived presale_note exists, it's a richer status than
- * the flat "not yet on sale" (it usually already names the pre-sale and,
- * via presaleLiveAt/presaleTimezone, the expected public-sale date/time in
- * the event's own local time) - show it as a badge + subtitle instead of a
- * flat line so a live pre-sale actually reads as "live", not just text. */
+/** Which of the three waiting-list buckets a sale_watch row belongs in:
+ * "live" - the real shop is confirmed on sale, or the Instagram caption
+ * meant something is buyable right now (presale_is_live); "soon" - not
+ * live yet, but a specific expected go-live date/time is known
+ * (presale_live_at); "waiting" - nothing known at all. */
+function categorizeSaleWatch(row: {
+  resolved: boolean;
+  presale_is_live: boolean;
+  presale_note: string | null;
+  presale_live_at: string | null;
+}): "live" | "soon" | "waiting" {
+  if (row.resolved || row.presale_is_live) return "live";
+  if (row.presale_note && row.presale_live_at) return "soon";
+  return "waiting";
+}
+
 function renderSaleWatchStatus(
+  category: "live" | "soon" | "waiting",
   resolved: boolean,
   presaleNote: string | null,
   presaleLiveAt: string | null,
   presaleTimezone: string | null
 ): string {
-  if (presaleNote) {
-    let subtitle = escapeHtml(presaleNote);
-    if (presaleLiveAt) subtitle += `<br>Public sale: ${escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone))}`;
-    return `<span class="event-badge presale">Pre-sale live</span><div class="event-subtitle">${subtitle}</div>`;
+  if (category === "live") {
+    let subtitle = presaleNote ? escapeHtml(presaleNote) : resolved ? "On sale, alert sent" : "";
+    if (presaleLiveAt) {
+      subtitle += `${subtitle ? "<br>" : ""}Public sale: ${escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone))}`;
+    }
+    return `<span class="event-badge on">Live now</span>${subtitle ? `<div class="event-subtitle">${subtitle}</div>` : ""}`;
   }
-  return resolved
-    ? '<span class="event-badge on">On sale, alert sent</span>'
-    : '<span class="event-badge off">Not yet on sale</span>';
+  if (category === "soon") {
+    const when = presaleLiveAt ? escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone)) : "";
+    const note = presaleNote ? `${escapeHtml(presaleNote)}<br>` : "";
+    return `<span class="event-badge soon">Going live soon</span><div class="event-subtitle">${note}${when}</div>`;
+  }
+  return '<span class="event-badge off">Not yet on sale</span>';
 }
 
-async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
+interface SaleWatchSections {
+  live: string;
+  soon: string;
+  waiting: string;
+  past: string;
+}
+
+async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<SaleWatchSections> {
   const { results } = await env.DB.prepare(
-    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone
+    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone, sw.presale_is_live
      FROM sale_watchers w
      JOIN sale_watch sw ON sw.event_url = w.event_url
      WHERE w.subscriber_id = ? ORDER BY sw.event_date IS NULL, sw.event_date, sw.event_title`
@@ -461,23 +499,26 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
     .bind(subscriberId)
     .all<any>();
   const { active, past } = splitByEventDate(results || []);
-  const render = (rows: any[], emptyMsg?: string) => {
-    const html = rows
-      .map(
-        (r: any) => `<div class="ticket-row">
+  const rowHtml = (r: any, category: "live" | "soon" | "waiting") => `<div class="ticket-row">
       <div><span>${escapeHtml(r.event_title)}</span>
-      ${renderSaleWatchStatus(!!r.resolved, r.presale_note, r.presale_live_at, r.presale_timezone)}</div>
+      ${renderSaleWatchStatus(category, !!r.resolved, r.presale_note, r.presale_live_at, r.presale_timezone)}</div>
       <form method="POST" action="/remove-sale-watch">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="watcher_id" value="${r.id}">
         <button type="submit">Remove</button>
       </form>
-    </div>`
-      )
+    </div>`;
+  const bucket = (cat: "live" | "soon" | "waiting") =>
+    active
+      .filter((r: any) => categorizeSaleWatch(r) === cat)
+      .map((r: any) => rowHtml(r, cat))
       .join("");
-    return html || (emptyMsg ? `<p>${emptyMsg}</p>` : "");
+  return {
+    live: bucket("live"),
+    soon: bucket("soon"),
+    waiting: bucket("waiting"),
+    past: past.map((r: any) => rowHtml(r, categorizeSaleWatch(r))).join(""),
   };
-  return { active: render(active, "None yet."), past: render(past) };
 }
 
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
@@ -500,6 +541,12 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   if (subscriber) {
     const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
     const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
+    const saleSections: string[] = [];
+    if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
+    if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
+    if (saleRows.waiting || saleSections.length === 0) {
+      saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
+    }
     return page(
       "RoxRaceAlerts",
       `${announcements}
@@ -507,8 +554,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
         <h2>Your watched tickets</h2>
         ${rows.active}
-        <h2>Waiting for tickets to go on sale</h2>
-        ${saleRows.active}
+        ${saleSections.join("\n")}
       </div>
       ${pastEventsSection(rows.past, saleRows.past)}
       <div class="card">
@@ -1161,6 +1207,7 @@ interface AiAnnouncementParse {
   isRaceTicketSale: boolean;
   liveAtUtc: string | null;
   liveAtTimezone: string | null;
+  presaleIsLive: boolean;
 }
 
 /** HYROX country accounts post in whatever language that country speaks, and
@@ -1195,7 +1242,7 @@ async function parseAnnouncementWithAI(
         model: "claude-haiku-4-5",
         max_tokens: 1024,
         system:
-          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true: produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp); set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name), use null rather than guessing if it's ambiguous; and if the caption states or clearly implies a specific date and time the (pre-)sale goes or went live, convert it to an absolute UTC timestamp in live_at_utc (ISO 8601, e.g. 2026-08-06T10:00:00Z) - infer the local timezone from the event's country/city if not stated explicitly (e.g. Milan -> Europe/Rome, Berlin -> Europe/Berlin), and also return that same IANA timezone identifier in timezone so displays can show the event's own local time instead of UTC; use null for both live_at_utc and timezone if no specific time is given (a vague \"soon\" is not a specific time). If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about, and leave matched_event_url, live_at_utc, and timezone null.",
+          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true: produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp); set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name), use null rather than guessing if it's ambiguous; and if the caption states or clearly implies a specific date and time the (pre-)sale goes or went live, convert it to an absolute UTC timestamp in live_at_utc (ISO 8601, e.g. 2026-08-06T10:00:00Z) - infer the local timezone from the event's country/city if not stated explicitly (e.g. Milan -> Europe/Rome, Berlin -> Europe/Berlin), and also return that same IANA timezone identifier in timezone so displays can show the event's own local time instead of UTC; use null for both live_at_utc and timezone if no specific time is given (a vague \"soon\" is not a specific time). Also set presale_is_live to true only if the caption means people can register or buy RIGHT NOW - an open early-access/gym link, a pre-sale or the public sale itself described as already open or live - as opposed to merely announcing that it WILL open at a future date with nothing accessible yet; set it false in that latter case (this is independent of live_at_utc, which may still be set to a future public-sale date even while presale_is_live is true for an ongoing early-access window). If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about, and leave matched_event_url, live_at_utc, and timezone null, and set presale_is_live to false.",
         messages: [
           {
             role: "user",
@@ -1213,8 +1260,9 @@ async function parseAnnouncementWithAI(
                 banner_text: { type: "string" },
                 live_at_utc: { type: ["string", "null"] },
                 timezone: { type: ["string", "null"] },
+                presale_is_live: { type: "boolean" },
               },
-              required: ["is_race_ticket_sale", "matched_event_url", "banner_text", "live_at_utc", "timezone"],
+              required: ["is_race_ticket_sale", "matched_event_url", "banner_text", "live_at_utc", "timezone", "presale_is_live"],
               additionalProperties: false,
             },
           },
@@ -1236,6 +1284,7 @@ async function parseAnnouncementWithAI(
       isRaceTicketSale: !!parsed.is_race_ticket_sale,
       liveAtUtc,
       liveAtTimezone: liveAtUtc && parsed.timezone ? parsed.timezone : null,
+      presaleIsLive: !!parsed.presale_is_live,
     };
   } catch (e) {
     console.error("Failed to parse Instagram announcement with AI:", e);
@@ -1335,13 +1384,14 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
       const eventUrl = ai?.eventUrl || null;
       const liveAtUtc = ai?.liveAtUtc || null;
       const liveAtTimezone = ai?.liveAtTimezone || null;
+      const presaleIsLive = ai?.presaleIsLive ? 1 : 0;
 
       await env.DB.prepare(
-        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc, live_at_timezone)
-         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?)
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live)
+         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)
          ON CONFLICT(handle, post_id) DO NOTHING`
       )
-        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc, liveAtTimezone)
+        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc, liveAtTimezone, presaleIsLive)
         .run();
       flaggedCount++;
 
@@ -1350,11 +1400,11 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
         // Surface the same info on both the public browsable list
         // (event_directory) and the personal "waiting" list (sale_watch),
         // so it's visible to everyone, not just people who set up a watch.
-        await env.DB.prepare("UPDATE event_directory SET presale_note = ?, presale_live_at = ?, presale_timezone = ? WHERE url = ?")
-          .bind(bannerText, liveAtUtc, liveAtTimezone, eventUrl)
+        await env.DB.prepare("UPDATE event_directory SET presale_note = ?, presale_live_at = ?, presale_timezone = ?, presale_is_live = ? WHERE url = ?")
+          .bind(bannerText, liveAtUtc, liveAtTimezone, presaleIsLive, eventUrl)
           .run();
-        await env.DB.prepare("UPDATE sale_watch SET presale_note = ?, presale_live_at = ?, presale_timezone = ? WHERE event_url = ?")
-          .bind(bannerText, liveAtUtc, liveAtTimezone, eventUrl)
+        await env.DB.prepare("UPDATE sale_watch SET presale_note = ?, presale_live_at = ?, presale_timezone = ?, presale_is_live = ? WHERE event_url = ?")
+          .bind(bannerText, liveAtUtc, liveAtTimezone, presaleIsLive, eventUrl)
           .run();
       }
     }
@@ -1513,7 +1563,7 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
  * sort last rather than being hidden, since they're still real events. */
 async function handleListEvents(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, presale_note, presale_live_at, presale_timezone FROM event_directory
+    `SELECT url, title, event_date, on_sale, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
@@ -1624,10 +1674,14 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   // Clear the presale info this post set, so a retracted bad match doesn't
   // keep showing on the public list or a subscriber's "waiting" line.
   if (post?.event_url) {
-    await env.DB.prepare("UPDATE event_directory SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL WHERE url = ?")
+    await env.DB.prepare(
+      "UPDATE event_directory SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0 WHERE url = ?"
+    )
       .bind(post.event_url)
       .run();
-    await env.DB.prepare("UPDATE sale_watch SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL WHERE event_url = ?")
+    await env.DB.prepare(
+      "UPDATE sale_watch SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0 WHERE event_url = ?"
+    )
       .bind(post.event_url)
       .run();
   }

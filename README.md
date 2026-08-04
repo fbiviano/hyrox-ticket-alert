@@ -407,12 +407,21 @@ of UTC/GMT, so a Milan pre-sale reads "12:00 CEST", not a confusing GMT
 time. This unlocks two things:
 
 - **Visible to everyone**, not just people with a "notify me" watch: the
-  homepage's browsable event list and `/my-alerts` show a "Pre-sale live"
-  badge plus a subtitle with the announcement text and, when a go-live
-  time is known, "Public sale: <local date/time>" - instead of a bare
-  "Not on sale" / "not yet on sale" - via `presale_note`/
-  `presale_live_at`/`presale_timezone` on `event_directory` and
-  `sale_watch`.
+  homepage's browsable event list and `/my-alerts` split not-yet-on-sale
+  events into three sections instead of one flat bucket - **Live now**
+  (something is buyable right this moment: a real on-sale shop, or Claude
+  judged the caption to mean an early-access/gym link or the sale itself
+  is currently open - `presale_is_live`), **Going live soon** (not live
+  yet, but a specific expected date/time is known - `presale_live_at`),
+  and **Not on sale yet** (nothing known). Each row shows a badge plus a
+  subtitle with the announcement text and, when known, "Public sale:
+  <local date/time>" - via `presale_note`/`presale_live_at`/
+  `presale_timezone`/`presale_is_live` on `event_directory` and
+  `sale_watch`. `presale_is_live` is a separate signal from
+  `presale_live_at` on purpose: a caption can say "gym pre-sale open now,
+  public sale Thursday" - live *and* going-live-soon at once - so Claude
+  judges "is something open right now" independently of "is there a
+  future date mentioned".
 - **Countdown reminder emails** to everyone watching that event: one when
   the estimated go-live time is ~1 day away, another at ~1 hour, and
   another at ~5 minutes - on top of the immediate "just announced" email.
