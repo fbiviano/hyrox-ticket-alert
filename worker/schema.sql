@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS event_directory (
   event_date TEXT,
   on_sale INTEGER NOT NULL DEFAULT 0,
   last_sale_check TEXT,
+  -- Same best-effort Instagram-derived info as sale_watch, but shown to
+  -- *everyone* browsing the homepage list, not just people who set up a
+  -- specific "notify me" watch.
+  presale_note TEXT,
+  presale_live_at TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -60,6 +65,12 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   event_title TEXT NOT NULL,
   resolved INTEGER NOT NULL DEFAULT 0,
   event_date TEXT,
+  -- Best-effort info from a matched Instagram announcement (see
+  -- ig_flagged_posts below) - shown on /my-alerts instead of a bare "not
+  -- yet on sale" once we know a pre-sale is live and/or when the public
+  -- sale is expected. presale_live_at is a UTC guess, not a guarantee.
+  presale_note TEXT,
+  presale_live_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -82,9 +93,12 @@ CREATE TABLE IF NOT EXISTS ig_watch (
   last_checked_at TEXT
 );
 
--- New Instagram posts whose caption matched a ticket-sale keyword, queued
--- for a human (admin) to approve into a homepage banner or dismiss -
--- keyword matching alone isn't reliable enough to auto-publish.
+-- New Instagram posts whose caption matched a ticket-sale keyword. Claude
+-- reads the caption and decides whether to auto-publish (see
+-- checkInstagramAnnouncements() in src/index.ts) - this table doubles as
+-- the publish log and, via live_at_utc + the reminder_* flags, the source
+-- for the countdown-reminder emails sent as a matched event's expected
+-- go-live time approaches.
 CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   handle TEXT NOT NULL,
@@ -96,12 +110,19 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   detected_at TEXT NOT NULL DEFAULT (datetime('now')),
   status TEXT NOT NULL DEFAULT 'pending',
   banner_text TEXT,
-  -- Optional: which sale_watch event this announcement is about, picked by
-  -- the admin at review time. When set, approving also emails everyone
-  -- watching that event directly, not just the homepage banner - this is
-  -- often the *only* signal available (e.g. a gym-only pre-sale uses a
-  -- private link resolveEvent() can't see), so it doesn't touch
-  -- sale_watch.resolved the way a real detected public sale does.
+  -- Which sale_watch/event_directory event this announcement is about, as
+  -- matched by Claude. When set, publishing also emails everyone watching
+  -- that event directly - this is often the *only* signal available (e.g.
+  -- a gym-only pre-sale uses a private link resolveEvent() can't see), so
+  -- it doesn't touch sale_watch.resolved the way a real detected public
+  -- sale does.
   event_url TEXT,
+  -- Best-effort UTC timestamp of when the caption says the (pre-)sale
+  -- goes live, if it says one at all. Drives the countdown reminders
+  -- below; null means "no specific time mentioned", not "never".
+  live_at_utc TEXT,
+  reminder_1d_sent INTEGER NOT NULL DEFAULT 0,
+  reminder_1h_sent INTEGER NOT NULL DEFAULT 0,
+  reminder_5m_sent INTEGER NOT NULL DEFAULT 0,
   UNIQUE(handle, post_id)
 );

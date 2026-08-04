@@ -182,9 +182,11 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #eee;cursor:pointer;font-size:0.9rem}
 .event-row:last-child{border-bottom:0}
 .event-row:hover{background:#f7f7f7}
-.event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap}
+.event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0}
 .event-badge.on{background:#e6f4ea;color:#1e7e34}
 .event-badge.off{background:#f1f1f1;color:#777}
+.event-badge.presale{background:#fff4e0;color:#9a6700}
+.event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
@@ -337,8 +339,9 @@ const RESOLVE_SCRIPT = `<script>
           var dateLabel = ev.event_date || 'Date TBA';
           var badge = ev.on_sale
             ? '<span class="event-badge on">On sale</span>'
-            : '<span class="event-badge off">Not on sale</span>';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + badge + '</div>';
+            : (ev.presale_note ? '<span class="event-badge presale">Pre-sale live</span>' : '<span class="event-badge off">Not on sale</span>');
+          var subtitle = (!ev.on_sale && ev.presale_note) ? '<div class="event-subtitle">' + esc(ev.presale_note) + '</div>' : '';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
         }
         function groupHtml(title, rows) {
           if (!rows.length) return '';
@@ -418,9 +421,18 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
   return { active: render(active, "No active subscriptions yet."), past: render(past) };
 }
 
+/** Once an Instagram-derived presale_note exists, it's a richer status than
+ * the flat "not yet on sale" (it usually already names the pre-sale and
+ * the expected public-sale date/time) - prefer it. Falls back to the
+ * plain resolved/not-resolved text otherwise. */
+function saleWatchStatusText(resolved: boolean, presaleNote: string | null): string {
+  if (presaleNote) return presaleNote;
+  return resolved ? "on sale, alert sent" : "not yet on sale";
+}
+
 async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
   const { results } = await env.DB.prepare(
-    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date FROM sale_watchers w
+    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note FROM sale_watchers w
      JOIN sale_watch sw ON sw.event_url = w.event_url
      WHERE w.subscriber_id = ? ORDER BY sw.event_date IS NULL, sw.event_date, sw.event_title`
   )
@@ -431,7 +443,7 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
     const html = rows
       .map(
         (r: any) => `<div class="ticket-row">
-      <span>${escapeHtml(r.event_title)} - ${r.resolved ? "on sale, alert sent" : "not yet on sale"}</span>
+      <span>${escapeHtml(r.event_title)} - ${escapeHtml(saleWatchStatusText(!!r.resolved, r.presale_note))}</span>
       <form method="POST" action="/remove-sale-watch">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="watcher_id" value="${r.id}">
@@ -1036,10 +1048,94 @@ async function notifySaleWatchers(env: Env, eventUrl: string, bannerText: string
   }
 }
 
+async function sendCountdownReminder(
+  env: Env,
+  eventUrl: string,
+  label: string,
+  liveAtUtc: string,
+  postUrl: string
+): Promise<void> {
+  const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
+  if (!eventRow) return;
+  const { results: watchers } = await env.DB.prepare(
+    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+     JOIN sale_watchers w ON w.subscriber_id = s.id
+     WHERE s.verified = 1 AND w.event_url = ?`
+  )
+    .bind(eventUrl)
+    .all<any>();
+
+  const eventTitle = eventRow.event_title;
+  const liveAtLabel = new Date(liveAtUtc).toUTCString();
+  for (const watcher of watchers || []) {
+    const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+    try {
+      await sendEmail(
+        env,
+        watcher.email,
+        `${eventTitle} tickets: ${label}`,
+        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This is a best-effort estimate from an Instagram post, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${postUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
+      );
+    } catch (e) {
+      console.error(`Failed to email reminder to ${watcher.email}:`, e);
+    }
+  }
+}
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const FIVE_MIN_MS = 5 * 60 * 1000;
+
+/** Fires countdown reminders (1 day / 1 hour / 5 minutes before) for any
+ * announcement whose caption gave a specific expected go-live time -
+ * dispatched from the same 2-minute Cron Trigger as the ticket checks, so
+ * the 5-minute window is never missed by more than a couple of minutes.
+ * Each threshold is a one-shot flag on the row, so a tick that's already
+ * past a threshold just skips it rather than re-sending. If the whole
+ * thing is more than 6 hours overdue (e.g. after extended downtime), marks
+ * the reminder sent without emailing - a stale countdown isn't useful. */
+async function checkAnnouncementReminders(env: Env): Promise<void> {
+  const now = Date.now();
+  const { results } = await env.DB.prepare(
+    `SELECT id, event_url, post_url, live_at_utc, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent
+     FROM ig_flagged_posts
+     WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
+       AND (reminder_1d_sent = 0 OR reminder_1h_sent = 0 OR reminder_5m_sent = 0)`
+  ).all<any>();
+
+  for (const row of results || []) {
+    const liveAt = Date.parse(row.live_at_utc);
+    if (isNaN(liveAt)) continue;
+    const msUntil = liveAt - now;
+    const tooStaleToBother = msUntil < -6 * ONE_HOUR_MS;
+
+    if (!row.reminder_1d_sent && msUntil <= ONE_DAY_MS) {
+      if (!tooStaleToBother) {
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.post_url);
+      }
+      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1d_sent = 1 WHERE id = ?").bind(row.id).run();
+    }
+    if (!row.reminder_1h_sent && msUntil <= ONE_HOUR_MS) {
+      if (!tooStaleToBother) {
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.post_url);
+      }
+      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1h_sent = 1 WHERE id = ?").bind(row.id).run();
+    }
+    if (!row.reminder_5m_sent && msUntil <= FIVE_MIN_MS) {
+      if (!tooStaleToBother) {
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.post_url);
+      }
+      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_5m_sent = 1 WHERE id = ?").bind(row.id).run();
+    }
+  }
+}
+
 interface AiAnnouncementParse {
   eventUrl: string | null;
   bannerText: string;
   isRaceTicketSale: boolean;
+  liveAtUtc: string | null;
 }
 
 /** HYROX country accounts post in whatever language that country speaks, and
@@ -1074,7 +1170,7 @@ async function parseAnnouncementWithAI(
         model: "claude-haiku-4-5",
         max_tokens: 1024,
         system:
-          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true, produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp) - and set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name); use null rather than guessing if it's ambiguous. If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about and leave matched_event_url null.",
+          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true: produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp); set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name), use null rather than guessing if it's ambiguous; and if the caption states or clearly implies a specific date and time the (pre-)sale goes or went live, convert it to an absolute UTC timestamp in live_at_utc (ISO 8601, e.g. 2026-08-06T10:00:00Z) - infer the local timezone from the event's country/city if not stated explicitly, and use null if no specific time is given (a vague \"soon\" is not a specific time). If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about, and leave matched_event_url and live_at_utc null.",
         messages: [
           {
             role: "user",
@@ -1090,8 +1186,9 @@ async function parseAnnouncementWithAI(
                 is_race_ticket_sale: { type: "boolean" },
                 matched_event_url: { type: ["string", "null"] },
                 banner_text: { type: "string" },
+                live_at_utc: { type: ["string", "null"] },
               },
-              required: ["is_race_ticket_sale", "matched_event_url", "banner_text"],
+              required: ["is_race_ticket_sale", "matched_event_url", "banner_text", "live_at_utc"],
               additionalProperties: false,
             },
           },
@@ -1106,10 +1203,12 @@ async function parseAnnouncementWithAI(
     const textBlock = (data.content || []).find((b: any) => b.type === "text");
     if (!textBlock) return null;
     const parsed = JSON.parse(textBlock.text);
+    const liveAtUtc = parsed.live_at_utc && !isNaN(Date.parse(parsed.live_at_utc)) ? parsed.live_at_utc : null;
     return {
       eventUrl: parsed.matched_event_url || null,
       bannerText: parsed.banner_text,
       isRaceTicketSale: !!parsed.is_race_ticket_sale,
+      liveAtUtc,
     };
   } catch (e) {
     console.error("Failed to parse Instagram announcement with AI:", e);
@@ -1207,18 +1306,28 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
 
       const bannerText = ai?.bannerText || `${handle} just posted about tickets - check it out`;
       const eventUrl = ai?.eventUrl || null;
+      const liveAtUtc = ai?.liveAtUtc || null;
 
       await env.DB.prepare(
-        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url)
-         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?)
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc)
+         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
          ON CONFLICT(handle, post_id) DO NOTHING`
       )
-        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl)
+        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc)
         .run();
       flaggedCount++;
 
       if (eventUrl) {
         await notifySaleWatchers(env, eventUrl, bannerText, postUrl);
+        // Surface the same info on both the public browsable list
+        // (event_directory) and the personal "waiting" list (sale_watch),
+        // so it's visible to everyone, not just people who set up a watch.
+        await env.DB.prepare("UPDATE event_directory SET presale_note = ?, presale_live_at = ? WHERE url = ?")
+          .bind(bannerText, liveAtUtc, eventUrl)
+          .run();
+        await env.DB.prepare("UPDATE sale_watch SET presale_note = ?, presale_live_at = ? WHERE event_url = ?")
+          .bind(bannerText, liveAtUtc, eventUrl)
+          .run();
       }
     }
   }
@@ -1352,7 +1461,7 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
  * sort last rather than being hidden, since they're still real events. */
 async function handleListEvents(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale FROM event_directory
+    `SELECT url, title, event_date, on_sale, presale_note FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
@@ -1458,7 +1567,18 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   const token = String(form.get("token") || "");
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
   const id = String(form.get("id") || "");
+  const post = await env.DB.prepare("SELECT event_url FROM ig_flagged_posts WHERE id = ?").bind(id).first<any>();
   await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'dismissed' WHERE id = ?").bind(id).run();
+  // Clear the presale info this post set, so a retracted bad match doesn't
+  // keep showing on the public list or a subscriber's "waiting" line.
+  if (post?.event_url) {
+    await env.DB.prepare("UPDATE event_directory SET presale_note = NULL, presale_live_at = NULL WHERE url = ?")
+      .bind(post.event_url)
+      .run();
+    await env.DB.prepare("UPDATE sale_watch SET presale_note = NULL, presale_live_at = NULL WHERE event_url = ?")
+      .bind(post.event_url)
+      .run();
+  }
   return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
 }
 
@@ -1500,6 +1620,7 @@ export default {
       ctx.waitUntil(checkCommunityTickets(env));
       ctx.waitUntil(checkSaleWatches(env));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
+      ctx.waitUntil(checkAnnouncementReminders(env));
     } else if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
     } else {
