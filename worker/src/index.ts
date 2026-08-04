@@ -482,6 +482,9 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
           <button type="submit">Add selected ticket(s)</button>
         </form>
       </div>
+      <div class="card">
+        <p><a href="/unsubscribe?token=${escapeHtml(subscriber.unsubscribe_token)}">Unsubscribe from everything</a></p>
+      </div>
       ${RESOLVE_SCRIPT}`
     );
   }
@@ -753,29 +756,21 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
   );
 }
 
+/** Token-based entry point from emails - verifies the token, signs the
+ * browser in via the session cookie, then hands off to the homepage, which
+ * already renders everything a signed-in visitor needs (watched tickets,
+ * sale watches, announcements, browse list) and is the only place that
+ * view is maintained, so this never drifts out of sync with it again. */
 async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   const token = new URL(req.url).searchParams.get("token") || "";
-  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  const subscriber = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
   if (!subscriber) {
     return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
   }
-  const rows = await renderTicketRows(subscriber.id, token, env);
-  const saleRows = await renderSaleWatchRows(subscriber.id, token, env);
-  return page(
-    "My alerts",
-    `<div class="card">
-      <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
-      <h2>Your watched tickets</h2>
-      ${rows.active}
-      <h2>Waiting for tickets to go on sale</h2>
-      ${saleRows.active}
-    </div>
-    ${pastEventsSection(rows.past, saleRows.past)}
-    <div class="card">
-      <p><a href="/">Home</a> &middot; <a href="/">Add another ticket</a> &middot; <a href="/unsubscribe?token=${escapeHtml(token)}">Unsubscribe from everything</a></p>
-    </div>`,
-    { "Set-Cookie": sessionCookieHeader(token) }
-  );
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
+  });
 }
 
 async function handleRemoveSubscription(req: Request, env: Env): Promise<Response> {
@@ -793,7 +788,7 @@ async function handleRemoveSubscription(req: Request, env: Env): Promise<Respons
 
   return new Response(null, {
     status: 303,
-    headers: { Location: `${env.SITE_URL}/my-alerts?token=${token}`, "Set-Cookie": sessionCookieHeader(token) },
+    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
   });
 }
 
@@ -812,7 +807,7 @@ async function handleRemoveSaleWatch(req: Request, env: Env): Promise<Response> 
 
   return new Response(null, {
     status: 303,
-    headers: { Location: `${env.SITE_URL}/my-alerts?token=${token}`, "Set-Cookie": sessionCookieHeader(token) },
+    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
   });
 }
 
