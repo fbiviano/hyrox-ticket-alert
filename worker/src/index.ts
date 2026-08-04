@@ -335,12 +335,21 @@ const RESOLVE_SCRIPT = `<script>
           eventList.innerHTML = '<p>No events found.</p>';
           return;
         }
+        function formatLocal(utcIso, tz) {
+          try {
+            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: tz || 'UTC' }).format(new Date(utcIso));
+          } catch (e) {
+            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
+          }
+        }
         function rowHtml(ev) {
           var dateLabel = ev.event_date || 'Date TBA';
           var badge = ev.on_sale
             ? '<span class="event-badge on">On sale</span>'
             : (ev.presale_note ? '<span class="event-badge presale">Pre-sale live</span>' : '<span class="event-badge off">Not on sale</span>');
-          var subtitle = (!ev.on_sale && ev.presale_note) ? '<div class="event-subtitle">' + esc(ev.presale_note) + '</div>' : '';
+          var subtitleText = ev.presale_note ? esc(ev.presale_note) : '';
+          if (ev.presale_note && ev.presale_live_at) subtitleText += '<br>Public sale: ' + esc(formatLocal(ev.presale_live_at, ev.presale_timezone));
+          var subtitle = (!ev.on_sale && ev.presale_note) ? '<div class="event-subtitle">' + subtitleText + '</div>' : '';
           return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
         }
         function groupHtml(title, rows) {
@@ -422,17 +431,30 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
 }
 
 /** Once an Instagram-derived presale_note exists, it's a richer status than
- * the flat "not yet on sale" (it usually already names the pre-sale and
- * the expected public-sale date/time) - prefer it. Falls back to the
- * plain resolved/not-resolved text otherwise. */
-function saleWatchStatusText(resolved: boolean, presaleNote: string | null): string {
-  if (presaleNote) return presaleNote;
-  return resolved ? "on sale, alert sent" : "not yet on sale";
+ * the flat "not yet on sale" (it usually already names the pre-sale and,
+ * via presaleLiveAt/presaleTimezone, the expected public-sale date/time in
+ * the event's own local time) - show it as a badge + subtitle instead of a
+ * flat line so a live pre-sale actually reads as "live", not just text. */
+function renderSaleWatchStatus(
+  resolved: boolean,
+  presaleNote: string | null,
+  presaleLiveAt: string | null,
+  presaleTimezone: string | null
+): string {
+  if (presaleNote) {
+    let subtitle = escapeHtml(presaleNote);
+    if (presaleLiveAt) subtitle += `<br>Public sale: ${escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone))}`;
+    return `<span class="event-badge presale">Pre-sale live</span><div class="event-subtitle">${subtitle}</div>`;
+  }
+  return resolved
+    ? '<span class="event-badge on">On sale, alert sent</span>'
+    : '<span class="event-badge off">Not yet on sale</span>';
 }
 
 async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
   const { results } = await env.DB.prepare(
-    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note FROM sale_watchers w
+    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone
+     FROM sale_watchers w
      JOIN sale_watch sw ON sw.event_url = w.event_url
      WHERE w.subscriber_id = ? ORDER BY sw.event_date IS NULL, sw.event_date, sw.event_title`
   )
@@ -443,7 +465,8 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
     const html = rows
       .map(
         (r: any) => `<div class="ticket-row">
-      <span>${escapeHtml(r.event_title)} - ${escapeHtml(saleWatchStatusText(!!r.resolved, r.presale_note))}</span>
+      <div><span>${escapeHtml(r.event_title)}</span>
+      ${renderSaleWatchStatus(!!r.resolved, r.presale_note, r.presale_live_at, r.presale_timezone)}</div>
       <form method="POST" action="/remove-sale-watch">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="watcher_id" value="${r.id}">
@@ -1053,6 +1076,7 @@ async function sendCountdownReminder(
   eventUrl: string,
   label: string,
   liveAtUtc: string,
+  liveAtTimezone: string | null,
   postUrl: string
 ): Promise<void> {
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
@@ -1066,7 +1090,7 @@ async function sendCountdownReminder(
     .all<any>();
 
   const eventTitle = eventRow.event_title;
-  const liveAtLabel = new Date(liveAtUtc).toUTCString();
+  const liveAtLabel = formatInTimezone(liveAtUtc, liveAtTimezone);
   for (const watcher of watchers || []) {
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
     try {
@@ -1098,7 +1122,7 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
 async function checkAnnouncementReminders(env: Env): Promise<void> {
   const now = Date.now();
   const { results } = await env.DB.prepare(
-    `SELECT id, event_url, post_url, live_at_utc, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent
+    `SELECT id, event_url, post_url, live_at_utc, live_at_timezone, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent
      FROM ig_flagged_posts
      WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
        AND (reminder_1d_sent = 0 OR reminder_1h_sent = 0 OR reminder_5m_sent = 0)`
@@ -1112,19 +1136,19 @@ async function checkAnnouncementReminders(env: Env): Promise<void> {
 
     if (!row.reminder_1d_sent && msUntil <= ONE_DAY_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.live_at_timezone, row.post_url);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1d_sent = 1 WHERE id = ?").bind(row.id).run();
     }
     if (!row.reminder_1h_sent && msUntil <= ONE_HOUR_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.live_at_timezone, row.post_url);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1h_sent = 1 WHERE id = ?").bind(row.id).run();
     }
     if (!row.reminder_5m_sent && msUntil <= FIVE_MIN_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.live_at_timezone, row.post_url);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_5m_sent = 1 WHERE id = ?").bind(row.id).run();
     }
@@ -1136,6 +1160,7 @@ interface AiAnnouncementParse {
   bannerText: string;
   isRaceTicketSale: boolean;
   liveAtUtc: string | null;
+  liveAtTimezone: string | null;
 }
 
 /** HYROX country accounts post in whatever language that country speaks, and
@@ -1170,7 +1195,7 @@ async function parseAnnouncementWithAI(
         model: "claude-haiku-4-5",
         max_tokens: 1024,
         system:
-          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true: produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp); set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name), use null rather than guessing if it's ambiguous; and if the caption states or clearly implies a specific date and time the (pre-)sale goes or went live, convert it to an absolute UTC timestamp in live_at_utc (ISO 8601, e.g. 2026-08-06T10:00:00Z) - infer the local timezone from the event's country/city if not stated explicitly, and use null if no specific time is given (a vague \"soon\" is not a specific time). If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about, and leave matched_event_url and live_at_utc null.",
+          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true: produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp); set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name), use null rather than guessing if it's ambiguous; and if the caption states or clearly implies a specific date and time the (pre-)sale goes or went live, convert it to an absolute UTC timestamp in live_at_utc (ISO 8601, e.g. 2026-08-06T10:00:00Z) - infer the local timezone from the event's country/city if not stated explicitly (e.g. Milan -> Europe/Rome, Berlin -> Europe/Berlin), and also return that same IANA timezone identifier in timezone so displays can show the event's own local time instead of UTC; use null for both live_at_utc and timezone if no specific time is given (a vague \"soon\" is not a specific time). If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about, and leave matched_event_url, live_at_utc, and timezone null.",
         messages: [
           {
             role: "user",
@@ -1187,8 +1212,9 @@ async function parseAnnouncementWithAI(
                 matched_event_url: { type: ["string", "null"] },
                 banner_text: { type: "string" },
                 live_at_utc: { type: ["string", "null"] },
+                timezone: { type: ["string", "null"] },
               },
-              required: ["is_race_ticket_sale", "matched_event_url", "banner_text", "live_at_utc"],
+              required: ["is_race_ticket_sale", "matched_event_url", "banner_text", "live_at_utc", "timezone"],
               additionalProperties: false,
             },
           },
@@ -1209,6 +1235,7 @@ async function parseAnnouncementWithAI(
       bannerText: parsed.banner_text,
       isRaceTicketSale: !!parsed.is_race_ticket_sale,
       liveAtUtc,
+      liveAtTimezone: liveAtUtc && parsed.timezone ? parsed.timezone : null,
     };
   } catch (e) {
     console.error("Failed to parse Instagram announcement with AI:", e);
@@ -1307,13 +1334,14 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
       const bannerText = ai?.bannerText || `${handle} just posted about tickets - check it out`;
       const eventUrl = ai?.eventUrl || null;
       const liveAtUtc = ai?.liveAtUtc || null;
+      const liveAtTimezone = ai?.liveAtTimezone || null;
 
       await env.DB.prepare(
-        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc)
-         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc, live_at_timezone)
+         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?)
          ON CONFLICT(handle, post_id) DO NOTHING`
       )
-        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc)
+        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc, liveAtTimezone)
         .run();
       flaggedCount++;
 
@@ -1322,11 +1350,11 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
         // Surface the same info on both the public browsable list
         // (event_directory) and the personal "waiting" list (sale_watch),
         // so it's visible to everyone, not just people who set up a watch.
-        await env.DB.prepare("UPDATE event_directory SET presale_note = ?, presale_live_at = ? WHERE url = ?")
-          .bind(bannerText, liveAtUtc, eventUrl)
+        await env.DB.prepare("UPDATE event_directory SET presale_note = ?, presale_live_at = ?, presale_timezone = ? WHERE url = ?")
+          .bind(bannerText, liveAtUtc, liveAtTimezone, eventUrl)
           .run();
-        await env.DB.prepare("UPDATE sale_watch SET presale_note = ?, presale_live_at = ? WHERE event_url = ?")
-          .bind(bannerText, liveAtUtc, eventUrl)
+        await env.DB.prepare("UPDATE sale_watch SET presale_note = ?, presale_live_at = ?, presale_timezone = ? WHERE event_url = ?")
+          .bind(bannerText, liveAtUtc, liveAtTimezone, eventUrl)
           .run();
       }
     }
@@ -1398,6 +1426,30 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/** Renders a UTC timestamp in the event's own local time (e.g. "Thu, 6 Aug
+ * 2026, 12:00 CEST") instead of GMT/UTC, which reads as a foreign,
+ * confusing time to most people. Falls back to UTC if the timezone is
+ * missing or Claude returned something Intl doesn't recognize, rather than
+ * throwing. */
+function formatInTimezone(utcIso: string, timezone: string | null): string {
+  const d = new Date(utcIso);
+  if (isNaN(d.getTime())) return utcIso;
+  const opts: Intl.DateTimeFormatOptions = {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
+  };
+  try {
+    return new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: timezone || "UTC" }).format(d);
+  } catch {
+    return new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: "UTC" }).format(d);
+  }
+}
+
 async function indexEvents(env: Env): Promise<number> {
   let sitemapXml: string;
   try {
@@ -1461,7 +1513,7 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
  * sort last rather than being hidden, since they're still real events. */
 async function handleListEvents(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, presale_note FROM event_directory
+    `SELECT url, title, event_date, on_sale, presale_note, presale_live_at, presale_timezone FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
@@ -1572,10 +1624,10 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   // Clear the presale info this post set, so a retracted bad match doesn't
   // keep showing on the public list or a subscriber's "waiting" line.
   if (post?.event_url) {
-    await env.DB.prepare("UPDATE event_directory SET presale_note = NULL, presale_live_at = NULL WHERE url = ?")
+    await env.DB.prepare("UPDATE event_directory SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL WHERE url = ?")
       .bind(post.event_url)
       .run();
-    await env.DB.prepare("UPDATE sale_watch SET presale_note = NULL, presale_live_at = NULL WHERE event_url = ?")
+    await env.DB.prepare("UPDATE sale_watch SET presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL WHERE event_url = ?")
       .bind(post.event_url)
       .run();
   }

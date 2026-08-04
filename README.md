@@ -398,15 +398,21 @@ after-the-fact visibility and retracting a bad publish, not a gate.
 **Pre-sale status and countdown reminders.** When Claude can tell the
 caption states a specific date/time (e.g. "public sale opens Thursday 6
 Aug at 12:00"), it converts that to an absolute UTC timestamp
-(`live_at_utc`), inferring the event's local timezone since captions
-rarely state one explicitly - a best-effort estimate, not a guarantee.
-This unlocks two things:
+(`live_at_utc`) plus the IANA timezone it inferred for the event
+(`live_at_timezone`, e.g. `Europe/Rome`) - a best-effort estimate, not a
+guarantee. Every display of that timestamp - emails and both web pages -
+renders it back in that local timezone (`formatInTimezone()` server-side,
+the same logic client-side for the homepage's fetched event list) instead
+of UTC/GMT, so a Milan pre-sale reads "12:00 CEST", not a confusing GMT
+time. This unlocks two things:
 
 - **Visible to everyone**, not just people with a "notify me" watch: the
   homepage's browsable event list and `/my-alerts` show a "Pre-sale live"
-  badge and the announcement text instead of a bare "Not on sale" /
-  "not yet on sale", via `presale_note`/`presale_live_at` on
-  `event_directory` and `sale_watch`.
+  badge plus a subtitle with the announcement text and, when a go-live
+  time is known, "Public sale: <local date/time>" - instead of a bare
+  "Not on sale" / "not yet on sale" - via `presale_note`/
+  `presale_live_at`/`presale_timezone` on `event_directory` and
+  `sale_watch`.
 - **Countdown reminder emails** to everyone watching that event: one when
   the estimated go-live time is ~1 day away, another at ~1 hour, and
   another at ~5 minutes - on top of the immediate "just announced" email.
@@ -418,8 +424,8 @@ This unlocks two things:
   worded as such in the email.
 
 Dismissing a bad match on `/admin/ig-posts` clears the associated
-`presale_note`/`presale_live_at` on both tables too, so a retracted
-announcement doesn't keep showing stale info.
+`presale_note`/`presale_live_at`/`presale_timezone` on both tables too, so
+a retracted announcement doesn't keep showing stale info.
 
 ---
 

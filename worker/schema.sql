@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS event_directory (
   -- specific "notify me" watch.
   presale_note TEXT,
   presale_live_at TEXT,
+  -- IANA zone (e.g. "Europe/Rome") Claude inferred for presale_live_at -
+  -- lets every display of that timestamp show the event's own local time
+  -- instead of UTC/GMT, which reads as a foreign, confusing time to most
+  -- people.
+  presale_timezone TEXT,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -71,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   -- sale is expected. presale_live_at is a UTC guess, not a guarantee.
   presale_note TEXT,
   presale_live_at TEXT,
+  presale_timezone TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -121,6 +127,7 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   -- goes live, if it says one at all. Drives the countdown reminders
   -- below; null means "no specific time mentioned", not "never".
   live_at_utc TEXT,
+  live_at_timezone TEXT,
   reminder_1d_sent INTEGER NOT NULL DEFAULT 0,
   reminder_1h_sent INTEGER NOT NULL DEFAULT 0,
   reminder_5m_sent INTEGER NOT NULL DEFAULT 0,
