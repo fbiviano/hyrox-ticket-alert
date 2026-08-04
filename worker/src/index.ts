@@ -635,8 +635,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
           </div>
         </div>
         <div class="sidebar">
-          ${announcements}
           ${sideOnSaleCard}
+          ${announcements}
         </div>
       </div>
       ${RESOLVE_SCRIPT}`,
@@ -673,8 +673,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         </div>
       </div>
       <div class="sidebar">
-        ${announcements}
         ${sideOnSaleCard}
+        ${announcements}
       </div>
     </div>
     <script>
