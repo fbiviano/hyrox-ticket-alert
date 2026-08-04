@@ -357,7 +357,7 @@ const RESOLVE_SCRIPT = `<script>
           return out;
         }
         function rowHtml(ev, entry) {
-          var dateLabel = ev.event_date || 'Date TBA';
+          var dateLabel = 'Race: ' + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
           return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
