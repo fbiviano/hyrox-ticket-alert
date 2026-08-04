@@ -3,11 +3,16 @@ import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS } fro
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
 const INDEX_BATCH_SIZE = 30;
 const INDEX_STALE_DAYS = 7;
-// Kept conservative (rather than the ~15 the math alone would allow) since
-// this shares the same 2-minute invocation - and its 50-subrequest cap -
-// with checkCommunityTickets and checkSaleWatches. Revisit if either of
-// those grows to watching many more rows.
-const SALE_STATUS_BATCH_SIZE = 10;
+// The real constraint turned out to be the Workers *Free plan's 10ms CPU
+// time per invocation* (discovered via wrangler tail showing "outcome":
+// "exceededCpu" on nearly every 2-minute tick), not the 50-subrequest cap -
+// resolveEvent() does 2-3 fetches + HTML/JSON parses each, and parsing
+// hyrox.com's large marketing pages is the expensive part (fetch() I/O
+// wait is free, but parsing large pages three times per event isn't).
+// A batch of 10 (worse, up to 20 with the retry below) reliably blew the
+// budget and got silently killed mid-batch, so most 2-minute ticks did
+// nothing at all. Kept small so a tick reliably finishes.
+const SALE_STATUS_BATCH_SIZE = 4;
 
 export interface Env {
   DB: D1Database;
@@ -896,17 +901,18 @@ async function checkSaleWatches(env: Env): Promise<void> {
 
 /** Keeps the browsable homepage list's on-sale status fresh for *every*
  * known event, not just ones someone explicitly asked to be notified
- * about (that's sale_watch, unchanged, above). Rotates through ~15
- * not-yet-passed events per 2-minute tick, oldest-checked-first, so the
- * full ~116-event directory cycles roughly every 16 minutes - well under
- * the 50-subrequest cap, and reuses the existing trigger rather than
- * adding a fourth schedule. */
+ * about (that's sale_watch, unchanged, above). Once on_sale flips to true
+ * it essentially never needs to flip back (a live shop doesn't disappear),
+ * so unconfirmed (on_sale=0) events are checked first, soonest race date
+ * first within that group - the ones someone's most likely checking on
+ * roxracealerts.com right now. Confirmed on_sale=1 events only get
+ * re-checked once the unconfirmed backlog is empty. */
 async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
   const today = todayIso();
   const { results } = await env.DB.prepare(
     `SELECT url FROM event_directory
      WHERE (event_date IS NULL OR event_date >= ?)
-     ORDER BY last_sale_check IS NOT NULL, last_sale_check ASC
+     ORDER BY on_sale ASC, event_date IS NULL, event_date ASC, last_sale_check IS NOT NULL, last_sale_check ASC
      LIMIT ?`
   )
     .bind(today, SALE_STATUS_BATCH_SIZE)
