@@ -196,14 +196,14 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .nav a.active{color:#111}
 .nav-user{margin-left:auto;color:#666;font-size:0.85rem}
 .nav-user a{font-weight:400;color:#111}
-body.wide{max-width:960px}
+body.wide{max-width:980px}
 .layout{display:flex;gap:24px;align-items:flex-start}
 .main-col{flex:0 0 640px;max-width:640px;min-width:0}
-.sidebar{flex:0 0 280px;max-width:280px;display:flex;flex-direction:column;gap:16px}
+.sidebar{flex:0 0 300px;max-width:300px;display:flex;flex-direction:column;gap:16px}
+.sidebar .event-row{flex-direction:column;align-items:flex-start;gap:4px}
 .hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
-.teaser-mini{font-size:0.85rem;color:#555;margin:0}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
@@ -222,10 +222,11 @@ body.wide{max-width:960px}
   );
 }
 
-function navBar(currentPath: "/" | "/my-alerts", subscriber: { email: string } | null): string {
+function navBar(currentPath: "/" | "/my-alerts", subscriber: { email: string } | null, watchCount = 0): string {
+  const myAlertsLabel = watchCount > 0 ? `My Alerts (${watchCount})` : "My Alerts";
   return `<nav class="nav">
     <a href="/"${currentPath === "/" ? ' class="active"' : ""}>Home</a>
-    <a href="/my-alerts"${currentPath === "/my-alerts" ? ' class="active"' : ""}>My Alerts</a>
+    <a href="/my-alerts"${currentPath === "/my-alerts" ? ' class="active"' : ""}>${myAlertsLabel}</a>
     ${subscriber ? `<span class="nav-user">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>` : ""}
   </nav>`;
 }
@@ -415,16 +416,16 @@ const RESOLVE_SCRIPT = `<script>
           if (!out.length) out.push({ section: 'waiting', badge: 'Not on sale', badgeClass: 'off', subtitle: '' });
           return out;
         }
-        function rowHtml(ev, entry) {
-          var dateLabel = 'Race: ' + (ev.event_date || 'date TBA');
+        function rowHtml(ev, entry, compact) {
+          var dateLabel = (compact ? '' : 'Race: ') + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
           return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
         }
-        function groupHtml(title, items) {
+        function groupHtml(title, items, compact) {
           if (!items.length) return '';
           return '<div class="event-group"><h3>' + esc(title) + ' (' + items.length + ')</h3>' +
-            '<div class="event-group-rows">' + items.map(function(x) { return rowHtml(x.ev, x.entry); }).join('') + '</div></div>';
+            '<div class="event-group-rows">' + items.map(function(x) { return rowHtml(x.ev, x.entry, compact); }).join('') + '</div></div>';
         }
         var bySection = { on: [], live: [], soon: [], waiting: [] };
         data.results.forEach(function(ev) {
@@ -434,7 +435,7 @@ const RESOLVE_SCRIPT = `<script>
           eventListMain.innerHTML = groupHtml('On sale now', bySection.on) + groupHtml('Not on sale yet', bySection.waiting);
         }
         if (eventListSide) {
-          var sideHtml = groupHtml('Live now', bySection.live) + groupHtml('Going live soon', bySection.soon);
+          var sideHtml = groupHtml('Live now', bySection.live, true) + groupHtml('Going live soon', bySection.soon, true);
           eventListSide.innerHTML = sideHtml;
           if (sideCard) sideCard.style.display = sideHtml ? '' : 'none';
         }
@@ -619,13 +620,9 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
 
   if (subscriber) {
     const counts = await getWatchCounts(subscriber.id, env);
-    const teaser =
-      counts.tickets + counts.races > 0
-        ? `<p class="teaser-mini">You're tracking ${counts.tickets} ticket(s) and ${counts.races} race(s) waiting to go on sale &mdash; <a href="/my-alerts">view my alerts</a>.</p>`
-        : "";
     return page(
       "RoxRaceAlerts",
-      `${navBar("/", subscriber)}
+      `${navBar("/", subscriber, counts.tickets + counts.races)}
       <div class="layout">
         <div class="main-col">
           ${hero}
@@ -639,7 +636,6 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         </div>
         <div class="sidebar">
           ${announcements}
-          ${teaser}
           ${sideOnSaleCard}
         </div>
       </div>
@@ -961,6 +957,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
 
   const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
   const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
+  const counts = await getWatchCounts(subscriber.id, env);
   const saleSections: string[] = [];
   if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
   if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
@@ -969,7 +966,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   }
   return page(
     "My Alerts",
-    `${navBar("/my-alerts", subscriber)}
+    `${navBar("/my-alerts", subscriber, counts.tickets + counts.races)}
     <div class="card">
       <h2>Your watched tickets</h2>
       ${rows.active}
@@ -1748,15 +1745,19 @@ async function handleCheckInstagram(req: Request, env: Env): Promise<Response> {
  * homepage - a lightweight "heads up" banner, separate from the browsable
  * event list's own on_sale status (which reflects the actual vivenu shop,
  * not a social-media post). Returns "" when there's nothing to show. */
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1).trimEnd()}…` : s;
+}
+
 async function renderAnnouncementsBanner(env: Env): Promise<string> {
   const { results } = await env.DB.prepare(
-    "SELECT handle, post_url, banner_text, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 5"
+    "SELECT handle, post_url, banner_text, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 3"
   ).all<any>();
   if (!results || !results.length) return "";
   const rows = results
     .map(
       (r: any) => `<div class="ticket-row">
-      <span>${escapeHtml(r.banner_text || r.handle)}</span>
+      <span>${escapeHtml(truncate(r.banner_text || r.handle, 70))}</span>
       <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View post</a>
     </div>`
     )
