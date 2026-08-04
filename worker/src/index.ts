@@ -228,12 +228,25 @@ const RESOLVE_SCRIPT = `<script>
   var input = document.getElementById('urlInput');
   var out = document.getElementById('resolveResult');
   var suggestions = document.getElementById('suggestions');
+  var clearWrap = document.getElementById('clearFindWrap');
+  var clearLink = document.getElementById('clearFindLink');
+  if (clearLink) {
+    clearLink.addEventListener('click', function(e) {
+      e.preventDefault();
+      out.innerHTML = '';
+      input.value = '';
+      suggestions.innerHTML = '';
+      clearWrap.style.display = 'none';
+      input.focus();
+    });
+  }
 
   async function doFind(url) {
     url = url.trim();
     if (!url) return;
     suggestions.innerHTML = '';
     out.innerHTML = '<p>Looking...</p>';
+    if (clearWrap) clearWrap.style.display = 'block';
     try {
       var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
       var data = await resp.json();
@@ -552,6 +565,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       <button type="button" id="findBtn">Find tickets</button>
     </div>
     <div id="resolveResult"></div>
+    <p id="clearFindWrap" style="display:none;margin-top:4px"><a href="#" id="clearFindLink">Cancel &mdash; search for a different race</a></p>
     <details class="browse" id="browseEvents" open>
       <summary class="browse-toggle">All HYROX races &mdash; on sale and upcoming <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
