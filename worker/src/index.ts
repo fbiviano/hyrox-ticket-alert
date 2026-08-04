@@ -686,7 +686,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         <div class="main-col">
           ${hero}
           <div class="card">
-            <h2>Monitor a race</h2>
+            <h2>Monitor race tickets</h2>
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
               <button type="submit" id="ticketSubmitBtn" style="display:none">Add selected ticket(s)</button>
@@ -712,7 +712,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       <div class="main-col">
         ${hero}
         <div class="card">
-          <h2>Monitor a race</h2>
+          <h2>Monitor race tickets</h2>
           <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
           <form method="POST" action="/subscribe" id="signupForm">
             ${searchBox}
