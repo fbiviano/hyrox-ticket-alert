@@ -985,7 +985,13 @@ async function fetchLatestInstagramPosts(env: Env): Promise<ApifyPost[]> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         username: IG_HANDLES,
-        resultsLimit: 1,
+        // "1 = the single latest post" turned out not to be reliable -
+        // verified live that consecutive calls can return an older post
+        // Apify still had cached instead of the true latest, with no
+        // isPinned flag to explain it. Pulling a few and picking the
+        // numerically highest post id (see checkInstagramAnnouncements)
+        // is immune to that instead of trusting result order.
+        resultsLimit: 3,
         dataDetailLevel: "basicData",
       }),
     }
@@ -1004,9 +1010,33 @@ async function fetchLatestInstagramPosts(env: Env): Promise<ApifyPost[]> {
  * approves before anything shows up publicly. */
 const IG_HANDLES_LOWER = new Set(IG_HANDLES.map((h) => h.toLowerCase()));
 
+/** Instagram media ids are monotonically increasing numeric strings (newer
+ * posts always have a bigger id), which is a much more reliable "is this
+ * actually new" check than trusting which post the API handed back first -
+ * verified live that a repeat call can resurface an older post with no
+ * explanation. Falls back to simple inequality for the rare non-numeric id
+ * (e.g. a shortCode used because `id` was missing). */
+function isPostIdNewer(candidateId: string, knownId: string | null): boolean {
+  if (knownId === null) return true;
+  if (/^\d+$/.test(candidateId) && /^\d+$/.test(knownId)) return BigInt(candidateId) > BigInt(knownId);
+  return candidateId !== knownId;
+}
+
 async function checkInstagramAnnouncements(env: Env): Promise<void> {
   const posts = await fetchLatestInstagramPosts(env);
   let flaggedCount = 0;
+
+  // Snapshot existing watch state once, upfront - otherwise, since Apify
+  // now returns a few recent posts per profile instead of just one, the
+  // "have we ever checked this handle" determination could flip mid-run as
+  // soon as the first post for a brand-new handle gets recorded.
+  const { results: existingRows } = await env.DB.prepare("SELECT handle, last_post_id FROM ig_watch").all<any>();
+  const knownLastPostId = new Map<string, string>((existingRows || []).map((r: any) => [r.handle, r.last_post_id]));
+  // Highest post id seen per handle *this run* - persisted once at the end
+  // rather than as we go, so out-of-order results within the same batch
+  // (or duplicate handle matches via Collab coauthors) can't clobber a
+  // newer id already found earlier in the loop.
+  const maxSeenThisRun = new Map<string, string>();
 
   for (const post of posts) {
     const postId = post.id || post.shortCode;
@@ -1024,20 +1054,15 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
     const matchedHandles = candidates.filter((u) => IG_HANDLES_LOWER.has(u.toLowerCase()));
 
     for (const handle of matchedHandles) {
-      const watch = await env.DB.prepare("SELECT last_post_id FROM ig_watch WHERE handle = ?").bind(handle).first<any>();
-      const isFirstCheck = !watch;
+      const isFirstCheck = !knownLastPostId.has(handle);
+      const priorBest = maxSeenThisRun.get(handle) ?? knownLastPostId.get(handle) ?? null;
+      const isNewer = isPostIdNewer(postId, priorBest);
+      if (isNewer) maxSeenThisRun.set(handle, postId);
 
-      await env.DB.prepare(
-        `INSERT INTO ig_watch (handle, last_post_id, last_checked_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(handle) DO UPDATE SET last_post_id = excluded.last_post_id, last_checked_at = excluded.last_checked_at`
-      )
-        .bind(handle, postId)
-        .run();
-
-      // First time we've ever checked this handle - just record today's
-      // latest post as the baseline rather than flagging it, so we only
-      // surface genuinely *new* posts from here on.
-      if (isFirstCheck || watch.last_post_id === postId) continue;
+      // Never flag anything the first time we've ever checked a handle -
+      // that just establishes the baseline - and never flag a post we've
+      // already seen (or an older one Apify happened to resurface).
+      if (isFirstCheck || !isNewer) continue;
 
       const caption = (post.caption || "").toLowerCase();
       const matched = IG_SALE_KEYWORDS.find((kw) => caption.includes(kw));
@@ -1053,6 +1078,17 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
         .run();
       flaggedCount++;
     }
+  }
+
+  // Persist the new high-water mark for every handle touched this run
+  // (including first-time accounts, whose baseline this establishes).
+  for (const [handle, postId] of maxSeenThisRun) {
+    await env.DB.prepare(
+      `INSERT INTO ig_watch (handle, last_post_id, last_checked_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(handle) DO UPDATE SET last_post_id = excluded.last_post_id, last_checked_at = excluded.last_checked_at`
+    )
+      .bind(handle, postId)
+      .run();
   }
 
   if (flaggedCount > 0 && env.ADMIN_EMAIL) {
