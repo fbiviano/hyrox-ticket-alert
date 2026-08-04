@@ -191,7 +191,11 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-badge.presale{background:#fff4e0;color:#9a6700}
 .event-badge.soon{background:#e6eeff;color:#2851b8}
 .event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
-.row-chev{color:#999;margin-left:4px;flex-shrink:0}
+.event-right{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.row-chev{color:#999}
+.row-monitor{display:block;margin-top:4px;background:#fff;border:1px solid #ccc;border-radius:6px;padding:2px 8px;font-size:0.75rem;color:#111;cursor:pointer}
+.row-monitor:hover{background:#f5f5f5}
+.row-monitor:disabled{color:#1e7e34;border-color:#bfe0c9;cursor:default}
 .nav{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding-bottom:12px;margin-bottom:4px;border-bottom:1px solid #e2e2e2;font-size:0.9rem}
 .nav a{text-decoration:none;color:#555;font-weight:600}
 .nav a.active{color:#111}
@@ -244,6 +248,7 @@ const RESOLVE_SCRIPT = `<script>
   var suggestions = document.getElementById('suggestions');
   var clearX = document.getElementById('clearFindX');
   var browseDetails = document.getElementById('browseEvents');
+  var submitBtn = document.getElementById('ticketSubmitBtn');
   var signedIn = !!document.querySelector('.nav-user');
   function updateClearX() {
     if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
@@ -256,6 +261,7 @@ const RESOLVE_SCRIPT = `<script>
       suggestions.innerHTML = '';
       updateClearX();
       if (browseDetails) browseDetails.open = true;
+      if (submitBtn) submitBtn.style.display = 'none';
       input.focus();
     });
   }
@@ -266,6 +272,7 @@ const RESOLVE_SCRIPT = `<script>
     suggestions.innerHTML = '';
     out.innerHTML = '<p>Looking...</p>';
     updateClearX();
+    if (submitBtn) submitBtn.style.display = 'none';
     try {
       var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
       var data = await resp.json();
@@ -324,6 +331,7 @@ const RESOLVE_SCRIPT = `<script>
         html += '<label><input type="checkbox" name="ticket" value="' + esc(t.encoded) + '"> [' + esc(t.status.toUpperCase()) + '] ' + esc(t.name) + '</label>';
       }
       out.innerHTML = html;
+      if (submitBtn) submitBtn.style.display = 'block';
     } catch (e) {
       out.innerHTML = '<p>Something went wrong. Try again.</p>';
     }
@@ -381,6 +389,7 @@ const RESOLVE_SCRIPT = `<script>
   function attachRowClicks(container) {
     if (!container) return;
     container.addEventListener('click', function(e) {
+      if (e.target.closest && e.target.closest('.row-monitor')) return;
       var row = e.target.closest ? e.target.closest('.event-row') : null;
       if (!row) return;
       var url = row.getAttribute('data-url');
@@ -389,6 +398,40 @@ const RESOLVE_SCRIPT = `<script>
       var details = row.closest('details');
       if (details) details.open = false;
       doFind(url);
+    });
+  }
+
+  function wireMonitorButtons(container) {
+    if (!container) return;
+    container.addEventListener('click', function(e) {
+      var btn = e.target.closest ? e.target.closest('.row-monitor') : null;
+      if (!btn || btn.disabled) return;
+      var url = btn.getAttribute('data-url');
+      var title = btn.getAttribute('data-title');
+      var date = btn.getAttribute('data-date');
+      if (!signedIn) {
+        input.value = url;
+        if (browseDetails) browseDetails.open = false;
+        doFind(url);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = 'Monitoring…';
+      var fd = new FormData();
+      fd.set('event_url', url);
+      fd.set('event_title', title);
+      fd.set('event_date', date || '');
+      fetch('/watch-sale', { method: 'POST', body: fd }).then(function(resp) {
+        if (resp.ok) {
+          btn.textContent = '✓ Monitoring';
+        } else {
+          btn.disabled = false;
+          btn.textContent = '+ Monitor';
+        }
+      }).catch(function() {
+        btn.disabled = false;
+        btn.textContent = '+ Monitor';
+      });
     });
   }
 
@@ -431,7 +474,10 @@ const RESOLVE_SCRIPT = `<script>
           var dateLabel = (compact ? '' : 'Race: ') + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '<span class="row-chev">&#8250;</span></div>';
+          var monitorBtn = entry.section === 'soon'
+            ? '<button type="button" class="row-monitor" data-url="' + esc(ev.url) + '" data-title="' + esc(ev.title) + '" data-date="' + esc(ev.event_date || '') + '">+ Monitor</button>'
+            : '';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + monitorBtn + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
         }
         function groupHtml(title, items, compact) {
           if (!items.length) return '';
@@ -463,6 +509,7 @@ const RESOLVE_SCRIPT = `<script>
     }
     attachRowClicks(eventListMain);
     attachRowClicks(eventListSide);
+    wireMonitorButtons(eventListSide);
   }
 })();
 </script>`;
@@ -642,7 +689,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
             <h2>Monitor a race</h2>
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
-              <button type="submit">Add selected ticket(s)</button>
+              <button type="submit" id="ticketSubmitBtn" style="display:none">Add selected ticket(s)</button>
             </form>
             ${browseSection}
           </div>
@@ -673,7 +720,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
               <input type="email" name="email" required placeholder="you@example.com">
             </label>
             <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
-            <button type="submit">Subscribe</button>
+            <button type="submit" id="ticketSubmitBtn" style="display:none">Subscribe</button>
           </form>
           ${browseSection}
         </div>
