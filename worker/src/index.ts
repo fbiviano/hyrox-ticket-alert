@@ -1115,12 +1115,6 @@ const IG_HANDLES = [
   "hyroxtha", "hyroxegp",
 ];
 
-const IG_SALE_KEYWORDS = [
-  "ticket sale", "tickets are live", "tickets on sale", "on sale now",
-  "sales are live", "secret shop", "pre-sale", "presale", "ticket launch",
-  "tickets are now live", "registration is live", "registration opens",
-];
-
 interface ApifyPost {
   ownerUsername?: string;
   // Instagram's "Collab" feature makes one post appear on multiple
@@ -1302,12 +1296,13 @@ interface AiAnnouncementParse {
  * a single account can cover many cities (e.g. @hyroxitalia posts about
  * Rome, Milan, Bologna...), so figuring out "which known event is this
  * about, and what does it actually say" needs real language understanding,
- * not regex. Also judges relevance, not just extraction: the upstream
- * keyword match ("on sale", "tickets"...) also fires on merch drops and
- * other noise, and since nothing reviews this before it publishes, that
- * judgment has to happen somewhere. Returns null on any failure - the
- * caller falls back to a generic banner rather than blocking the whole
- * check on one bad response. */
+ * not regex. Also judges relevance, not just extraction - every new post
+ * gets sent here regardless of what it says (there's no keyword pre-filter
+ * anymore; it missed too much - non-English captions, future-tense
+ * announcements), so this is the *only* thing standing between "someone
+ * posted a workout selfie" and it publishing as a ticket-sale alert.
+ * Returns null on any failure - the caller treats that as "no evidence,
+ * don't publish" rather than blocking the whole check. */
 async function parseAnnouncementWithAI(
   env: Env,
   caption: string,
@@ -1392,13 +1387,13 @@ function isPostIdNewer(candidateId: string, knownId: string | null): boolean {
   return candidateId !== knownId;
 }
 
-/** Daily check (see the "0 8 * * *" cron below). A new post whose caption
- * mentions a ticket sale is auto-published immediately - Claude reads the
- * caption (any language) to write an English summary and, where confident,
- * match it to a known event, and anyone watching that event's sale gets
- * emailed right away. No human approval gate: keyword matching plus an AI
- * read of the actual caption is judged reliable enough, and the admin can
- * always retract a bad publish afterwards from /admin/ig-posts. */
+/** Daily check (see the "0 8 * * *" cron below). Every genuinely new post
+ * from a tracked account gets read by Claude (any language) to decide
+ * whether it's actually a race ticket-sale announcement, write an English
+ * summary, and where confident, match it to a known event - if so, anyone
+ * watching that event's sale gets emailed right away. No human approval
+ * gate: the AI's read of the caption is judged reliable enough, and the
+ * admin can always retract a bad publish afterwards from /admin/ig-posts. */
 async function checkInstagramAnnouncements(env: Env): Promise<void> {
   const posts = await fetchLatestInstagramPosts(env);
   let flaggedCount = 0;
@@ -1446,10 +1441,6 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
       // already seen (or an older one Apify happened to resurface).
       if (isFirstCheck || !isNewer) continue;
 
-      const captionLower = (post.caption || "").toLowerCase();
-      const matched = IG_SALE_KEYWORDS.find((kw) => captionLower.includes(kw));
-      if (!matched) continue;
-
       const postUrl = post.url || `https://www.instagram.com/p/${post.shortCode}/`;
 
       if (candidateEvents === null) {
@@ -1461,25 +1452,26 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
         candidateEvents = results || [];
       }
       const ai = await parseAnnouncementWithAI(env, post.caption || "", post.timestamp || null, candidateEvents);
-      // A definite "no" from the AI (not a race ticket sale - merch, a
-      // giveaway, something else the keyword match just happened to catch)
-      // means don't publish at all. An AI failure (ai === null) falls back
-      // to publishing with a generic banner instead of blocking on it -
-      // the keyword match alone is still a reasonable signal.
-      if (ai && !ai.isRaceTicketSale) continue;
+      // No keyword pre-filter anymore (it missed non-English captions and
+      // future-tense announcements - see e.g. "Tickets Are Almost Here" or
+      // a Portuguese "as vendas começam em..."), so the AI's relevance
+      // judgment is now the *only* signal that a post is genuinely about
+      // race ticket sales. A failed AI call means no evidence at all, not
+      // "probably fine" - skip rather than publish blind.
+      if (!ai || !ai.isRaceTicketSale) continue;
 
-      const bannerText = ai?.bannerText || `${handle} just posted about tickets - check it out`;
-      const eventUrl = ai?.eventUrl || null;
-      const liveAtUtc = ai?.liveAtUtc || null;
-      const liveAtTimezone = ai?.liveAtTimezone || null;
-      const presaleIsLive = ai?.presaleIsLive ? 1 : 0;
+      const bannerText = ai.bannerText;
+      const eventUrl = ai.eventUrl;
+      const liveAtUtc = ai.liveAtUtc;
+      const liveAtTimezone = ai.liveAtTimezone;
+      const presaleIsLive = ai.presaleIsLive ? 1 : 0;
 
       await env.DB.prepare(
-        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live)
-         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, posted_at, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live)
+         VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?)
          ON CONFLICT(handle, post_id) DO NOTHING`
       )
-        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl, liveAtUtc, liveAtTimezone, presaleIsLive)
+        .bind(handle, postId, postUrl, post.caption || "", post.timestamp || null, bannerText, eventUrl, liveAtUtc, liveAtTimezone, presaleIsLive)
         .run();
       flaggedCount++;
 
@@ -1716,8 +1708,8 @@ async function renderAnnouncementsBanner(env: Env): Promise<string> {
 }
 
 /** Read-only log of what the daily Instagram check auto-published, plus a
- * one-click way to retract a bad publish (a false-positive keyword match,
- * or an AI mismatch). Nothing here requires action - publishing already
+ * one-click way to retract a bad publish (an AI mismatch, or an incorrect
+ * event match). Nothing here requires action - publishing already
  * happened by the time this page is opened. Uses the token-in-URL pattern
  * (like unsubscribe/my-alerts links) rather than a Bearer header, since
  * this page is meant to be opened in a normal browser. */
@@ -1726,13 +1718,13 @@ async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    "SELECT id, handle, post_url, caption, matched_keyword, banner_text, event_url, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 30"
+    "SELECT id, handle, post_url, caption, banner_text, event_url, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 30"
   ).all<any>();
 
   const rows = (results || [])
     .map(
       (r: any) => `<div class="card">
-        <p><b>@${escapeHtml(r.handle)}</b> &middot; matched "${escapeHtml(r.matched_keyword)}" &middot; <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View on Instagram</a></p>
+        <p><b>@${escapeHtml(r.handle)}</b> &middot; <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View on Instagram</a></p>
         <p>${escapeHtml(r.banner_text || "")}</p>
         ${r.event_url ? `<p><small>Emailed watchers of: ${escapeHtml(r.event_url)}</small></p>` : ""}
         <p><small>${escapeHtml(r.caption || "")}</small></p>

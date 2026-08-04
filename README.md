@@ -363,11 +363,14 @@ HYROX country/region Instagram accounts (e.g. `@hyroxitalia`) usually
 announce ticket sales days to weeks before hyrox.com's own pages reflect
 it, so a daily check (`0 8 * * *` Cron Trigger) asks
 [Apify's Instagram Post Scraper](https://apify.com/apify/instagram-post-scraper)
-for each tracked account's latest post. A new post whose caption mentions
-a ticket sale ("ticket sale", "tickets are live", "secret shop", etc.)
-gets sent to Claude (the Anthropic API) to read - captions are in whatever
-language that country speaks - and produce a short English summary, plus
-(when it can confidently tell) which known HYROX event it's about. The
+for each tracked account's latest post. Every genuinely new post (not
+just ones matching a keyword - an earlier version pre-filtered by phrases
+like "ticket sale"/"secret shop", but that missed non-English captions and
+future-tense announcements like "Tickets Are Almost Here") gets sent to
+Claude (the Anthropic API) to read - captions are in whatever language
+that country speaks - and decide whether it's genuinely a race ticket-sale
+announcement, producing a short English summary plus (when it can
+confidently tell) which known HYROX event it's about. The
 result is **published automatically**: it shows up in a "Recent
 ticket-sale news" section on the homepage, and if it matched an event
 someone's watching via "notify me when on sale", they're emailed directly
@@ -386,8 +389,9 @@ after-the-fact visibility and retracting a bad publish, not a gate.
   `checkSaleWatches` keeps polling the actual shop independently.
 - Cost: checking ~28 accounts once a day is ~840 Apify results/month,
   comfortably inside Apify's free 2,000/month tier. The Claude API call
-  only runs for posts that already matched a keyword (typically 0-3/day),
-  so both add up to a few cents a month at most.
+  runs for every genuinely new post (typically well under 28/day, since
+  most accounts don't post daily), using the cheapest current model
+  (`claude-haiku-4-5`) - a few cents a month at most either way.
 - Secrets: `APIFY_API_TOKEN` (Apify account → Settings → API tokens) and
   `ANTHROPIC_API_KEY` (console.anthropic.com → API keys), set the same way
   as the other secrets above.

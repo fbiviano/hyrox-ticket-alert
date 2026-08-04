@@ -105,8 +105,8 @@ CREATE TABLE IF NOT EXISTS ig_watch (
   last_checked_at TEXT
 );
 
--- New Instagram posts whose caption matched a ticket-sale keyword. Claude
--- reads the caption and decides whether to auto-publish (see
+-- Every genuinely new Instagram post from a tracked account. Claude reads
+-- the caption and decides whether to auto-publish (see
 -- checkInstagramAnnouncements() in src/index.ts) - this table doubles as
 -- the publish log and, via live_at_utc + the reminder_* flags, the source
 -- for the countdown-reminder emails sent as a matched event's expected
@@ -117,6 +117,11 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   post_id TEXT NOT NULL,
   post_url TEXT NOT NULL,
   caption TEXT,
+  -- Legacy: which upstream keyword ("pre-sale", "on sale"...) triggered AI
+  -- review, back when a keyword pre-filter gated every check. Removed -
+  -- non-English captions and future-tense announcements slipped past it -
+  -- so every new post now goes straight to the AI. Column kept only so
+  -- historic rows keep their original value; never written to anymore.
   matched_keyword TEXT,
   posted_at TEXT,
   detected_at TEXT NOT NULL DEFAULT (datetime('now')),
