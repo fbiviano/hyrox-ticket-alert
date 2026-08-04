@@ -18,8 +18,10 @@ export interface Env {
   DB: D1Database;
   RESEND_API_KEY: string;
   WEBHOOK_SECRET: string;
+  APIFY_API_TOKEN: string;
   SEND_FROM: string;
   SITE_URL: string;
+  ADMIN_EMAIL: string;
 }
 
 interface TrackedTicket {
@@ -444,6 +446,7 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
 
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
+  const announcements = await renderAnnouncementsBanner(env);
 
   const findForm = `<div class="row">
       <div class="urlWrap">
@@ -463,7 +466,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
     return page(
       "RoxRaceAlerts",
-      `<div class="card">
+      `${announcements}
+      <div class="card">
         <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
         <h2>Your watched tickets</h2>
         ${rows.active}
@@ -484,7 +488,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
 
   return page(
     "Get notified when sold-out HYROX tickets become available",
-    `<div class="card">
+    `${announcements}
+    <div class="card">
       <p>Free alerts the moment a sold-out ticket type becomes available again. Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
       <form method="POST" action="/subscribe" id="signupForm">
         ${findForm}
@@ -931,6 +936,141 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
   }
 }
 
+// HYROX country/region Instagram accounts - tickets are usually announced
+// here days to weeks before hyrox.com's own marketing pages get updated,
+// so this catches the heads-up hyrox.com alone can't provide. Hardcoded
+// rather than DB-managed since it changes rarely - edit and redeploy to
+// add/remove an account.
+const IG_HANDLES = [
+  "hyroxworld", "hyroxamerica", "hyroxanz", "hyroxger", "hyroxbenelux",
+  "hyroxbrasil", "hyroxca", "hyroxchina", "hyroxnordic", "hyroxme",
+  "hyroxbaltics", "hyrox.france", "hyroxgreece", "hyroxhk", "hyroxindia",
+  "hyroxuk", "hyroxitalia", "hyroxjapan", "hyroxkor", "hyroxmx",
+  "hyroxpoland", "hyroxesp", "hyroxsg", "hyroxsa", "hyroxsui", "hyroxtw",
+  "hyroxtha", "hyroxegp",
+];
+
+const IG_SALE_KEYWORDS = [
+  "ticket sale", "tickets are live", "tickets on sale", "on sale now",
+  "sales are live", "secret shop", "pre-sale", "presale", "ticket launch",
+  "tickets are now live", "registration is live", "registration opens",
+];
+
+interface ApifyPost {
+  ownerUsername?: string;
+  // Instagram's "Collab" feature makes one post appear on multiple
+  // profiles at once - ownerUsername is just the primary author, everyone
+  // else who co-posted shows up here instead. A tracked account's latest
+  // post is often a collab it didn't "own", so both fields need checking.
+  coauthorProducers?: { username?: string }[];
+  id?: string;
+  shortCode?: string;
+  url?: string;
+  caption?: string;
+  timestamp?: string;
+}
+
+/** Asks Apify's Instagram Post Scraper (a paid third-party scraping service,
+ * not something we run ourselves - Instagram aggressively blocks direct
+ * automated access) for each tracked account's single latest post, in one
+ * HTTP call covering all handles. All the actual scraping/anti-bot work
+ * happens on Apify's infrastructure - this Worker just parses a small JSON
+ * response, so it's cheap CPU-wise (unlike resolveEvent()'s HTML parsing). */
+async function fetchLatestInstagramPosts(env: Env): Promise<ApifyPost[]> {
+  const resp = await fetch(
+    "https://api.apify.com/v2/acts/apify~instagram-post-scraper/run-sync-get-dataset-items?token=" +
+      encodeURIComponent(env.APIFY_API_TOKEN),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: IG_HANDLES,
+        resultsLimit: 1,
+        dataDetailLevel: "basicData",
+      }),
+    }
+  );
+  if (!resp.ok) {
+    console.error(`Apify request failed: ${resp.status} ${await resp.text()}`);
+    return [];
+  }
+  return (await resp.json()) as ApifyPost[];
+}
+
+/** Daily check (see the "0 8 * * *" cron below) - flags new posts whose
+ * caption mentions a ticket sale for admin review at /admin/ig-posts.
+ * Never auto-publishes: keyword matching alone isn't reliable enough (a
+ * caption could mention "tickets" for something unrelated), so a human
+ * approves before anything shows up publicly. */
+const IG_HANDLES_LOWER = new Set(IG_HANDLES.map((h) => h.toLowerCase()));
+
+async function checkInstagramAnnouncements(env: Env): Promise<void> {
+  const posts = await fetchLatestInstagramPosts(env);
+  let flaggedCount = 0;
+
+  for (const post of posts) {
+    const postId = post.id || post.shortCode;
+    if (!postId) continue;
+
+    // A post can legitimately belong to more than one tracked account at
+    // once (a Collab between two country pages), and Apify doesn't tell us
+    // which of our input usernames produced this result - so match against
+    // our known list via owner + coauthors rather than trusting response
+    // order. Anything not in our list is ignored outright (Apify has
+    // occasionally returned an untracked account via fuzzy-match fallback).
+    const candidates = [post.ownerUsername, ...(post.coauthorProducers || []).map((c) => c.username)].filter(
+      (u): u is string => !!u
+    );
+    const matchedHandles = candidates.filter((u) => IG_HANDLES_LOWER.has(u.toLowerCase()));
+
+    for (const handle of matchedHandles) {
+      const watch = await env.DB.prepare("SELECT last_post_id FROM ig_watch WHERE handle = ?").bind(handle).first<any>();
+      const isFirstCheck = !watch;
+
+      await env.DB.prepare(
+        `INSERT INTO ig_watch (handle, last_post_id, last_checked_at) VALUES (?, ?, datetime('now'))
+         ON CONFLICT(handle) DO UPDATE SET last_post_id = excluded.last_post_id, last_checked_at = excluded.last_checked_at`
+      )
+        .bind(handle, postId)
+        .run();
+
+      // First time we've ever checked this handle - just record today's
+      // latest post as the baseline rather than flagging it, so we only
+      // surface genuinely *new* posts from here on.
+      if (isFirstCheck || watch.last_post_id === postId) continue;
+
+      const caption = (post.caption || "").toLowerCase();
+      const matched = IG_SALE_KEYWORDS.find((kw) => caption.includes(kw));
+      if (!matched) continue;
+
+      const postUrl = post.url || `https://www.instagram.com/p/${post.shortCode}/`;
+      await env.DB.prepare(
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(handle, post_id) DO NOTHING`
+      )
+        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null)
+        .run();
+      flaggedCount++;
+    }
+  }
+
+  if (flaggedCount > 0 && env.ADMIN_EMAIL) {
+    const reviewLink = `${env.SITE_URL}/admin/ig-posts?token=${env.WEBHOOK_SECRET}`;
+    try {
+      await sendEmail(
+        env,
+        env.ADMIN_EMAIL,
+        `${flaggedCount} new HYROX Instagram post(s) to review`,
+        `<p>${flaggedCount} new Instagram post(s) mentioned a ticket sale. Review and publish: <a href="${reviewLink}">${reviewLink}</a></p>`,
+        `${flaggedCount} new Instagram post(s) mentioned a ticket sale.\nReview and publish: ${reviewLink}`
+      );
+    } catch (e) {
+      console.error("Failed to send admin IG digest email:", e);
+    }
+  }
+}
+
 function decodeHtmlEntities(s: string): string {
   return s
     .replace(/&#0?39;/g, "'")
@@ -1065,6 +1205,103 @@ async function handleRefreshSaleStatus(req: Request, env: Env): Promise<Response
   return jsonResponse({ ok: true });
 }
 
+/** Manual trigger for checkInstagramAnnouncements, same pattern as
+ * /admin/reindex - useful for testing without waiting on the daily cron. */
+async function handleCheckInstagram(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  await checkInstagramAnnouncements(env);
+  return jsonResponse({ ok: true });
+}
+
+
+/** Renders the last few admin-approved Instagram announcements for the
+ * homepage - a lightweight "heads up" banner, separate from the browsable
+ * event list's own on_sale status (which reflects the actual vivenu shop,
+ * not a social-media post). Returns "" when there's nothing to show. */
+async function renderAnnouncementsBanner(env: Env): Promise<string> {
+  const { results } = await env.DB.prepare(
+    "SELECT handle, post_url, banner_text, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 5"
+  ).all<any>();
+  if (!results || !results.length) return "";
+  const rows = results
+    .map(
+      (r: any) => `<div class="ticket-row">
+      <span>${escapeHtml(r.banner_text || r.handle)}</span>
+      <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View post</a>
+    </div>`
+    )
+    .join("");
+  return `<div class="card"><h2>Recent ticket-sale news</h2>${rows}</div>`;
+}
+
+/** Admin-only review queue for posts checkInstagramAnnouncements() flagged -
+ * keyword matching alone can false-positive (a caption could mention
+ * "tickets" for something unrelated), so nothing here reaches the public
+ * homepage until approved. Uses the token-in-URL pattern (like
+ * unsubscribe/my-alerts links) rather than a Bearer header, since this page
+ * is meant to be opened in a normal browser, not called programmatically. */
+async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const { results } = await env.DB.prepare(
+    "SELECT id, handle, post_url, caption, matched_keyword, detected_at FROM ig_flagged_posts WHERE status = 'pending' ORDER BY detected_at DESC"
+  ).all<any>();
+
+  const rows = (results || [])
+    .map((r: any) => {
+      const suggested = `${r.handle} just posted about tickets - check it out`;
+      return `<div class="card">
+        <p><b>@${escapeHtml(r.handle)}</b> &middot; matched "${escapeHtml(r.matched_keyword)}" &middot; <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View on Instagram</a></p>
+        <p><small>${escapeHtml(r.caption || "")}</small></p>
+        <form method="POST" action="/admin/ig-posts/publish">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="id" value="${r.id}">
+          <label>Banner text
+            <input type="text" name="banner_text" value="${escapeHtml(suggested)}">
+          </label>
+          <div class="row">
+            <button type="submit">Publish to homepage</button>
+          </div>
+        </form>
+        <form method="POST" action="/admin/ig-posts/dismiss">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="id" value="${r.id}">
+          <button type="submit">Dismiss</button>
+        </form>
+      </div>`;
+    })
+    .join("");
+
+  return page("Instagram posts to review", rows || "<div class=\"card\"><p>Nothing pending.</p></div>", {
+    "cache-control": "private, no-store",
+  });
+}
+
+async function handleIgPublish(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+  const id = String(form.get("id") || "");
+  const bannerText = String(form.get("banner_text") || "");
+  await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'approved', banner_text = ? WHERE id = ?")
+    .bind(bannerText, id)
+    .run();
+  return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
+}
+
+async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+  const id = String(form.get("id") || "");
+  await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'dismissed' WHERE id = ?").bind(id).run();
+  return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -1085,6 +1322,10 @@ export default {
       if (url.pathname === "/events" && req.method === "GET") return await handleListEvents(env);
       if (url.pathname === "/admin/reindex" && req.method === "POST") return await handleReindex(req, env);
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
+      if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
+      if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
+      if (url.pathname === "/admin/ig-posts/publish" && req.method === "POST") return await handleIgPublish(req, env);
+      if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
       console.error(e);
@@ -1093,12 +1334,15 @@ export default {
   },
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Two schedules share this Worker (see wrangler.toml): the frequent one
-    // checks tickets, the infrequent one indexes the event directory.
+    // Three schedules share this Worker (see wrangler.toml): the frequent
+    // one checks tickets, one indexes the event directory daily, and one
+    // checks Instagram for new ticket-sale announcements daily.
     if (event.cron === "*/2 * * * *") {
       ctx.waitUntil(checkCommunityTickets(env));
       ctx.waitUntil(checkSaleWatches(env));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
+    } else if (event.cron === "0 8 * * *") {
+      ctx.waitUntil(checkInstagramAnnouncements(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }

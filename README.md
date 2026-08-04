@@ -357,6 +357,32 @@ cd worker
 npx wrangler d1 execute roxracealerts-db --remote --command "SELECT email, verified FROM subscribers"
 ```
 
+### Instagram ticket-announcement watcher
+
+HYROX country/region Instagram accounts (e.g. `@hyroxitalia`) usually
+announce ticket sales days to weeks before hyrox.com's own pages reflect
+it, so a daily check (`0 8 * * *` Cron Trigger) asks
+[Apify's Instagram Post Scraper](https://apify.com/apify/instagram-post-scraper)
+for each tracked account's latest post and flags anything whose caption
+mentions a ticket sale ("ticket sale", "tickets are live", "secret shop",
+etc.) for review — never auto-published, since keyword matching alone can
+false-positive.
+
+- Tracked accounts: the `IG_HANDLES` list in `worker/src/index.ts` —
+  edit and redeploy to add/remove one.
+- Review queue: `https://roxracealerts.com/admin/ig-posts?token=<WEBHOOK_SECRET>`
+  — approve a post (with an editable banner) to show it in a "Recent
+  ticket-sale news" section on the homepage, or dismiss it. You'll also get
+  an email at the address in `ADMIN_EMAIL` (`wrangler.toml`) whenever
+  something new gets flagged.
+- Cost: checking ~28 accounts once a day is ~840 results/month, comfortably
+  inside Apify's free 2,000/month tier — $0/month.
+- Secret: `APIFY_API_TOKEN` (from your Apify account's Settings → API
+  tokens), set the same way as the other secrets above.
+- Manual trigger for testing: `POST /admin/check-instagram` with
+  `Authorization: Bearer <WEBHOOK_SECRET>`, same pattern as
+  `/admin/reindex`.
+
 ---
 
 ## How it works, briefly

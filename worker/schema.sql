@@ -71,3 +71,30 @@ CREATE TABLE IF NOT EXISTS sale_watchers (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_url)
 );
+
+-- Remembers the last-seen post per tracked HYROX country/region Instagram
+-- account (checked daily via Apify - see checkInstagramAnnouncements() in
+-- src/index.ts) so only genuinely new posts get evaluated, not the whole
+-- feed every time.
+CREATE TABLE IF NOT EXISTS ig_watch (
+  handle TEXT PRIMARY KEY,
+  last_post_id TEXT,
+  last_checked_at TEXT
+);
+
+-- New Instagram posts whose caption matched a ticket-sale keyword, queued
+-- for a human (admin) to approve into a homepage banner or dismiss -
+-- keyword matching alone isn't reliable enough to auto-publish.
+CREATE TABLE IF NOT EXISTS ig_flagged_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  handle TEXT NOT NULL,
+  post_id TEXT NOT NULL,
+  post_url TEXT NOT NULL,
+  caption TEXT,
+  matched_keyword TEXT,
+  posted_at TEXT,
+  detected_at TEXT NOT NULL DEFAULT (datetime('now')),
+  status TEXT NOT NULL DEFAULT 'pending',
+  banner_text TEXT,
+  UNIQUE(handle, post_id)
+);

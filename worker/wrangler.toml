@@ -11,15 +11,18 @@ database_id = "8b3ea91c-590a-4bb7-9ebd-24f732c85afb"
 [vars]
 SEND_FROM = "RoxRaceAlerts <alerts@alerts.roxracealerts.com>"
 SITE_URL = "https://roxracealerts.com"
+ADMIN_EMAIL = "francescobiviano609@gmail.com"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
 #   WEBHOOK_SECRET
+#   APIFY_API_TOKEN   - Instagram ticket-announcement watcher
 
 [triggers]
 # */2 * * * *  - re-checks watched tickets (checkCommunityTickets)
 # 0 3 * * *    - daily event-directory indexing batch (indexEvents)
-crons = ["*/2 * * * *", "0 3 * * *"]
+# 0 8 * * *    - daily Instagram ticket-announcement check (checkInstagramAnnouncements)
+crons = ["*/2 * * * *", "0 3 * * *", "0 8 * * *"]
 
 [[routes]]
 pattern = "roxracealerts.com/*"
