@@ -363,29 +363,34 @@ HYROX country/region Instagram accounts (e.g. `@hyroxitalia`) usually
 announce ticket sales days to weeks before hyrox.com's own pages reflect
 it, so a daily check (`0 8 * * *` Cron Trigger) asks
 [Apify's Instagram Post Scraper](https://apify.com/apify/instagram-post-scraper)
-for each tracked account's latest post and flags anything whose caption
-mentions a ticket sale ("ticket sale", "tickets are live", "secret shop",
-etc.) for review — never auto-published, since keyword matching alone can
-false-positive.
+for each tracked account's latest post. A new post whose caption mentions
+a ticket sale ("ticket sale", "tickets are live", "secret shop", etc.)
+gets sent to Claude (the Anthropic API) to read - captions are in whatever
+language that country speaks - and produce a short English summary, plus
+(when it can confidently tell) which known HYROX event it's about. The
+result is **published automatically**: it shows up in a "Recent
+ticket-sale news" section on the homepage, and if it matched an event
+someone's watching via "notify me when on sale", they're emailed directly
+too. No approval step - the admin log at `/admin/ig-posts` is for
+after-the-fact visibility and retracting a bad publish, not a gate.
 
 - Tracked accounts: the `IG_HANDLES` list in `worker/src/index.ts` —
   edit and redeploy to add/remove one.
-- Review queue: `https://roxracealerts.com/admin/ig-posts?token=<WEBHOOK_SECRET>`
-  — approve a post (with an editable banner - include any date/time
-  mentioned in the caption shown above it) to show it in a "Recent
-  ticket-sale news" section on the homepage, or dismiss it. You'll also get
-  an email at the address in `ADMIN_EMAIL` (`wrangler.toml`) whenever
-  something new gets flagged.
-- Approving can optionally also be linked to a specific event someone's
-  watching via "notify me when on sale" (`sale_watch`) - pick it from the
-  dropdown and everyone waiting on that event gets emailed directly, not
-  just shown the homepage banner. Doesn't mark the event as resolved,
+- Published log: `https://roxracealerts.com/admin/ig-posts?token=<WEBHOOK_SECRET>`
+  — shows the last 30 auto-published announcements with a "Remove from
+  homepage" button on each. You'll also get an email at the address in
+  `ADMIN_EMAIL` (`wrangler.toml`) whenever something new gets published.
+- Matching to a specific event doesn't mark it resolved in `sale_watch`,
   since an Instagram pre-sale announcement (e.g. a gym-only early-access
-  link) often isn't the same as the real public sale being live.
-- Cost: checking ~28 accounts once a day is ~840 results/month, comfortably
-  inside Apify's free 2,000/month tier — $0/month.
-- Secret: `APIFY_API_TOKEN` (from your Apify account's Settings → API
-  tokens), set the same way as the other secrets above.
+  link) often isn't the same as the real public sale being live -
+  `checkSaleWatches` keeps polling the actual shop independently.
+- Cost: checking ~28 accounts once a day is ~840 Apify results/month,
+  comfortably inside Apify's free 2,000/month tier. The Claude API call
+  only runs for posts that already matched a keyword (typically 0-3/day),
+  so both add up to a few cents a month at most.
+- Secrets: `APIFY_API_TOKEN` (Apify account → Settings → API tokens) and
+  `ANTHROPIC_API_KEY` (console.anthropic.com → API keys), set the same way
+  as the other secrets above.
 - Manual trigger for testing: `POST /admin/check-instagram` with
   `Authorization: Bearer <WEBHOOK_SECRET>`, same pattern as
   `/admin/reindex`.

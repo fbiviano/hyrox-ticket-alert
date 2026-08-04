@@ -19,6 +19,7 @@ export interface Env {
   RESEND_API_KEY: string;
   WEBHOOK_SECRET: string;
   APIFY_API_TOKEN: string;
+  ANTHROPIC_API_KEY: string;
   SEND_FROM: string;
   SITE_URL: string;
   ADMIN_EMAIL: string;
@@ -998,12 +999,123 @@ async function fetchLatestInstagramPosts(env: Env): Promise<ApifyPost[]> {
   return (await resp.json()) as ApifyPost[];
 }
 
-/** Daily check (see the "0 8 * * *" cron below) - flags new posts whose
- * caption mentions a ticket sale for admin review at /admin/ig-posts.
- * Never auto-publishes: keyword matching alone isn't reliable enough (a
- * caption could mention "tickets" for something unrelated), so a human
- * approves before anything shows up publicly. */
 const IG_HANDLES_LOWER = new Set(IG_HANDLES.map((h) => h.toLowerCase()));
+
+/** Sends a plain-English summary of a matched Instagram post - including
+ * which known event it's about, if identifiable - to everyone watching that
+ * event's real ticket shop. Reused by the daily auto-check and by manually
+ * re-publishing a dismissed post. Deliberately doesn't touch
+ * sale_watch.resolved: an Instagram pre-sale (e.g. a gym-only early-access
+ * link) isn't the same as the real public sale being live, so
+ * checkSaleWatches keeps polling independently. */
+async function notifySaleWatchers(env: Env, eventUrl: string, bannerText: string, postUrl: string): Promise<void> {
+  const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
+  if (!eventRow) return;
+  const { results: watchers } = await env.DB.prepare(
+    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+     JOIN sale_watchers w ON w.subscriber_id = s.id
+     WHERE s.verified = 1 AND w.event_url = ?`
+  )
+    .bind(eventUrl)
+    .all<any>();
+
+  for (const watcher of watchers || []) {
+    const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+    const eventTitle = eventRow.event_title;
+    try {
+      await sendEmail(
+        env,
+        watcher.email,
+        `Instagram update on ${eventTitle} tickets`,
+        `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle}: ${bannerText}\n${postUrl}\n\nThis may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
+      );
+    } catch (e) {
+      console.error(`Failed to email ${watcher.email}:`, e);
+    }
+  }
+}
+
+interface AiAnnouncementParse {
+  eventUrl: string | null;
+  bannerText: string;
+  isRaceTicketSale: boolean;
+}
+
+/** HYROX country accounts post in whatever language that country speaks, and
+ * a single account can cover many cities (e.g. @hyroxitalia posts about
+ * Rome, Milan, Bologna...), so figuring out "which known event is this
+ * about, and what does it actually say" needs real language understanding,
+ * not regex. Also judges relevance, not just extraction: the upstream
+ * keyword match ("on sale", "tickets"...) also fires on merch drops and
+ * other noise, and since nothing reviews this before it publishes, that
+ * judgment has to happen somewhere. Returns null on any failure - the
+ * caller falls back to a generic banner rather than blocking the whole
+ * check on one bad response. */
+async function parseAnnouncementWithAI(
+  env: Env,
+  caption: string,
+  postedAt: string | null,
+  candidates: { title: string; url: string }[]
+): Promise<AiAnnouncementParse | null> {
+  const candidateList = candidates.map((c) => `- ${c.title}: ${c.url}`).join("\n");
+  try {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        // Cheapest current model - this is a small structured-extraction
+        // task (read one caption, match it against a list, write one short
+        // sentence), not something that needs Opus-tier reasoning.
+        model: "claude-haiku-4-5",
+        max_tokens: 1024,
+        system:
+          "You read Instagram captions from HYROX country/region accounts, written in any language, and decide whether the post is genuinely announcing that RACE REGISTRATION/ENTRY tickets are going on sale, opening for pre-sale, or now available to sign up for a HYROX race. Set is_race_ticket_sale to false for anything else that merely contains ticket-related words out of context - merchandise sales, spectator-only tickets, giveaways, general reminders, unrelated promotions. If is_race_ticket_sale is true, produce a short, factual English summary (banner_text) suitable for a public alerts website and an email - include any date/time mentioned in the caption, translated and clarified (resolve relative dates like \"tomorrow\" using the post's timestamp) - and set matched_event_url only if the caption clearly names a specific event from the provided list (by city or event name); use null rather than guessing if it's ambiguous. If is_race_ticket_sale is false, still fill banner_text with a brief note of what the post was actually about and leave matched_event_url null.",
+        messages: [
+          {
+            role: "user",
+            content: `Post timestamp: ${postedAt || "unknown"}\n\nCaption:\n${caption}\n\nKnown HYROX events (title: url):\n${candidateList}`,
+          },
+        ],
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                is_race_ticket_sale: { type: "boolean" },
+                matched_event_url: { type: ["string", "null"] },
+                banner_text: { type: "string" },
+              },
+              required: ["is_race_ticket_sale", "matched_event_url", "banner_text"],
+              additionalProperties: false,
+            },
+          },
+        },
+      }),
+    });
+    if (!resp.ok) {
+      console.error(`Anthropic request failed: ${resp.status} ${await resp.text()}`);
+      return null;
+    }
+    const data: any = await resp.json();
+    const textBlock = (data.content || []).find((b: any) => b.type === "text");
+    if (!textBlock) return null;
+    const parsed = JSON.parse(textBlock.text);
+    return {
+      eventUrl: parsed.matched_event_url || null,
+      bannerText: parsed.banner_text,
+      isRaceTicketSale: !!parsed.is_race_ticket_sale,
+    };
+  } catch (e) {
+    console.error("Failed to parse Instagram announcement with AI:", e);
+    return null;
+  }
+}
 
 /** Instagram media ids are monotonically increasing numeric strings (newer
  * posts always have a bigger id), which is a much more reliable "is this
@@ -1017,6 +1129,13 @@ function isPostIdNewer(candidateId: string, knownId: string | null): boolean {
   return candidateId !== knownId;
 }
 
+/** Daily check (see the "0 8 * * *" cron below). A new post whose caption
+ * mentions a ticket sale is auto-published immediately - Claude reads the
+ * caption (any language) to write an English summary and, where confident,
+ * match it to a known event, and anyone watching that event's sale gets
+ * emailed right away. No human approval gate: keyword matching plus an AI
+ * read of the actual caption is judged reliable enough, and the admin can
+ * always retract a bad publish afterwards from /admin/ig-posts. */
 async function checkInstagramAnnouncements(env: Env): Promise<void> {
   const posts = await fetchLatestInstagramPosts(env);
   let flaggedCount = 0;
@@ -1033,6 +1152,11 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
   // newer id already found earlier in the loop.
   const maxSeenThisRun = new Map<string, string>();
 
+  // Fetched once and reused for every AI parse this run, rather than
+  // per-post - the candidate event list rarely needs to be fresher than
+  // "as of this cron tick".
+  let candidateEvents: { title: string; url: string }[] | null = null;
+
   for (const post of posts) {
     const postId = post.id || post.shortCode;
     if (!postId) continue;
@@ -1043,10 +1167,10 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
     // our known list via owner + coauthors rather than trusting response
     // order. Anything not in our list is ignored outright (Apify has
     // occasionally returned an untracked account via fuzzy-match fallback).
-    const candidates = [post.ownerUsername, ...(post.coauthorProducers || []).map((c) => c.username)].filter(
+    const ownerCandidates = [post.ownerUsername, ...(post.coauthorProducers || []).map((c) => c.username)].filter(
       (u): u is string => !!u
     );
-    const matchedHandles = candidates.filter((u) => IG_HANDLES_LOWER.has(u.toLowerCase()));
+    const matchedHandles = ownerCandidates.filter((u) => IG_HANDLES_LOWER.has(u.toLowerCase()));
 
     for (const handle of matchedHandles) {
       const isFirstCheck = !knownLastPostId.has(handle);
@@ -1059,19 +1183,43 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
       // already seen (or an older one Apify happened to resurface).
       if (isFirstCheck || !isNewer) continue;
 
-      const caption = (post.caption || "").toLowerCase();
-      const matched = IG_SALE_KEYWORDS.find((kw) => caption.includes(kw));
+      const captionLower = (post.caption || "").toLowerCase();
+      const matched = IG_SALE_KEYWORDS.find((kw) => captionLower.includes(kw));
       if (!matched) continue;
 
       const postUrl = post.url || `https://www.instagram.com/p/${post.shortCode}/`;
+
+      if (candidateEvents === null) {
+        const { results } = await env.DB.prepare(
+          "SELECT title, url FROM event_directory WHERE event_date IS NULL OR event_date >= ?"
+        )
+          .bind(todayIso())
+          .all<any>();
+        candidateEvents = results || [];
+      }
+      const ai = await parseAnnouncementWithAI(env, post.caption || "", post.timestamp || null, candidateEvents);
+      // A definite "no" from the AI (not a race ticket sale - merch, a
+      // giveaway, something else the keyword match just happened to catch)
+      // means don't publish at all. An AI failure (ai === null) falls back
+      // to publishing with a generic banner instead of blocking on it -
+      // the keyword match alone is still a reasonable signal.
+      if (ai && !ai.isRaceTicketSale) continue;
+
+      const bannerText = ai?.bannerText || `${handle} just posted about tickets - check it out`;
+      const eventUrl = ai?.eventUrl || null;
+
       await env.DB.prepare(
-        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO ig_flagged_posts (handle, post_id, post_url, caption, matched_keyword, posted_at, status, banner_text, event_url)
+         VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?)
          ON CONFLICT(handle, post_id) DO NOTHING`
       )
-        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null)
+        .bind(handle, postId, postUrl, post.caption || "", matched, post.timestamp || null, bannerText, eventUrl)
         .run();
       flaggedCount++;
+
+      if (eventUrl) {
+        await notifySaleWatchers(env, eventUrl, bannerText, postUrl);
+      }
     }
   }
 
@@ -1087,14 +1235,14 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
   }
 
   if (flaggedCount > 0 && env.ADMIN_EMAIL) {
-    const reviewLink = `${env.SITE_URL}/admin/ig-posts?token=${env.WEBHOOK_SECRET}`;
+    const logLink = `${env.SITE_URL}/admin/ig-posts?token=${env.WEBHOOK_SECRET}`;
     try {
       await sendEmail(
         env,
         env.ADMIN_EMAIL,
-        `${flaggedCount} new HYROX Instagram post(s) to review`,
-        `<p>${flaggedCount} new Instagram post(s) mentioned a ticket sale. Review and publish: <a href="${reviewLink}">${reviewLink}</a></p>`,
-        `${flaggedCount} new Instagram post(s) mentioned a ticket sale.\nReview and publish: ${reviewLink}`
+        `${flaggedCount} new HYROX Instagram post(s) published`,
+        `<p>${flaggedCount} new Instagram post(s) mentioned a ticket sale and were published automatically. Review or retract: <a href="${logLink}">${logLink}</a></p>`,
+        `${flaggedCount} new Instagram post(s) mentioned a ticket sale and were published automatically.\nReview or retract: ${logLink}`
       );
     } catch (e) {
       console.error("Failed to send admin IG digest email:", e);
@@ -1268,109 +1416,41 @@ async function renderAnnouncementsBanner(env: Env): Promise<string> {
   return `<div class="card"><h2>Recent ticket-sale news</h2>${rows}</div>`;
 }
 
-/** Admin-only review queue for posts checkInstagramAnnouncements() flagged -
- * keyword matching alone can false-positive (a caption could mention
- * "tickets" for something unrelated), so nothing here reaches the public
- * homepage until approved. Uses the token-in-URL pattern (like
- * unsubscribe/my-alerts links) rather than a Bearer header, since this page
- * is meant to be opened in a normal browser, not called programmatically. */
+/** Read-only log of what the daily Instagram check auto-published, plus a
+ * one-click way to retract a bad publish (a false-positive keyword match,
+ * or an AI mismatch). Nothing here requires action - publishing already
+ * happened by the time this page is opened. Uses the token-in-URL pattern
+ * (like unsubscribe/my-alerts links) rather than a Bearer header, since
+ * this page is meant to be opened in a normal browser. */
 async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
   const token = new URL(req.url).searchParams.get("token") || "";
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    "SELECT id, handle, post_url, caption, matched_keyword, detected_at FROM ig_flagged_posts WHERE status = 'pending' ORDER BY detected_at DESC"
+    "SELECT id, handle, post_url, caption, matched_keyword, banner_text, event_url, detected_at FROM ig_flagged_posts WHERE status = 'approved' ORDER BY detected_at DESC LIMIT 30"
   ).all<any>();
-
-  // People actively waiting on a "notify me when on sale" for an event that
-  // resolveEvent() still can't see (e.g. a gym-only pre-sale on a private
-  // link) - picking one here emails them directly in addition to the
-  // homepage banner, since for them this Instagram post might be the only
-  // signal that'll ever reach this site.
-  const { results: activeWatches } = await env.DB.prepare(
-    "SELECT event_url, event_title FROM sale_watch WHERE resolved = 0 ORDER BY event_title"
-  ).all<any>();
-  const eventOptions = (activeWatches || [])
-    .map((w: any) => `<option value="${escapeHtml(w.event_url)}">${escapeHtml(w.event_title)}</option>`)
-    .join("");
 
   const rows = (results || [])
-    .map((r: any) => {
-      const suggested = `${r.handle} just posted about tickets - check it out`;
-      return `<div class="card">
+    .map(
+      (r: any) => `<div class="card">
         <p><b>@${escapeHtml(r.handle)}</b> &middot; matched "${escapeHtml(r.matched_keyword)}" &middot; <a href="${escapeHtml(r.post_url)}" target="_blank" rel="noopener">View on Instagram</a></p>
+        <p>${escapeHtml(r.banner_text || "")}</p>
+        ${r.event_url ? `<p><small>Emailed watchers of: ${escapeHtml(r.event_url)}</small></p>` : ""}
         <p><small>${escapeHtml(r.caption || "")}</small></p>
-        <form method="POST" action="/admin/ig-posts/publish">
-          <input type="hidden" name="token" value="${escapeHtml(token)}">
-          <input type="hidden" name="id" value="${r.id}">
-          <label>Banner text (include any date/time mentioned in the caption above)
-            <input type="text" name="banner_text" value="${escapeHtml(suggested)}">
-          </label>
-          <label>Also email people waiting on a specific event? (optional)
-            <select name="event_url">
-              <option value="">Just show the homepage banner</option>
-              ${eventOptions}
-            </select>
-          </label>
-          <div class="row">
-            <button type="submit">Publish</button>
-          </div>
-        </form>
         <form method="POST" action="/admin/ig-posts/dismiss">
           <input type="hidden" name="token" value="${escapeHtml(token)}">
           <input type="hidden" name="id" value="${r.id}">
-          <button type="submit">Dismiss</button>
+          <button type="submit">Remove from homepage</button>
         </form>
-      </div>`;
-    })
+      </div>`
+    )
     .join("");
 
-  return page("Instagram posts to review", rows || "<div class=\"card\"><p>Nothing pending.</p></div>", {
-    "cache-control": "private, no-store",
-  });
-}
-
-async function handleIgPublish(req: Request, env: Env): Promise<Response> {
-  const form = await req.formData();
-  const token = String(form.get("token") || "");
-  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
-  const id = String(form.get("id") || "");
-  const bannerText = String(form.get("banner_text") || "");
-  const eventUrl = String(form.get("event_url") || "").trim();
-  const post = await env.DB.prepare("SELECT post_url FROM ig_flagged_posts WHERE id = ?").bind(id).first<any>();
-
-  await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'approved', banner_text = ?, event_url = ? WHERE id = ?")
-    .bind(bannerText, eventUrl || null, id)
-    .run();
-
-  if (eventUrl && post) {
-    const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
-    const { results: watchers } = await env.DB.prepare(
-      `SELECT s.email, s.unsubscribe_token FROM subscribers s
-       JOIN sale_watchers w ON w.subscriber_id = s.id
-       WHERE s.verified = 1 AND w.event_url = ?`
-    )
-      .bind(eventUrl)
-      .all<any>();
-
-    for (const watcher of watchers || []) {
-      const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
-      const eventTitle = eventRow?.event_title || eventUrl;
-      try {
-        await sendEmail(
-          env,
-          watcher.email,
-          `Instagram update on ${eventTitle} tickets`,
-          `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(post.post_url)}">${escapeHtml(post.post_url)}</a></p><p><small>This may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-          `${eventTitle}: ${bannerText}\n${post.post_url}\n\nThis may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
-        );
-      } catch (e) {
-        console.error(`Failed to email ${watcher.email}:`, e);
-      }
-    }
-  }
-
-  return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
+  return page(
+    "Recently published Instagram announcements",
+    rows || "<div class=\"card\"><p>Nothing published yet.</p></div>",
+    { "cache-control": "private, no-store" }
+  );
 }
 
 async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
@@ -1404,7 +1484,6 @@ export default {
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
       if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
-      if (url.pathname === "/admin/ig-posts/publish" && req.method === "POST") return await handleIgPublish(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
