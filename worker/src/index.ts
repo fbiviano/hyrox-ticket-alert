@@ -343,37 +343,35 @@ const RESOLVE_SCRIPT = `<script>
             return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
           }
         }
-        function catOf(ev) {
-          if (ev.on_sale) return 'on';
-          if (ev.presale_is_live) return 'live';
-          if (ev.presale_note && ev.presale_live_at) return 'soon';
-          return 'waiting';
-        }
-        function rowHtml(ev) {
-          var dateLabel = ev.event_date || 'Date TBA';
-          var cat = catOf(ev);
-          var badge = cat === 'on' ? '<span class="event-badge on">On sale</span>'
-            : cat === 'live' ? '<span class="event-badge on">Live now</span>'
-            : cat === 'soon' ? '<span class="event-badge soon">Going live soon</span>'
-            : '<span class="event-badge off">Not on sale</span>';
-          var subtitleText = '';
-          if (cat === 'live' || cat === 'soon') {
-            subtitleText = ev.presale_note ? esc(ev.presale_note) : '';
-            if (ev.presale_live_at) subtitleText += (subtitleText ? '<br>' : '') + 'Public sale: ' + esc(formatLocal(ev.presale_live_at, ev.presale_timezone));
+        function entriesFor(ev) {
+          var out = [];
+          if (ev.on_sale) {
+            out.push({ section: 'on', badge: 'On sale', badgeClass: 'on', subtitle: '' });
+          } else if (ev.presale_is_live) {
+            out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: ev.presale_note || '' });
           }
-          var subtitle = subtitleText ? '<div class="event-subtitle">' + subtitleText + '</div>' : '';
+          if (!ev.on_sale && ev.presale_live_at) {
+            out.push({ section: 'soon', badge: 'Public sale (soon live)', badgeClass: 'soon', subtitle: 'on ' + formatLocal(ev.presale_live_at, ev.presale_timezone) });
+          }
+          if (!out.length) out.push({ section: 'waiting', badge: 'Not on sale', badgeClass: 'off', subtitle: '' });
+          return out;
+        }
+        function rowHtml(ev, entry) {
+          var dateLabel = ev.event_date || 'Date TBA';
+          var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
+          var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
           return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
         }
-        function groupHtml(title, rows) {
-          if (!rows.length) return '';
-          return '<div class="event-group"><h3>' + esc(title) + ' (' + rows.length + ')</h3>' +
-            '<div class="event-group-rows">' + rows.map(rowHtml).join('') + '</div></div>';
+        function groupHtml(title, items) {
+          if (!items.length) return '';
+          return '<div class="event-group"><h3>' + esc(title) + ' (' + items.length + ')</h3>' +
+            '<div class="event-group-rows">' + items.map(function(x) { return rowHtml(x.ev, x.entry); }).join('') + '</div></div>';
         }
-        var onSale = data.results.filter(function(ev) { return catOf(ev) === 'on'; });
-        var liveNow = data.results.filter(function(ev) { return catOf(ev) === 'live'; });
-        var goingSoon = data.results.filter(function(ev) { return catOf(ev) === 'soon'; });
-        var notOnSale = data.results.filter(function(ev) { return catOf(ev) === 'waiting'; });
-        eventList.innerHTML = groupHtml('On sale now', onSale) + groupHtml('Live now', liveNow) + groupHtml('Going live soon', goingSoon) + groupHtml('Not on sale yet', notOnSale);
+        var bySection = { on: [], live: [], soon: [], waiting: [] };
+        data.results.forEach(function(ev) {
+          entriesFor(ev).forEach(function(entry) { bySection[entry.section].push({ ev: ev, entry: entry }); });
+        });
+        eventList.innerHTML = groupHtml('On sale now', bySection.on) + groupHtml('Live now', bySection.live) + groupHtml('Going live soon', bySection.soon) + groupHtml('Not on sale yet', bySection.waiting);
       } catch (e) {
         eventList.innerHTML = '<p>Something went wrong loading events.</p>';
       }
@@ -444,42 +442,40 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
   return { active: render(active, "No active subscriptions yet."), past: render(past) };
 }
 
-/** Which of the three waiting-list buckets a sale_watch row belongs in:
- * "live" - the real shop is confirmed on sale, or the Instagram caption
- * meant something is buyable right now (presale_is_live); "soon" - not
- * live yet, but a specific expected go-live date/time is known
- * (presale_live_at); "waiting" - nothing known at all. */
-function categorizeSaleWatch(row: {
+interface SaleWatchEntry {
+  section: "live" | "soon" | "waiting";
+  badge: string;
+  badgeClass: "on" | "soon" | "off";
+  subtitle: string;
+}
+
+/** A sale_watch row can produce up to two entries at once, not one status -
+ * a pre-sale being live right now and a known future public-sale date are
+ * two different facts, so they show as two separate lines (one in "Live
+ * now", one in "Going live soon") rather than being squashed into a single
+ * merged status line. Falls back to a single "Not yet on sale" entry when
+ * nothing at all is known. */
+function saleWatchEntries(row: {
   resolved: boolean;
   presale_is_live: boolean;
   presale_note: string | null;
   presale_live_at: string | null;
-}): "live" | "soon" | "waiting" {
-  if (row.resolved || row.presale_is_live) return "live";
-  if (row.presale_note && row.presale_live_at) return "soon";
-  return "waiting";
-}
-
-function renderSaleWatchStatus(
-  category: "live" | "soon" | "waiting",
-  resolved: boolean,
-  presaleNote: string | null,
-  presaleLiveAt: string | null,
-  presaleTimezone: string | null
-): string {
-  if (category === "live") {
-    let subtitle = presaleNote ? escapeHtml(presaleNote) : resolved ? "On sale, alert sent" : "";
-    if (presaleLiveAt) {
-      subtitle += `${subtitle ? "<br>" : ""}Public sale: ${escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone))}`;
-    }
-    return `<span class="event-badge on">Live now</span>${subtitle ? `<div class="event-subtitle">${subtitle}</div>` : ""}`;
+  presale_timezone: string | null;
+}): SaleWatchEntry[] {
+  const entries: SaleWatchEntry[] = [];
+  if (row.resolved) {
+    entries.push({ section: "live", badge: "On sale", badgeClass: "on", subtitle: "Alert sent" });
+  } else if (row.presale_is_live) {
+    entries.push({ section: "live", badge: "Pre-sale (live now)", badgeClass: "on", subtitle: row.presale_note || "" });
   }
-  if (category === "soon") {
-    const when = presaleLiveAt ? escapeHtml(formatInTimezone(presaleLiveAt, presaleTimezone)) : "";
-    const note = presaleNote ? `${escapeHtml(presaleNote)}<br>` : "";
-    return `<span class="event-badge soon">Going live soon</span><div class="event-subtitle">${note}${when}</div>`;
+  if (!row.resolved && row.presale_live_at) {
+    const when = formatInTimezone(row.presale_live_at, row.presale_timezone);
+    entries.push({ section: "soon", badge: "Public sale (soon live)", badgeClass: "soon", subtitle: `on ${when}` });
   }
-  return '<span class="event-badge off">Not yet on sale</span>';
+  if (entries.length === 0) {
+    entries.push({ section: "waiting", badge: "Not yet on sale", badgeClass: "off", subtitle: "" });
+  }
+  return entries;
 }
 
 interface SaleWatchSections {
@@ -499,25 +495,25 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
     .bind(subscriberId)
     .all<any>();
   const { active, past } = splitByEventDate(results || []);
-  const rowHtml = (r: any, category: "live" | "soon" | "waiting") => `<div class="ticket-row">
+  const rowHtml = (r: any, entry: SaleWatchEntry) => `<div class="ticket-row">
       <div><span>${escapeHtml(r.event_title)}</span>
-      ${renderSaleWatchStatus(category, !!r.resolved, r.presale_note, r.presale_live_at, r.presale_timezone)}</div>
+      <span class="event-badge ${entry.badgeClass}">${escapeHtml(entry.badge)}</span>
+      ${entry.subtitle ? `<div class="event-subtitle">${escapeHtml(entry.subtitle)}</div>` : ""}</div>
       <form method="POST" action="/remove-sale-watch">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="watcher_id" value="${r.id}">
         <button type="submit">Remove</button>
       </form>
     </div>`;
-  const bucket = (cat: "live" | "soon" | "waiting") =>
-    active
-      .filter((r: any) => categorizeSaleWatch(r) === cat)
-      .map((r: any) => rowHtml(r, cat))
+  const section = (rows: any[], sec: "live" | "soon" | "waiting") =>
+    rows
+      .flatMap((r: any) => saleWatchEntries(r).filter((e) => e.section === sec).map((e) => rowHtml(r, e)))
       .join("");
   return {
-    live: bucket("live"),
-    soon: bucket("soon"),
-    waiting: bucket("waiting"),
-    past: past.map((r: any) => rowHtml(r, categorizeSaleWatch(r))).join(""),
+    live: section(active, "live"),
+    soon: section(active, "soon"),
+    waiting: section(active, "waiting"),
+    past: past.flatMap((r: any) => saleWatchEntries(r).map((e) => rowHtml(r, e))).join(""),
   };
 }
 
@@ -952,7 +948,14 @@ async function checkSaleWatches(env: Env): Promise<void> {
     const found = await resolveEvent(row.event_url);
     if (!found) continue; // still not on sale
 
-    await env.DB.prepare("UPDATE sale_watch SET resolved = 1, updated_at = datetime('now') WHERE event_url = ?")
+    // Clear any Instagram-derived presale info too - the real shop is live
+    // now, so the "pre-sale live" / "going live soon" lines are stale info
+    // and would otherwise linger next to the real "on sale" status.
+    await env.DB.prepare(
+      `UPDATE sale_watch SET resolved = 1, updated_at = datetime('now'),
+       presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
+       WHERE event_url = ?`
+    )
       .bind(row.event_url)
       .run();
 
@@ -1007,8 +1010,16 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // this event's next rotation (~16 min) rather than self-correcting.
     let found = await resolveEvent(row.url);
     if (!found) found = await resolveEvent(row.url);
-    await env.DB.prepare("UPDATE event_directory SET on_sale = ?, last_sale_check = datetime('now') WHERE url = ?")
-      .bind(found ? 1 : 0, row.url)
+    // Once the real shop is confirmed live, clear any Instagram-derived
+    // presale info too - it's stale next to the real "on sale" status.
+    await env.DB.prepare(
+      found
+        ? `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
+           presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
+           WHERE url = ?`
+        : "UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?"
+    )
+      .bind(row.url)
       .run();
   }
 }
