@@ -1287,6 +1287,18 @@ async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
     "SELECT id, handle, post_url, caption, matched_keyword, detected_at FROM ig_flagged_posts WHERE status = 'pending' ORDER BY detected_at DESC"
   ).all<any>();
 
+  // People actively waiting on a "notify me when on sale" for an event that
+  // resolveEvent() still can't see (e.g. a gym-only pre-sale on a private
+  // link) - picking one here emails them directly in addition to the
+  // homepage banner, since for them this Instagram post might be the only
+  // signal that'll ever reach this site.
+  const { results: activeWatches } = await env.DB.prepare(
+    "SELECT event_url, event_title FROM sale_watch WHERE resolved = 0 ORDER BY event_title"
+  ).all<any>();
+  const eventOptions = (activeWatches || [])
+    .map((w: any) => `<option value="${escapeHtml(w.event_url)}">${escapeHtml(w.event_title)}</option>`)
+    .join("");
+
   const rows = (results || [])
     .map((r: any) => {
       const suggested = `${r.handle} just posted about tickets - check it out`;
@@ -1296,11 +1308,17 @@ async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
         <form method="POST" action="/admin/ig-posts/publish">
           <input type="hidden" name="token" value="${escapeHtml(token)}">
           <input type="hidden" name="id" value="${r.id}">
-          <label>Banner text
+          <label>Banner text (include any date/time mentioned in the caption above)
             <input type="text" name="banner_text" value="${escapeHtml(suggested)}">
           </label>
+          <label>Also email people waiting on a specific event? (optional)
+            <select name="event_url">
+              <option value="">Just show the homepage banner</option>
+              ${eventOptions}
+            </select>
+          </label>
           <div class="row">
-            <button type="submit">Publish to homepage</button>
+            <button type="submit">Publish</button>
           </div>
         </form>
         <form method="POST" action="/admin/ig-posts/dismiss">
@@ -1323,9 +1341,40 @@ async function handleIgPublish(req: Request, env: Env): Promise<Response> {
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
   const id = String(form.get("id") || "");
   const bannerText = String(form.get("banner_text") || "");
-  await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'approved', banner_text = ? WHERE id = ?")
-    .bind(bannerText, id)
+  const eventUrl = String(form.get("event_url") || "").trim();
+  const post = await env.DB.prepare("SELECT post_url FROM ig_flagged_posts WHERE id = ?").bind(id).first<any>();
+
+  await env.DB.prepare("UPDATE ig_flagged_posts SET status = 'approved', banner_text = ?, event_url = ? WHERE id = ?")
+    .bind(bannerText, eventUrl || null, id)
     .run();
+
+  if (eventUrl && post) {
+    const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
+    const { results: watchers } = await env.DB.prepare(
+      `SELECT s.email, s.unsubscribe_token FROM subscribers s
+       JOIN sale_watchers w ON w.subscriber_id = s.id
+       WHERE s.verified = 1 AND w.event_url = ?`
+    )
+      .bind(eventUrl)
+      .all<any>();
+
+    for (const watcher of watchers || []) {
+      const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+      const eventTitle = eventRow?.event_title || eventUrl;
+      try {
+        await sendEmail(
+          env,
+          watcher.email,
+          `Instagram update on ${eventTitle} tickets`,
+          `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(post.post_url)}">${escapeHtml(post.post_url)}</a></p><p><small>This may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+          `${eventTitle}: ${bannerText}\n${post.post_url}\n\nThis may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
+        );
+      } catch (e) {
+        console.error(`Failed to email ${watcher.email}:`, e);
+      }
+    }
+  }
+
   return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
 }
 

@@ -96,5 +96,12 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   detected_at TEXT NOT NULL DEFAULT (datetime('now')),
   status TEXT NOT NULL DEFAULT 'pending',
   banner_text TEXT,
+  -- Optional: which sale_watch event this announcement is about, picked by
+  -- the admin at review time. When set, approving also emails everyone
+  -- watching that event directly, not just the homepage banner - this is
+  -- often the *only* signal available (e.g. a gym-only pre-sale uses a
+  -- private link resolveEvent() can't see), so it doesn't touch
+  -- sale_watch.resolved the way a real detected public sale does.
+  event_url TEXT,
   UNIQUE(handle, post_id)
 );

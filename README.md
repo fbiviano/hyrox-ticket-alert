@@ -371,10 +371,17 @@ false-positive.
 - Tracked accounts: the `IG_HANDLES` list in `worker/src/index.ts` —
   edit and redeploy to add/remove one.
 - Review queue: `https://roxracealerts.com/admin/ig-posts?token=<WEBHOOK_SECRET>`
-  — approve a post (with an editable banner) to show it in a "Recent
+  — approve a post (with an editable banner - include any date/time
+  mentioned in the caption shown above it) to show it in a "Recent
   ticket-sale news" section on the homepage, or dismiss it. You'll also get
   an email at the address in `ADMIN_EMAIL` (`wrangler.toml`) whenever
   something new gets flagged.
+- Approving can optionally also be linked to a specific event someone's
+  watching via "notify me when on sale" (`sale_watch`) - pick it from the
+  dropdown and everyone waiting on that event gets emailed directly, not
+  just shown the homepage banner. Doesn't mark the event as resolved,
+  since an Instagram pre-sale announcement (e.g. a gym-only early-access
+  link) often isn't the same as the real public sale being live.
 - Cost: checking ~28 accounts once a day is ~840 results/month, comfortably
   inside Apify's free 2,000/month tier — $0/month.
 - Secret: `APIFY_API_TOKEN` (from your Apify account's Settings → API
