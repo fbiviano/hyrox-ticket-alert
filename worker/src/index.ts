@@ -191,6 +191,7 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-badge.presale{background:#fff4e0;color:#9a6700}
 .event-badge.soon{background:#e6eeff;color:#2851b8}
 .event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
+.row-chev{color:#999;margin-left:4px;flex-shrink:0}
 .nav{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding-bottom:12px;margin-bottom:4px;border-bottom:1px solid #e2e2e2;font-size:0.9rem}
 .nav a{text-decoration:none;color:#555;font-weight:600}
 .nav a.active{color:#111}
@@ -242,6 +243,8 @@ const RESOLVE_SCRIPT = `<script>
   var out = document.getElementById('resolveResult');
   var suggestions = document.getElementById('suggestions');
   var clearX = document.getElementById('clearFindX');
+  var browseDetails = document.getElementById('browseEvents');
+  var signedIn = !!document.querySelector('.nav-user');
   function updateClearX() {
     if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
   }
@@ -252,6 +255,7 @@ const RESOLVE_SCRIPT = `<script>
       input.value = '';
       suggestions.innerHTML = '';
       updateClearX();
+      if (browseDetails) browseDetails.open = true;
       input.focus();
     });
   }
@@ -272,15 +276,18 @@ const RESOLVE_SCRIPT = `<script>
           // instead, from the click handler wired up right below.
           out.innerHTML = '<p><b>' + esc(data.event_title) + '</b>: tickets aren\\'t on sale yet.</p>' +
             '<div class="row">' +
-            '<input type="email" id="saleEmail" placeholder="you@example.com">' +
+            (signedIn ? '' : '<input type="email" id="saleEmail" placeholder="you@example.com">') +
             '<button type="button" id="saleBtn">Notify me when on sale</button>' +
             '</div>';
           document.getElementById('saleBtn').addEventListener('click', async function() {
-            var emailInput = document.getElementById('saleEmail');
-            var email = emailInput.value.trim();
-            if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
-              out.innerHTML = '<p>Please enter a valid email address.</p>';
-              return;
+            var email = '';
+            if (!signedIn) {
+              var emailInput = document.getElementById('saleEmail');
+              email = emailInput.value.trim();
+              if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+                out.innerHTML = '<p>Please enter a valid email address.</p>';
+                return;
+              }
             }
             out.innerHTML = '<p>Submitting...</p>';
             try {
@@ -288,7 +295,7 @@ const RESOLVE_SCRIPT = `<script>
               fd.set('event_url', url);
               fd.set('event_title', data.event_title);
               fd.set('event_date', data.event_date || '');
-              fd.set('email', email);
+              if (email) fd.set('email', email);
               var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
               if (subResp.redirected) {
                 // Already-verified subscriber - server set the session
@@ -296,7 +303,9 @@ const RESOLVE_SCRIPT = `<script>
                 // page actually shows "Signed in as ...".
                 window.location.href = subResp.url;
               } else if (subResp.ok) {
-                out.innerHTML = '<p>Almost done - we\\'ve sent a confirmation link to your email. Click it to start receiving alerts.</p>';
+                out.innerHTML = signedIn
+                  ? '<p>Done - we\\'ll email you the moment tickets go on sale.</p>'
+                  : '<p>Almost done - we\\'ve sent a confirmation link to your email. Click it to start receiving alerts.</p>';
               } else {
                 out.innerHTML = '<p>Something went wrong. Try again.</p>';
               }
@@ -364,7 +373,6 @@ const RESOLVE_SCRIPT = `<script>
     if (e.target !== input) suggestions.innerHTML = '';
   });
 
-  var browseDetails = document.getElementById('browseEvents');
   var eventListMain = document.getElementById('eventList');
   var eventListSide = document.getElementById('eventListSide');
   var sideCard = document.getElementById('sideOnSaleCard');
@@ -403,12 +411,15 @@ const RESOLVE_SCRIPT = `<script>
             return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
           }
         }
+        function truncateText(s, max) {
+          return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
+        }
         function entriesFor(ev) {
           var out = [];
           if (ev.on_sale) {
             out.push({ section: 'on', badge: 'On sale', badgeClass: 'on', subtitle: '' });
           } else if (ev.presale_is_live) {
-            out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: ev.presale_note || '' });
+            out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: truncateText(ev.presale_note || '', 55) });
           }
           if (!ev.on_sale && ev.presale_live_at) {
             out.push({ section: 'soon', badge: 'Public sale (soon live)', badgeClass: 'soon', subtitle: 'on ' + formatLocal(ev.presale_live_at, ev.presale_timezone) });
@@ -420,7 +431,7 @@ const RESOLVE_SCRIPT = `<script>
           var dateLabel = (compact ? '' : 'Race: ') + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '</div>';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div>' + badge + '<span class="row-chev">&#8250;</span></div>';
         }
         function groupHtml(title, items, compact) {
           if (!items.length) return '';
@@ -594,7 +605,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
 
-  const findForm = `<div class="row">
+  const searchBox = `<div class="row">
       <div class="urlWrap">
         <input type="text" id="urlInput" placeholder="Type a city (e.g. Geneva) or paste an event URL" autocomplete="off">
         <button type="button" id="clearFindX" class="clearX" title="Clear" style="display:none">&times;</button>
@@ -602,8 +613,9 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       </div>
       <button type="button" id="findBtn">Find tickets</button>
     </div>
-    <div id="resolveResult"></div>
-    <details class="browse" id="browseEvents" open>
+    <div id="resolveResult"></div>`;
+
+  const browseSection = `<details class="browse" id="browseEvents" open>
       <summary class="browse-toggle">On sale now &amp; not on sale yet <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
     </details>`;
@@ -627,11 +639,12 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         <div class="main-col">
           ${hero}
           <div class="card">
-            <h2>Add another ticket</h2>
+            <h2>Monitor a race</h2>
             <form method="POST" action="/subscribe" id="signupForm">
-              ${findForm}
+              ${searchBox}
               <button type="submit">Add selected ticket(s)</button>
             </form>
+            ${browseSection}
           </div>
         </div>
         <div class="sidebar">
@@ -652,15 +665,17 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       <div class="main-col">
         ${hero}
         <div class="card">
+          <h2>Monitor a race</h2>
           <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
           <form method="POST" action="/subscribe" id="signupForm">
-            ${findForm}
+            ${searchBox}
             <label>Your email
               <input type="email" name="email" required placeholder="you@example.com">
             </label>
             <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
             <button type="submit">Subscribe</button>
           </form>
+          ${browseSection}
         </div>
         <div class="card">
           <p>Already subscribed? <a href="#" id="showLogin">Email me a sign-in link</a></p>
