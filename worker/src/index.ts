@@ -188,6 +188,11 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-badge.presale{background:#fff4e0;color:#9a6700}
 .event-badge.soon{background:#e6eeff;color:#2851b8}
 .event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
+.nav{display:flex;gap:16px;align-items:center;flex-wrap:wrap;padding-bottom:12px;margin-bottom:4px;border-bottom:1px solid #e2e2e2;font-size:0.9rem}
+.nav a{text-decoration:none;color:#555;font-weight:600}
+.nav a.active{color:#111}
+.nav-user{margin-left:auto;color:#666;font-size:0.85rem}
+.nav-user a{font-weight:400;color:#111}
 </style></head>
 <body><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
@@ -203,6 +208,14 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
       },
     }
   );
+}
+
+function navBar(currentPath: "/" | "/my-alerts", subscriber: { email: string } | null): string {
+  return `<nav class="nav">
+    <a href="/"${currentPath === "/" ? ' class="active"' : ""}>Home</a>
+    <a href="/my-alerts"${currentPath === "/my-alerts" ? ' class="active"' : ""}>My Alerts</a>
+    ${subscriber ? `<span class="nav-user">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>` : ""}
+  </nav>`;
 }
 
 const RESOLVE_SCRIPT = `<script>
@@ -408,6 +421,16 @@ function splitByEventDate<T extends { event_date?: string | null }>(rows: T[]): 
   return { active, past };
 }
 
+/** Cheap counts for the homepage's signed-in teaser card - just enough to
+ * say "you're tracking N things" and link to /my-alerts, without paying for
+ * the full renderTicketRows/renderSaleWatchRows joins + timezone formatting
+ * on every homepage load. */
+async function getWatchCounts(subscriberId: number, env: Env): Promise<{ tickets: number; races: number }> {
+  const t = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE subscriber_id = ?").bind(subscriberId).first<any>();
+  const w = await env.DB.prepare("SELECT COUNT(*) AS n FROM sale_watchers WHERE subscriber_id = ?").bind(subscriberId).first<any>();
+  return { tickets: t?.n || 0, races: w?.n || 0 };
+}
+
 function pastEventsSection(pastTickets: string, pastSales: string): string {
   if (!pastTickets && !pastSales) return "";
   return `<div class="card">
@@ -535,24 +558,18 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     </details>`;
 
   if (subscriber) {
-    const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
-    const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
-    const saleSections: string[] = [];
-    if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
-    if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
-    if (saleRows.waiting || saleSections.length === 0) {
-      saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
-    }
+    const counts = await getWatchCounts(subscriber.id, env);
+    const teaser =
+      counts.tickets + counts.races > 0
+        ? `<div class="card">
+        <p>You're tracking ${counts.tickets} ticket(s) and ${counts.races} race(s) waiting to go on sale &mdash; <a href="/my-alerts">view my alerts</a>.</p>
+      </div>`
+        : "";
     return page(
       "RoxRaceAlerts",
-      `${announcements}
-      <div class="card">
-        <p>Signed in as <b>${escapeHtml(subscriber.email)}</b> &middot; <a href="/sign-out">Not you? Sign out</a></p>
-        <h2>Your watched tickets</h2>
-        ${rows.active}
-        ${saleSections.join("\n")}
-      </div>
-      ${pastEventsSection(rows.past, saleRows.past)}
+      `${navBar("/", subscriber)}
+      ${announcements}
+      ${teaser}
       <div class="card">
         <h2>Add another ticket</h2>
         <form method="POST" action="/subscribe" id="signupForm">
@@ -560,18 +577,17 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
           <button type="submit">Add selected ticket(s)</button>
         </form>
       </div>
-      <div class="card">
-        <p><a href="/unsubscribe?token=${escapeHtml(subscriber.unsubscribe_token)}">Unsubscribe from everything</a></p>
-      </div>
       ${RESOLVE_SCRIPT}`
     );
   }
 
   return page(
     "Get notified when sold-out HYROX tickets become available",
-    `${announcements}
+    `${navBar("/", null)}
+    ${announcements}
     <div class="card">
-      <p>Free alerts the moment a sold-out ticket type becomes available again. Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
+      <p>Free alerts for sold-out ticket types, pre-sales, and public sales going live &mdash; for any HYROX race, worldwide.</p>
+      <p>Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
       <form method="POST" action="/subscribe" id="signupForm">
         ${findForm}
         <label>Your email
@@ -788,7 +804,7 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
   return page(
     "Confirmed",
-    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/">Manage my alerts</a></p></div>`,
+    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/my-alerts">Manage my alerts</a></p></div>`,
     { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
@@ -840,15 +856,56 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
  * sale watches, announcements, browse list) and is the only place that
  * view is maintained, so this never drifts out of sync with it again. */
 async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
-  const token = new URL(req.url).searchParams.get("token") || "";
-  const subscriber = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
-  if (!subscriber) {
-    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  const url = new URL(req.url);
+  const token = url.searchParams.get("token");
+  if (token) {
+    const subscriber = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+    if (!subscriber) {
+      return page("Not found", `${navBar("/my-alerts", null)}<div class="card"><p>This link is invalid.</p></div>`);
+    }
+    // Drop the token from the URL once it's become a session cookie, so it
+    // doesn't linger in browser history/bookmarks.
+    return new Response(null, {
+      status: 303,
+      headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) },
+    });
   }
-  return new Response(null, {
-    status: 303,
-    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
-  });
+
+  const subscriber = await getSessionSubscriber(req, env);
+  if (!subscriber) {
+    return page(
+      "My Alerts",
+      `${navBar("/my-alerts", null)}
+      <div class="card">
+        <p>You're not signed in. Go to the <a href="/">homepage</a> to search for tickets, or request a sign-in link there.</p>
+      </div>`
+    );
+  }
+
+  const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
+  const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
+  const saleSections: string[] = [];
+  if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
+  if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
+  if (saleRows.waiting || saleSections.length === 0) {
+    saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
+  }
+  return page(
+    "My Alerts",
+    `${navBar("/my-alerts", subscriber)}
+    <div class="card">
+      <h2>Your watched tickets</h2>
+      ${rows.active}
+      ${saleSections.join("\n")}
+    </div>
+    ${pastEventsSection(rows.past, saleRows.past)}
+    <div class="card">
+      <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
+    </div>
+    <div class="card">
+      <p><a href="/unsubscribe?token=${escapeHtml(subscriber.unsubscribe_token)}">Unsubscribe from everything</a></p>
+    </div>`
+  );
 }
 
 async function handleRemoveSubscription(req: Request, env: Env): Promise<Response> {
@@ -866,7 +923,7 @@ async function handleRemoveSubscription(req: Request, env: Env): Promise<Respons
 
   return new Response(null, {
     status: 303,
-    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
+    headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) },
   });
 }
 
@@ -885,7 +942,7 @@ async function handleRemoveSaleWatch(req: Request, env: Env): Promise<Response> 
 
   return new Response(null, {
     status: 303,
-    headers: { Location: `${env.SITE_URL}/`, "Set-Cookie": sessionCookieHeader(token) },
+    headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) },
   });
 }
 
