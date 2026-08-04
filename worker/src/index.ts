@@ -137,7 +137,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
   return sent;
 }
 
-function page(title: string, body: string, extraHeaders: Record<string, string> = {}): Response {
+function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false): Response {
   return new Response(
     `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -196,8 +196,17 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .nav a.active{color:#111}
 .nav-user{margin-left:auto;color:#666;font-size:0.85rem}
 .nav-user a{font-weight:400;color:#111}
+body.wide{max-width:960px}
+.layout{display:flex;gap:24px;align-items:flex-start}
+.main-col{flex:0 0 640px;max-width:640px;min-width:0}
+.sidebar{flex:0 0 280px;max-width:280px;display:flex;flex-direction:column;gap:16px}
+.hero h2{font-size:1.6rem;margin:0 0 6px}
+.hero-sub{color:#555;font-size:0.95rem;margin:0}
+.hint{color:#555;font-size:0.9rem;margin-top:0}
+.teaser-mini{font-size:0.85rem;color:#555;margin:0}
+@media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
-<body><h1>RoxRaceAlerts</h1>${body}
+<body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
 </body></html>`,
     {
@@ -355,9 +364,26 @@ const RESOLVE_SCRIPT = `<script>
   });
 
   var browseDetails = document.getElementById('browseEvents');
-  var eventList = document.getElementById('eventList');
+  var eventListMain = document.getElementById('eventList');
+  var eventListSide = document.getElementById('eventListSide');
+  var sideCard = document.getElementById('sideOnSaleCard');
   var eventsLoaded = false;
-  if (browseDetails && eventList) {
+
+  function attachRowClicks(container) {
+    if (!container) return;
+    container.addEventListener('click', function(e) {
+      var row = e.target.closest ? e.target.closest('.event-row') : null;
+      if (!row) return;
+      var url = row.getAttribute('data-url');
+      if (!url) return;
+      input.value = url;
+      var details = row.closest('details');
+      if (details) details.open = false;
+      doFind(url);
+    });
+  }
+
+  if (eventListMain || eventListSide) {
     async function loadEvents() {
       if (eventsLoaded) return;
       eventsLoaded = true;
@@ -365,7 +391,8 @@ const RESOLVE_SCRIPT = `<script>
         var resp = await fetch('/events');
         var data = await resp.json();
         if (!data.results || !data.results.length) {
-          eventList.innerHTML = '<p>No events found.</p>';
+          if (eventListMain) eventListMain.innerHTML = '<p>No events found.</p>';
+          if (sideCard) sideCard.style.display = 'none';
           return;
         }
         function formatLocal(utcIso, tz) {
@@ -403,24 +430,27 @@ const RESOLVE_SCRIPT = `<script>
         data.results.forEach(function(ev) {
           entriesFor(ev).forEach(function(entry) { bySection[entry.section].push({ ev: ev, entry: entry }); });
         });
-        eventList.innerHTML = groupHtml('On sale now', bySection.on) + groupHtml('Live now', bySection.live) + groupHtml('Going live soon', bySection.soon) + groupHtml('Not on sale yet', bySection.waiting);
+        if (eventListMain) {
+          eventListMain.innerHTML = groupHtml('On sale now', bySection.on) + groupHtml('Not on sale yet', bySection.waiting);
+        }
+        if (eventListSide) {
+          var sideHtml = groupHtml('Live now', bySection.live) + groupHtml('Going live soon', bySection.soon);
+          eventListSide.innerHTML = sideHtml;
+          if (sideCard) sideCard.style.display = sideHtml ? '' : 'none';
+        }
       } catch (e) {
-        eventList.innerHTML = '<p>Something went wrong loading events.</p>';
+        if (eventListMain) eventListMain.innerHTML = '<p>Something went wrong loading events.</p>';
+        if (sideCard) sideCard.style.display = 'none';
       }
     }
-    if (browseDetails.open) loadEvents();
-    browseDetails.addEventListener('toggle', function() {
-      if (browseDetails.open) loadEvents();
-    });
-    eventList.addEventListener('click', function(e) {
-      var row = e.target.closest ? e.target.closest('.event-row') : null;
-      if (!row) return;
-      var url = row.getAttribute('data-url');
-      if (!url) return;
-      input.value = url;
-      browseDetails.open = false;
-      doFind(url);
-    });
+    loadEvents();
+    if (browseDetails) {
+      browseDetails.addEventListener('toggle', function() {
+        if (browseDetails.open) loadEvents();
+      });
+    }
+    attachRowClicks(eventListMain);
+    attachRowClicks(eventListSide);
   }
 })();
 </script>`;
@@ -573,58 +603,83 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     </div>
     <div id="resolveResult"></div>
     <details class="browse" id="browseEvents" open>
-      <summary class="browse-toggle">All HYROX races &mdash; on sale and upcoming <span class="chev">&#9656;</span></summary>
+      <summary class="browse-toggle">On sale now &amp; not on sale yet <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
     </details>`;
+
+  const hero = `<div class="hero">
+    <h2>Get HYROX Ticket Dates &amp; Alerts</h2>
+    <p class="hero-sub">Free alerts for sold-out ticket types, pre-sales, and public sales going live &mdash; for any HYROX race, worldwide.</p>
+  </div>`;
+
+  const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
+    <h2>Live &amp; upcoming sales</h2>
+    <div id="eventListSide" class="event-list"><p>Loading...</p></div>
+  </div>`;
 
   if (subscriber) {
     const counts = await getWatchCounts(subscriber.id, env);
     const teaser =
       counts.tickets + counts.races > 0
-        ? `<div class="card">
-        <p>You're tracking ${counts.tickets} ticket(s) and ${counts.races} race(s) waiting to go on sale &mdash; <a href="/my-alerts">view my alerts</a>.</p>
-      </div>`
+        ? `<p class="teaser-mini">You're tracking ${counts.tickets} ticket(s) and ${counts.races} race(s) waiting to go on sale &mdash; <a href="/my-alerts">view my alerts</a>.</p>`
         : "";
     return page(
       "RoxRaceAlerts",
       `${navBar("/", subscriber)}
-      ${announcements}
-      ${teaser}
-      <div class="card">
-        <h2>Add another ticket</h2>
-        <form method="POST" action="/subscribe" id="signupForm">
-          ${findForm}
-          <button type="submit">Add selected ticket(s)</button>
-        </form>
+      <div class="layout">
+        <div class="main-col">
+          ${hero}
+          <div class="card">
+            <h2>Add another ticket</h2>
+            <form method="POST" action="/subscribe" id="signupForm">
+              ${findForm}
+              <button type="submit">Add selected ticket(s)</button>
+            </form>
+          </div>
+        </div>
+        <div class="sidebar">
+          ${announcements}
+          ${teaser}
+          ${sideOnSaleCard}
+        </div>
       </div>
-      ${RESOLVE_SCRIPT}`
+      ${RESOLVE_SCRIPT}`,
+      {},
+      true
     );
   }
 
   return page(
     "Get notified when sold-out HYROX tickets become available",
     `${navBar("/", null)}
-    ${announcements}
-    <div class="card">
-      <p>Free alerts for sold-out ticket types, pre-sales, and public sales going live &mdash; for any HYROX race, worldwide.</p>
-      <p>Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
-      <form method="POST" action="/subscribe" id="signupForm">
-        ${findForm}
-        <label>Your email
-          <input type="email" name="email" required placeholder="you@example.com">
-        </label>
-        <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
-        <button type="submit">Subscribe</button>
-      </form>
-    </div>
-    <div class="card">
-      <p>Already subscribed? <a href="#" id="showLogin">Email me a sign-in link</a></p>
-      <form method="POST" action="/login" id="loginForm" style="display:none">
-        <div class="row">
-          <input type="email" name="email" required placeholder="you@example.com">
-          <button type="submit">Send link</button>
+    <div class="layout">
+      <div class="main-col">
+        ${hero}
+        <div class="card">
+          <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
+          <form method="POST" action="/subscribe" id="signupForm">
+            ${findForm}
+            <label>Your email
+              <input type="email" name="email" required placeholder="you@example.com">
+            </label>
+            <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
+            <button type="submit">Subscribe</button>
+          </form>
         </div>
-      </form>
+        <div class="card">
+          <p>Already subscribed? <a href="#" id="showLogin">Email me a sign-in link</a></p>
+          <form method="POST" action="/login" id="loginForm" style="display:none">
+            <div class="row">
+              <input type="email" name="email" required placeholder="you@example.com">
+              <button type="submit">Send link</button>
+            </div>
+          </form>
+        </div>
+      </div>
+      <div class="sidebar">
+        ${announcements}
+        ${sideOnSaleCard}
+      </div>
     </div>
     <script>
     document.getElementById('showLogin').addEventListener('click', function(e) {
@@ -633,7 +688,9 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       document.getElementById('loginForm').style.display = 'block';
     });
     </script>
-    ${RESOLVE_SCRIPT}`
+    ${RESOLVE_SCRIPT}`,
+    {},
+    true
   );
 }
 
