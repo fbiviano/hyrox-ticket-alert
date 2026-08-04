@@ -160,6 +160,9 @@ a{color:#111}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
 .urlWrap{position:relative;flex:1}
+.urlWrap input{padding-right:30px}
+.clearX{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:transparent;border:0;color:#888;font-size:1.2rem;line-height:1;cursor:pointer;padding:4px 8px;margin:0}
+.clearX:hover{color:#111}
 .suggestions{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #ccc;border-top:0;border-radius:0 0 6px 6px;max-height:220px;overflow-y:auto;z-index:10}
 .suggestions div{padding:8px 10px;cursor:pointer;font-size:0.9rem}
 .suggestions div:hover{background:#f0f0f0}
@@ -228,15 +231,17 @@ const RESOLVE_SCRIPT = `<script>
   var input = document.getElementById('urlInput');
   var out = document.getElementById('resolveResult');
   var suggestions = document.getElementById('suggestions');
-  var clearWrap = document.getElementById('clearFindWrap');
-  var clearLink = document.getElementById('clearFindLink');
-  if (clearLink) {
-    clearLink.addEventListener('click', function(e) {
+  var clearX = document.getElementById('clearFindX');
+  function updateClearX() {
+    if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
+  }
+  if (clearX) {
+    clearX.addEventListener('click', function(e) {
       e.preventDefault();
       out.innerHTML = '';
       input.value = '';
       suggestions.innerHTML = '';
-      clearWrap.style.display = 'none';
+      updateClearX();
       input.focus();
     });
   }
@@ -246,7 +251,7 @@ const RESOLVE_SCRIPT = `<script>
     if (!url) return;
     suggestions.innerHTML = '';
     out.innerHTML = '<p>Looking...</p>';
-    if (clearWrap) clearWrap.style.display = 'block';
+    updateClearX();
     try {
       var resp = await fetch('/resolve?url=' + encodeURIComponent(url));
       var data = await resp.json();
@@ -311,6 +316,7 @@ const RESOLVE_SCRIPT = `<script>
 
   var debounceTimer;
   input.addEventListener('input', function() {
+    updateClearX();
     clearTimeout(debounceTimer);
     var q = input.value.trim();
     if (q.length < 2 || /^https?:\\/\\//i.test(q)) {
@@ -560,12 +566,12 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const findForm = `<div class="row">
       <div class="urlWrap">
         <input type="text" id="urlInput" placeholder="Type a city (e.g. Geneva) or paste an event URL" autocomplete="off">
+        <button type="button" id="clearFindX" class="clearX" title="Clear" style="display:none">&times;</button>
         <div id="suggestions" class="suggestions"></div>
       </div>
       <button type="button" id="findBtn">Find tickets</button>
     </div>
     <div id="resolveResult"></div>
-    <p id="clearFindWrap" style="display:none;margin-top:4px"><a href="#" id="clearFindLink">Cancel &mdash; search for a different race</a></p>
     <details class="browse" id="browseEvents" open>
       <summary class="browse-toggle">All HYROX races &mdash; on sale and upcoming <span class="chev">&#9656;</span></summary>
       <div id="eventList" class="event-list"><p>Loading...</p></div>
