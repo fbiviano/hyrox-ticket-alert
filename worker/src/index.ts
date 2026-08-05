@@ -141,6 +141,7 @@ function page(title: string, body: string, extraHeaders: Record<string, string> 
   return new Response(
     `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>${escapeHtml(title)}</title>
 <style>
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#1a1a1a;background:#fafafa}
@@ -226,6 +227,18 @@ body.wide{max-width:980px}
       },
     }
   );
+}
+
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<rect width="32" height="32" rx="7" fill="#111"/>
+<path fill="#fff" d="M16 6.5c-.8 0-1.5.7-1.5 1.5v.6C11.4 9.4 9.5 12 9.5 15.2V20l-2 2.5v1h17v-1l-2-2.5v-4.8c0-3.2-1.9-5.8-5-6.6V8c0-.8-.7-1.5-1.5-1.5z"/>
+<path fill="#fff" d="M13.2 24.5a2.8 2.8 0 0 0 5.6 0z"/>
+</svg>`;
+
+function handleFavicon(): Response {
+  return new Response(FAVICON_SVG, {
+    headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" },
+  });
 }
 
 function navBar(
@@ -2013,6 +2026,7 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     try {
+      if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
