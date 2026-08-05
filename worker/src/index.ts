@@ -1032,7 +1032,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (token) {
     const subscriber = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
     if (!subscriber) {
-      return page("Not found", `${navBar("/my-alerts", null)}<div class="card"><p>This link is invalid.</p></div>`);
+      return page("Not found", `${navBar("/my-alerts", null, 0, true)}<div class="card"><p>This link is invalid.</p></div>`);
     }
     // Drop the token from the URL once it's become a session cookie, so it
     // doesn't linger in browser history/bookmarks.
@@ -1046,9 +1046,9 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (!subscriber) {
     return page(
       "My Alerts",
-      `${navBar("/my-alerts", null)}
+      `${navBar("/my-alerts", null, 0, true)}
       <div class="card">
-        <p>You're not signed in. Go to the <a href="/">homepage</a> to search for tickets, or request a sign-in link there.</p>
+        <p>You're not signed in. Use "Sign in" above, or go to the <a href="/">homepage</a> to search for tickets.</p>
       </div>`
     );
   }
