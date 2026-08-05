@@ -378,6 +378,16 @@ instead of deleting it, so there's a record. `/admin/subscribers` shows
 the aggregate ("N of M watched tickets marked as bought") and a per-
 subscriber count, as a rough sense of how many alerts actually convert.
 
+**Verification nudge email.** Signups don't get any alerts until they
+click the confirmation link (`checkCommunityTickets`/`checkSaleWatches`
+only check tickets/races with at least one verified subscriber
+attached), but people who never click it never find that out. The daily
+`0 8 * * *` cron also runs `sendVerificationNudges()`, which emails
+anyone still unverified 24h+ after signup, once (`nudge_sent_at` caps it
+at one per subscriber), reusing their existing `verify_token`. Manual
+trigger for testing: `POST /admin/send-nudges` with
+`Authorization: Bearer <WEBHOOK_SECRET>`.
+
 ### Telegram mirroring for your own alerts
 
 If `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are set (same bot/chat as the

@@ -960,6 +960,31 @@ async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: str
   );
 }
 
+/** Runs once a day: nudges anyone who signed up 24h+ ago and still hasn't
+ * clicked their confirmation link, since they otherwise have no idea their
+ * watched tickets are silently not being monitored (see the verified-only
+ * filters in checkCommunityTickets/checkSaleWatches). verify_token is never
+ * cleared until they do verify, so it's safe to reuse here. nudge_sent_at
+ * caps this at one email per subscriber, ever. */
+async function sendVerificationNudges(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM subscribers
+     WHERE verified = 0 AND nudge_sent_at IS NULL AND created_at <= datetime('now', '-1 day')`
+  ).all<any>();
+
+  for (const subscriber of results || []) {
+    const link = `${env.SITE_URL}/verify?token=${subscriber.verify_token}`;
+    await sendEmail(
+      env,
+      subscriber.email,
+      "You're not getting alerts yet - confirm your subscription",
+      `<p>You signed up for RoxRaceAlerts but never confirmed your email, so we haven't been able to send you any ticket-availability alerts.</p><p>Click to confirm:</p><p><a href="${link}">${link}</a></p><p>If you don't confirm, we won't be able to alert you at all. If you didn't request this, just ignore this email.</p>`,
+      `You signed up for RoxRaceAlerts but never confirmed your email, so we haven't been able to send you any alerts.\n\nConfirm here: ${link}\n\nIf you don't confirm, we won't be able to alert you at all. If you didn't request this, ignore this email.`
+    );
+    await env.DB.prepare("UPDATE subscribers SET nudge_sent_at = datetime('now') WHERE id = ?").bind(subscriber.id).run();
+  }
+}
+
 /** Redirect to the homepage with the session cookie set - used whenever an
  * action completes for an already-verified subscriber, so the browser lands
  * on the personalized "Signed in as ..." view instead of a static
@@ -1920,6 +1945,17 @@ async function handleReindex(req: Request, env: Env): Promise<Response> {
   return jsonResponse({ indexed });
 }
 
+/** Manual trigger for sendVerificationNudges, same pattern as
+ * /admin/reindex - useful for testing without waiting on the daily cron. */
+async function handleSendNudges(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  await sendVerificationNudges(env);
+  return jsonResponse({ ok: true });
+}
+
 /** Manual trigger for refreshEventDirectorySaleStatus, same pattern as
  * /admin/reindex - useful for testing without waiting on the real cron. */
 async function handleRefreshSaleStatus(req: Request, env: Env): Promise<Response> {
@@ -2177,6 +2213,7 @@ export default {
       if (url.pathname === "/events" && req.method === "GET") return await handleListEvents(env);
       if (url.pathname === "/admin/reindex" && req.method === "POST") return await handleReindex(req, env);
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
+      if (url.pathname === "/admin/send-nudges" && req.method === "POST") return await handleSendNudges(req, env);
       if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
@@ -2203,6 +2240,7 @@ export default {
       ctx.waitUntil(checkAnnouncementReminders(env));
     } else if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
+      ctx.waitUntil(sendVerificationNudges(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }

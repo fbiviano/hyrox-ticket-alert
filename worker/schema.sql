@@ -4,7 +4,11 @@ CREATE TABLE IF NOT EXISTS subscribers (
   verified INTEGER NOT NULL DEFAULT 0,
   verify_token TEXT,
   unsubscribe_token TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Set the one time a "you haven't confirmed yet" nudge email goes out
+  -- (see sendVerificationNudges() in src/index.ts) - stops it from being
+  -- sent more than once per subscriber. Irrelevant once verified = 1.
+  nudge_sent_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
