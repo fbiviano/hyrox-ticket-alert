@@ -227,13 +227,41 @@ body.wide{max-width:980px}
   );
 }
 
-function navBar(currentPath: "/" | "/my-alerts", subscriber: { email: string } | null, watchCount = 0): string {
+function navBar(
+  currentPath: "/" | "/my-alerts",
+  subscriber: { email: string } | null,
+  watchCount = 0,
+  showSignIn = false
+): string {
   const myAlertsLabel = watchCount > 0 ? `My Alerts (${watchCount})` : "My Alerts";
+  const rightSlot = subscriber
+    ? `<span class="nav-user" id="navSignedIn">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>`
+    : showSignIn
+    ? `<span class="nav-user">
+        <a href="#" id="navSignIn">Already subscribed? Sign in</a>
+        <form method="POST" action="/login" id="loginForm" class="row" style="display:none">
+          <input type="email" name="email" required placeholder="you@example.com">
+          <button type="submit">Send link</button>
+        </form>
+      </span>`
+    : "";
   return `<nav class="nav">
     <a href="/"${currentPath === "/" ? ' class="active"' : ""}>Home</a>
     <a href="/my-alerts"${currentPath === "/my-alerts" ? ' class="active"' : ""}>${myAlertsLabel}</a>
-    ${subscriber ? `<span class="nav-user">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>` : ""}
-  </nav>`;
+    ${rightSlot}
+  </nav>
+  <script>
+  (function() {
+    var navSignIn = document.getElementById('navSignIn');
+    if (navSignIn) {
+      navSignIn.addEventListener('click', function(e) {
+        e.preventDefault();
+        navSignIn.style.display = 'none';
+        document.getElementById('loginForm').style.display = 'flex';
+      });
+    }
+  })();
+  </script>`;
 }
 
 const RESOLVE_SCRIPT = `<script>
@@ -248,8 +276,8 @@ const RESOLVE_SCRIPT = `<script>
   var suggestions = document.getElementById('suggestions');
   var clearX = document.getElementById('clearFindX');
   var browseDetails = document.getElementById('browseEvents');
-  var submitBtn = document.getElementById('ticketSubmitBtn');
-  var signedIn = !!document.querySelector('.nav-user');
+  var submitBtn = document.querySelector('.submit-step');
+  var signedIn = !!document.getElementById('navSignedIn');
   function updateClearX() {
     if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
   }
@@ -689,7 +717,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
             <h2>Monitor race tickets</h2>
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
-              <button type="submit" id="ticketSubmitBtn" style="display:none">Add selected ticket(s)</button>
+              <button type="submit" class="submit-step" style="display:none">Add selected ticket(s)</button>
             </form>
             ${browseSection}
           </div>
@@ -707,7 +735,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
 
   return page(
     "Get notified when sold-out HYROX tickets become available",
-    `${navBar("/", null)}
+    `${navBar("/", null, 0, true)}
     <div class="layout">
       <div class="main-col">
         ${hero}
@@ -716,22 +744,15 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
           <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
           <form method="POST" action="/subscribe" id="signupForm">
             ${searchBox}
-            <label>Your email
-              <input type="email" name="email" required placeholder="you@example.com">
-            </label>
-            <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
-            <button type="submit" id="ticketSubmitBtn" style="display:none">Subscribe</button>
-          </form>
-          ${browseSection}
-        </div>
-        <div class="card">
-          <p>Already subscribed? <a href="#" id="showLogin">Email me a sign-in link</a></p>
-          <form method="POST" action="/login" id="loginForm" style="display:none">
-            <div class="row">
-              <input type="email" name="email" required placeholder="you@example.com">
-              <button type="submit">Send link</button>
+            <div class="submit-step" style="display:none">
+              <label>Your email
+                <input type="email" name="email" required placeholder="you@example.com">
+              </label>
+              <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
+              <button type="submit">Subscribe</button>
             </div>
           </form>
+          ${browseSection}
         </div>
       </div>
       <div class="sidebar">
@@ -739,13 +760,6 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         ${announcements}
       </div>
     </div>
-    <script>
-    document.getElementById('showLogin').addEventListener('click', function(e) {
-      e.preventDefault();
-      this.style.display = 'none';
-      document.getElementById('loginForm').style.display = 'block';
-    });
-    </script>
     ${RESOLVE_SCRIPT}`,
     {},
     true
