@@ -213,7 +213,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Have feedback? Let us know</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a></small></p>
 </body></html>`,
     {
       headers: {
