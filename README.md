@@ -440,6 +440,17 @@ Dismissing a bad match on `/admin/ig-posts` clears the associated
 `presale_note`/`presale_live_at`/`presale_timezone` on both tables too, so
 a retracted announcement doesn't keep showing stale info.
 
+### Feedback
+
+A "Have feedback? Let us know" link in the footer of every page opens
+`/feedback` - a plain message box (email optional, for follow-up). Each
+submission is stored in the `feedback` table and immediately emails
+`ADMIN_EMAIL`. Private by design: nothing here is shown to other
+visitors, there's no voting or public board.
+
+- Inbox: `https://roxracealerts.com/admin/feedback?token=<WEBHOOK_SECRET>`
+  - newest first, with a "Delete" button per entry to clean up spam.
+
 ---
 
 ## How it works, briefly

@@ -213,7 +213,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu.</small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Have feedback? Let us know</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -1863,6 +1863,91 @@ async function renderAnnouncementsBanner(env: Env): Promise<string> {
   return `<div class="card"><h2>Recent ticket-sale news</h2>${rows}</div>`;
 }
 
+async function handleFeedbackPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  return page(
+    "Feedback",
+    `${navBar("/", subscriber, 0, !subscriber)}
+    <div class="card">
+      <h2>Feedback</h2>
+      <p class="hint">Bug, feature idea, anything else you want to tell us - we read every one.</p>
+      <form method="POST" action="/feedback">
+        <label>Message
+          <textarea name="message" required rows="5" style="width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px;font-family:inherit"></textarea>
+        </label>
+        <label>Your email (optional, in case we want to follow up)
+          <input type="email" name="email" placeholder="you@example.com">
+        </label>
+        <button type="submit">Send feedback</button>
+      </form>
+    </div>`
+  );
+}
+
+async function handleFeedback(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const message = String(form.get("message") || "").trim();
+  const email = String(form.get("email") || "").trim();
+  if (!message) {
+    return page("Feedback", `<div class="card"><p>Please enter a message. <a href="/feedback">Go back</a></p></div>`);
+  }
+  await env.DB.prepare("INSERT INTO feedback (message, email) VALUES (?, ?)")
+    .bind(message, email || null)
+    .run();
+
+  if (env.ADMIN_EMAIL) {
+    try {
+      await sendEmail(
+        env,
+        env.ADMIN_EMAIL,
+        "New RoxRaceAlerts feedback",
+        `<p>${escapeHtml(message).replace(/\n/g, "<br>")}</p>${email ? `<p>From: ${escapeHtml(email)}</p>` : ""}`,
+        `${message}${email ? `\n\nFrom: ${email}` : ""}`
+      );
+    } catch (e) {
+      console.error("Failed to email feedback to admin:", e);
+    }
+  }
+
+  return page("Feedback", `<div class="card"><p>Thanks - we've got it.</p></div>`);
+}
+
+/** Read-only log of feedback submitted via /feedback, plus a delete
+ * button to clean up spam/duplicates. Private - nothing here is public.
+ * Uses the token-in-URL pattern (like /admin/ig-posts) rather than a
+ * Bearer header, since this page is meant to be opened in a browser. */
+async function handleFeedbackAdminPage(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const { results } = await env.DB.prepare("SELECT id, message, email, created_at FROM feedback ORDER BY created_at DESC LIMIT 100").all<any>();
+
+  const rows = (results || [])
+    .map(
+      (r: any) => `<div class="card">
+        <p><small>${escapeHtml(r.created_at)}${r.email ? ` &middot; ${escapeHtml(r.email)}` : ""}</small></p>
+        <p>${escapeHtml(r.message).replace(/\n/g, "<br>")}</p>
+        <form method="POST" action="/admin/feedback/dismiss">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="id" value="${r.id}">
+          <button type="submit">Delete</button>
+        </form>
+      </div>`
+    )
+    .join("");
+
+  return page("Feedback inbox", rows || `<div class="card"><p>Nothing yet.</p></div>`, { "cache-control": "private, no-store" });
+}
+
+async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+  const id = String(form.get("id") || "");
+  await env.DB.prepare("DELETE FROM feedback WHERE id = ?").bind(id).run();
+  return Response.redirect(`${env.SITE_URL}/admin/feedback?token=${encodeURIComponent(token)}`, 303);
+}
+
 /** Read-only log of what the daily Instagram check auto-published, plus a
  * one-click way to retract a bad publish (an AI mismatch, or an incorrect
  * event match). Nothing here requires action - publishing already
@@ -1947,6 +2032,10 @@ export default {
       if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
+      if (url.pathname === "/feedback" && req.method === "GET") return await handleFeedbackPage(req, env);
+      if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
+      if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
+      if (url.pathname === "/admin/feedback/dismiss" && req.method === "POST") return await handleFeedbackDismiss(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
       console.error(e);

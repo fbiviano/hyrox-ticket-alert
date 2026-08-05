@@ -145,3 +145,14 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   reminder_5m_sent INTEGER NOT NULL DEFAULT 0,
   UNIQUE(handle, post_id)
 );
+
+-- Free-text feedback/feature requests submitted via /feedback. Private -
+-- nothing here is shown to other visitors. Each submission also emails
+-- ADMIN_EMAIL immediately (see handleFeedback() in src/index.ts); this
+-- table is just the durable log behind /admin/feedback.
+CREATE TABLE IF NOT EXISTS feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message TEXT NOT NULL,
+  email TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
