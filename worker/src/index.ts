@@ -204,6 +204,9 @@ a{color:#111}
 .ticket-row button:hover{background:#fee}
 .ticket-row .buy-btn{color:#1e7e34;border-color:#bfe0c9}
 .ticket-row .buy-btn:hover{background:#e6f4ea}
+.verify-banner{background:#fff4e0;border:1px solid #ffe1a8;color:#7a5b00;padding:12px 16px;border-radius:8px;margin-top:16px;font-size:0.9rem}
+.verify-banner p{margin:0}
+.verify-banner p+p{margin-top:6px}
 details.browse{margin-top:16px}
 details.browse summary{cursor:pointer;list-style:none}
 details.browse summary::-webkit-details-marker{display:none}
@@ -943,6 +946,11 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
   return { subscriber, needsVerification, verifyToken };
 }
 
+/** Sends the confirmation email and, since a session cookie normally only
+ * gets set once a subscriber verifies, also signs the submitting browser in
+ * right away (same unsubscribe_token session as a verified subscriber gets)
+ * so it can immediately reach /my-alerts and see the "please confirm"
+ * banner there too - not just on this one-time response page. */
 async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: string): Promise<Response> {
   const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
   await sendEmail(
@@ -956,7 +964,8 @@ async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: str
     "Check your email",
     `<div class="card"><p>Almost done — we've sent a confirmation link to <b>${escapeHtml(
       subscriber.email
-    )}</b>. Click it to start receiving alerts.</p></div>`
+    )}</b>. Click it to start receiving alerts. Don't see it? Check your spam folder.</p></div>`,
+    { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
 
@@ -1152,9 +1161,17 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (saleRows.waiting || saleSections.length === 0) {
     saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
   }
+  const verifyBanner = subscriber.verified
+    ? ""
+    : `<div class="verify-banner">
+      <p><b>Confirm your email to start receiving alerts</b> — until you do, nothing below is actually being checked.</p>
+      <p>We sent a confirmation link to ${escapeHtml(subscriber.email)}. Don't see it? Check your spam folder.</p>
+    </div>`;
+
   return page(
     "My Alerts",
     `${navBar("/my-alerts", subscriber, counts.tickets + counts.races)}
+    ${verifyBanner}
     <div class="card">
       <h2>Your watched tickets</h2>
       ${rows.active}
