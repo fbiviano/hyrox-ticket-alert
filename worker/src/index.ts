@@ -190,7 +190,8 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-badge.off{background:#f1f1f1;color:#777}
 .event-badge.presale{background:#fff4e0;color:#9a6700}
 .event-badge.soon{background:#e6eeff;color:#2851b8}
-.event-subtitle{font-size:0.8rem;color:#9a6700;margin-top:2px}
+.event-subtitle{font-size:0.8rem;font-weight:600;color:#9a6700;margin-top:2px}
+.event-race-date{font-size:0.7rem;color:#999;margin-top:2px}
 .event-right{display:flex;align-items:center;gap:4px;flex-shrink:0}
 .row-chev{color:#999}
 .row-monitor{display:block;margin-top:4px;background:#fff;border:1px solid #ccc;border-radius:6px;padding:2px 8px;font-size:0.75rem;color:#111;cursor:pointer}
@@ -498,29 +499,50 @@ const RESOLVE_SCRIPT = `<script>
           if (!out.length) out.push({ section: 'waiting', badge: 'Not on sale', badgeClass: 'off', subtitle: '' });
           return out;
         }
-        function rowHtml(ev, entry, compact) {
-          var dateLabel = (compact ? '' : 'Race: ') + (ev.event_date || 'date TBA');
+        function rowHtml(ev, entry) {
+          var dateLabel = 'Race: ' + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
+        }
+        var URGENT_MS = 48 * 60 * 60 * 1000;
+        function isUrgent(ev) {
+          if (!ev.presale_live_at) return false;
+          var diff = new Date(ev.presale_live_at).getTime() - Date.now();
+          return diff >= 0 && diff <= URGENT_MS;
+        }
+        function sideRowHtml(ev, entry) {
+          var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
+          var saleLine = entry.subtitle
+            ? '<div class="event-subtitle">' + (entry.section === 'soon' && isUrgent(ev) ? '🔥 ' : '') + esc(entry.subtitle) + '</div>'
+            : '';
+          var raceLine = '<div class="event-race-date">Race: ' + esc(ev.event_date || 'date TBA') + '</div>';
           var monitorBtn = entry.section === 'soon'
             ? '<button type="button" class="row-monitor" data-url="' + esc(ev.url) + '" data-title="' + esc(ev.title) + '" data-date="' + esc(ev.event_date || '') + '">+ Monitor</button>'
             : '';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + monitorBtn + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(ev.title) + '</span>' + saleLine + raceLine + monitorBtn + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
         }
-        function groupHtml(title, items, compact) {
+        function groupHtml(title, items, rowFn) {
           if (!items.length) return '';
           return '<div class="event-group"><h3>' + esc(title) + ' (' + items.length + ')</h3>' +
-            '<div class="event-group-rows">' + items.map(function(x) { return rowHtml(x.ev, x.entry, compact); }).join('') + '</div></div>';
+            '<div class="event-group-rows">' + items.map(function(x) { return rowFn(x.ev, x.entry); }).join('') + '</div></div>';
+        }
+        function byGoLive(a, b) {
+          var ta = a.ev.presale_live_at ? new Date(a.ev.presale_live_at).getTime() : Infinity;
+          var tb = b.ev.presale_live_at ? new Date(b.ev.presale_live_at).getTime() : Infinity;
+          return ta - tb;
         }
         var bySection = { on: [], live: [], soon: [], waiting: [] };
         data.results.forEach(function(ev) {
           entriesFor(ev).forEach(function(entry) { bySection[entry.section].push({ ev: ev, entry: entry }); });
         });
+        bySection.live.sort(byGoLive);
+        bySection.soon.sort(byGoLive);
         if (eventListMain) {
-          eventListMain.innerHTML = groupHtml('On sale now', bySection.on) + groupHtml('Not on sale yet', bySection.waiting);
+          eventListMain.innerHTML = groupHtml('On sale now', bySection.on, rowHtml) + groupHtml('Not on sale yet', bySection.waiting, rowHtml);
         }
         if (eventListSide) {
-          var sideHtml = groupHtml('Live now', bySection.live, true) + groupHtml('Going live soon', bySection.soon, true);
+          var sideHtml = groupHtml('Live now', bySection.live, sideRowHtml) + groupHtml('Going live soon', bySection.soon, sideRowHtml);
           eventListSide.innerHTML = sideHtml;
           if (sideCard) sideCard.style.display = sideHtml ? '' : 'none';
         }
