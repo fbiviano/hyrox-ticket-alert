@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   shop_url TEXT,
   event_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Set once the subscriber tells us (via the "I bought this" button on
+  -- /my-alerts) they've already purchased - stops further availability
+  -- alerts for just this one subscriber (others watching the same
+  -- event_name/ticket_name are unaffected) and moves the row into the
+  -- "Purchased" section instead of "Your watched tickets".
+  purchased_at TEXT,
   UNIQUE(subscriber_id, event_name, ticket_name)
 );
 

@@ -23,6 +23,8 @@ export interface Env {
   SEND_FROM: string;
   SITE_URL: string;
   ADMIN_EMAIL: string;
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
 }
 
 interface TrackedTicket {
@@ -107,12 +109,39 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
   }
 }
 
+async function sendTelegram(env: Env, text: string): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text }),
+  });
+  if (!resp.ok) {
+    console.error(`Telegram send failed: ${resp.status} ${await resp.text()}`);
+  }
+}
+
+/** Mirrors an alert to Telegram, but only when it's addressed to the
+ * site owner's own account (ADMIN_EMAIL) - other subscribers never get a
+ * Telegram message, this is purely a personal secondary channel for the
+ * owner's own watched tickets, alongside their regular alert email.
+ * Failures are logged, never thrown - a missed Telegram ping shouldn't
+ * fail the email send it's mirroring. */
+async function notifyAdminTelegram(env: Env, recipientEmail: string, text: string): Promise<void> {
+  if (!env.ADMIN_EMAIL || recipientEmail.toLowerCase() !== env.ADMIN_EMAIL.toLowerCase()) return;
+  try {
+    await sendTelegram(env, text);
+  } catch (e) {
+    console.error("Failed to mirror alert to Telegram:", e);
+  }
+}
+
 /** Email every verified subscriber watching this exact (event_name, ticket_name). */
 async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
   const { results } = await env.DB.prepare(
     `SELECT s.email, s.unsubscribe_token FROM subscribers s
      JOIN subscriptions sub ON sub.subscriber_id = s.id
-     WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ?`
+     WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
   )
     .bind(eventName, ticketName)
     .all<any>();
@@ -129,6 +158,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
         `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
         `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
       );
+      await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
       sent++;
     } catch (e) {
       console.error(`Failed to email ${row.email}:`, e);
@@ -172,6 +202,8 @@ a{color:#111}
 .ticket-row form{margin:0}
 .ticket-row button{margin:0;background:#fff;color:#b00;border:1px solid #e2b3b3;padding:6px 12px;font-size:0.85rem}
 .ticket-row button:hover{background:#fee}
+.ticket-row .buy-btn{color:#1e7e34;border-color:#bfe0c9}
+.ticket-row .buy-btn:hover{background:#e6f4ea}
 details.browse{margin-top:16px}
 details.browse summary{cursor:pointer;list-style:none}
 details.browse summary::-webkit-details-marker{display:none}
@@ -614,29 +646,46 @@ function pastEventsSection(pastTickets: string, pastSales: string): string {
   </div>`;
 }
 
-async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<ActivePast> {
+async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<ActivePast & { purchased: string }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, event_name, ticket_name, event_date FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name"
+    "SELECT id, event_name, ticket_name, event_date, purchased_at FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name"
   )
     .bind(subscriberId)
     .all<any>();
-  const { active, past } = splitByEventDate(results || []);
-  const render = (rows: any[], emptyMsg?: string) => {
+  const rows = results || [];
+  const purchasedRows = rows.filter((r: any) => r.purchased_at);
+  const { active, past } = splitByEventDate(rows.filter((r: any) => !r.purchased_at));
+  const render = (rows: any[], emptyMsg?: string, showBuyButton?: boolean) => {
     const html = rows
       .map(
         (r: any) => `<div class="ticket-row">
       <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
-      <form method="POST" action="/remove-subscription">
-        <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <input type="hidden" name="subscription_id" value="${r.id}">
-        <button type="submit">Remove</button>
-      </form>
+      <div class="row" style="gap:6px">
+        ${
+          showBuyButton
+            ? `<form method="POST" action="/mark-purchased">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="subscription_id" value="${r.id}">
+          <button type="submit" class="buy-btn">I bought this</button>
+        </form>`
+            : ""
+        }
+        <form method="POST" action="/remove-subscription">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="subscription_id" value="${r.id}">
+          <button type="submit">Remove</button>
+        </form>
+      </div>
     </div>`
       )
       .join("");
     return html || (emptyMsg ? `<p>${emptyMsg}</p>` : "");
   };
-  return { active: render(active, "No active subscriptions yet."), past: render(past) };
+  return {
+    active: render(active, "No active subscriptions yet.", true),
+    past: render(past),
+    purchased: render(purchasedRows),
+  };
 }
 
 interface SaleWatchEntry {
@@ -1086,6 +1135,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
       ${rows.active}
       ${saleSections.join("\n")}
     </div>
+    ${rows.purchased ? `<div class="card"><h2>Purchased</h2>${rows.purchased}</div>` : ""}
     ${pastEventsSection(rows.past, saleRows.past)}
     <div class="card">
       <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
@@ -1106,6 +1156,25 @@ async function handleRemoveSubscription(req: Request, env: Env): Promise<Respons
     return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
   }
   await env.DB.prepare("DELETE FROM subscriptions WHERE id = ? AND subscriber_id = ?")
+    .bind(subscriptionId, subscriber.id)
+    .run();
+
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) },
+  });
+}
+
+async function handleMarkPurchased(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const subscriptionId = String(form.get("subscription_id") || "");
+
+  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!subscriber) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+  await env.DB.prepare("UPDATE subscriptions SET purchased_at = datetime('now') WHERE id = ? AND subscriber_id = ?")
     .bind(subscriptionId, subscriber.id)
     .run();
 
@@ -1222,6 +1291,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
           `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
           `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
         );
+        await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
       } catch (e) {
         console.error(`Failed to email ${watcher.email}:`, e);
       }
@@ -1361,6 +1431,7 @@ async function notifySaleWatchers(env: Env, eventUrl: string, bannerText: string
         `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
         `${eventTitle}: ${bannerText}\n${postUrl}\n\nThis may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
       );
+      await notifyAdminTelegram(env, watcher.email, `📣 ${eventTitle}: ${bannerText}\n${postUrl}`);
     } catch (e) {
       console.error(`Failed to email ${watcher.email}:`, e);
     }
@@ -1397,6 +1468,7 @@ async function sendCountdownReminder(
         `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This is a best-effort estimate from an Instagram post, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
         `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${postUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
       );
+      await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${postUrl}`);
     } catch (e) {
       console.error(`Failed to email reminder to ${watcher.email}:`, e);
     }
@@ -1976,23 +2048,32 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   const { results } = await env.DB.prepare(
     `SELECT s.email, s.verified, s.created_at,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
-       (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count
+       (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count,
+       (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id AND purchased_at IS NOT NULL) AS bought_count
      FROM subscribers s
      ORDER BY s.created_at DESC
      LIMIT 500`
   ).all<any>();
 
-  const rows = (results || [])
+  const rows = results || [];
+  const totalBought = rows.reduce((sum: number, r: any) => sum + r.bought_count, 0);
+  const totalTickets = rows.reduce((sum: number, r: any) => sum + r.ticket_count, 0);
+
+  const rowsHtml = rows
     .map(
       (r: any) => `<div class="ticket-row">
-        <span>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s) &middot; <small>${escapeHtml(r.created_at)}</small></span>
+        <span>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></span>
       </div>`
     )
     .join("");
 
   return page(
     "Subscribers",
-    `<div class="card"><h2>Subscribers (${(results || []).length})</h2>${rows || "<p>Nobody yet.</p>"}</div>`,
+    `<div class="card">
+      <h2>Subscribers (${rows.length})</h2>
+      <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall.</small></p>
+      ${rowsHtml || "<p>Nobody yet.</p>"}
+    </div>`,
     { "cache-control": "private, no-store" }
   );
 }
@@ -2072,6 +2153,7 @@ export default {
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
       if (url.pathname === "/my-alerts" && req.method === "GET") return await handleMyAlerts(req, env);
       if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
+      if (url.pathname === "/mark-purchased" && req.method === "POST") return await handleMarkPurchased(req, env);
       if (url.pathname === "/remove-sale-watch" && req.method === "POST") return await handleRemoveSaleWatch(req, env);
       if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);

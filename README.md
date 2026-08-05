@@ -354,10 +354,11 @@ input that corrupts secrets (this bit us once already).
 
 `https://roxracealerts.com/admin/subscribers?token=<WEBHOOK_SECRET>` -
 private, token-gated page listing every subscriber (email, verified
-status, signup date, and how many tickets/races they're watching). Resend
-itself has no subscriber list to show you - it only relays individual
-sends, so this page (backed by the `subscribers` table) is the actual
-source of truth for who's registered.
+status, signup date, how many tickets/races they're watching, and how
+many they've marked as bought - see below). Resend itself has no
+subscriber list to show you - it only relays individual sends, so this
+page (backed by the `subscribers` table) is the actual source of truth
+for who's registered.
 
 For anything beyond that quick list (custom filters, counts, etc.), query
 D1 directly:
@@ -366,6 +367,29 @@ D1 directly:
 cd worker
 npx wrangler d1 execute roxracealerts-db --remote --command "SELECT email, verified FROM subscribers"
 ```
+
+**Marking a ticket as bought.** On `/my-alerts`, each watched ticket has
+an "I bought this" button alongside "Remove" - clicking it sets
+`purchased_at` on that one subscription row, which (a) stops further
+availability alerts for that subscriber on that ticket only (other
+subscribers watching the same event/ticket are unaffected), and (b)
+moves it from "Your watched tickets" into a separate "Purchased" section
+instead of deleting it, so there's a record. `/admin/subscribers` shows
+the aggregate ("N of M watched tickets marked as bought") and a per-
+subscriber count, as a rough sense of how many alerts actually convert.
+
+### Telegram mirroring for your own alerts
+
+If `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are set (same bot/chat as the
+original personal checker - see "Set up Telegram alerts" above), every
+alert email the site sends to `ADMIN_EMAIL` specifically - ticket became
+available, a watched race's sale just went live, an Instagram pre-sale
+announcement matched a watched race, or a countdown reminder - is also
+mirrored to Telegram. Other subscribers never receive Telegram messages;
+this is purely a personal secondary channel for the site owner's own
+watched tickets, keyed off `notifyAdminTelegram()` in `src/index.ts`
+checking the recipient against `ADMIN_EMAIL` on every send. If either
+secret is unset, alerts are simply email-only, same as before.
 
 ### Instagram ticket-announcement watcher
 

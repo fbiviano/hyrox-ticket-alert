@@ -19,6 +19,8 @@ ADMIN_EMAIL = "francescobiviano609@gmail.com"
 #   APIFY_API_TOKEN    - Instagram ticket-announcement watcher
 #   ANTHROPIC_API_KEY  - parses flagged Instagram captions (any language) into
 #                        an event match + English summary before auto-publishing
+#   TELEGRAM_BOT_TOKEN - mirrors alerts addressed to ADMIN_EMAIL to Telegram too
+#   TELEGRAM_CHAT_ID   - (optional pair - alerts still email-only if unset)
 
 [triggers]
 # */2 * * * *  - re-checks watched tickets (checkCommunityTickets)
