@@ -352,6 +352,16 @@ input that corrupts secrets (this bit us once already).
 
 ### Checking on subscribers
 
+`https://roxracealerts.com/admin/subscribers?token=<WEBHOOK_SECRET>` -
+private, token-gated page listing every subscriber (email, verified
+status, signup date, and how many tickets/races they're watching). Resend
+itself has no subscriber list to show you - it only relays individual
+sends, so this page (backed by the `subscribers` table) is the actual
+source of truth for who's registered.
+
+For anything beyond that quick list (custom filters, counts, etc.), query
+D1 directly:
+
 ```bash
 cd worker
 npx wrangler d1 execute roxracealerts-db --remote --command "SELECT email, verified FROM subscribers"

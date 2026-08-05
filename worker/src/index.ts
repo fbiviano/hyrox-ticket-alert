@@ -1961,6 +1961,39 @@ async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> 
   return Response.redirect(`${env.SITE_URL}/admin/feedback?token=${encodeURIComponent(token)}`, 303);
 }
 
+/** Private, read-only list of everyone registered - who Resend itself has
+ * no concept of (it just relays individual sends, it doesn't retain a
+ * subscriber list for us). This is the only place that list is visible
+ * without querying D1 directly. Same token-gated pattern as the other
+ * /admin/* pages. */
+async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const { results } = await env.DB.prepare(
+    `SELECT s.email, s.verified, s.created_at,
+       (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
+       (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count
+     FROM subscribers s
+     ORDER BY s.created_at DESC
+     LIMIT 500`
+  ).all<any>();
+
+  const rows = (results || [])
+    .map(
+      (r: any) => `<div class="ticket-row">
+        <span>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s) &middot; <small>${escapeHtml(r.created_at)}</small></span>
+      </div>`
+    )
+    .join("");
+
+  return page(
+    "Subscribers",
+    `<div class="card"><h2>Subscribers (${(results || []).length})</h2>${rows || "<p>Nobody yet.</p>"}</div>`,
+    { "cache-control": "private, no-store" }
+  );
+}
+
 /** Read-only log of what the daily Instagram check auto-published, plus a
  * one-click way to retract a bad publish (an AI mismatch, or an incorrect
  * event match). Nothing here requires action - publishing already
@@ -2049,6 +2082,7 @@ export default {
       if (url.pathname === "/feedback" && req.method === "GET") return await handleFeedbackPage(req, env);
       if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
       if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
+      if (url.pathname === "/admin/subscribers" && req.method === "GET") return await handleSubscribersAdminPage(req, env);
       if (url.pathname === "/admin/feedback/dismiss" && req.method === "POST") return await handleFeedbackDismiss(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
