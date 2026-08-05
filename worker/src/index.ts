@@ -203,6 +203,7 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .nav a.active{color:#111}
 .nav-user{margin-left:auto;color:#666;font-size:0.85rem}
 .nav-user a{font-weight:400;color:#111}
+.nav-hint{font-size:0.75rem;color:#888;margin-top:4px;text-align:right}
 body.wide{max-width:980px}
 .layout{display:flex;gap:24px;align-items:flex-start}
 .main-col{flex:0 0 640px;max-width:640px;min-width:0}
@@ -257,6 +258,7 @@ function navBar(
           <input type="email" name="email" required placeholder="you@example.com">
           <button type="submit">Send link</button>
         </form>
+        <div class="nav-hint" id="loginHint" style="display:none">We'll email a sign-in link to the address you signed up with.</div>
       </span>`
     : "";
   return `<nav class="nav">
@@ -272,6 +274,7 @@ function navBar(
         e.preventDefault();
         navSignIn.style.display = 'none';
         document.getElementById('loginForm').style.display = 'flex';
+        document.getElementById('loginHint').style.display = 'block';
       });
     }
   })();
