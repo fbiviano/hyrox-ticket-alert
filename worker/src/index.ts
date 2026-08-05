@@ -239,7 +239,7 @@ function navBar(
     ? `<span class="nav-user" id="navSignedIn">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>`
     : showSignIn
     ? `<span class="nav-user">
-        <a href="#" id="navSignIn">Already subscribed? Sign in</a>
+        <a href="#" id="navSignIn">Sign in</a>
         <form method="POST" action="/login" id="loginForm" class="row" style="display:none">
           <input type="email" name="email" required placeholder="you@example.com">
           <button type="submit">Send link</button>
