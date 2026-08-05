@@ -1227,8 +1227,17 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
  * fan out alerts on sold_out -> available. Every subscription flows through
  * here (there's no separate curated list on the public site). */
 async function checkCommunityTickets(env: Env): Promise<void> {
+  // Skip anything nobody verified actually wants anymore - an unverified
+  // signup shouldn't consume a checking slot until they confirm, and once
+  // every verified subscriber has marked it bought there's no one left to
+  // alert either.
   const { results } = await env.DB.prepare(
-    "SELECT * FROM community_tickets WHERE event_date IS NULL OR event_date >= ?"
+    `SELECT ct.* FROM community_tickets ct
+     WHERE (ct.event_date IS NULL OR ct.event_date >= ?)
+       AND EXISTS (
+         SELECT 1 FROM subscriptions sub JOIN subscribers s ON s.id = sub.subscriber_id
+         WHERE s.verified = 1 AND sub.event_name = ct.event_name AND sub.ticket_name = ct.ticket_name AND sub.purchased_at IS NULL
+       )`
   )
     .bind(todayIso())
     .all<any>();
@@ -1253,8 +1262,15 @@ async function checkCommunityTickets(env: Env): Promise<void> {
  * be small, well under the 50-subrequest cap (unlike the 116-event sitemap
  * crawl, which needs its own batched daily job). */
 async function checkSaleWatches(env: Env): Promise<void> {
+  // Same reasoning as checkCommunityTickets - don't spend a checking slot
+  // on a race nobody verified is actually waiting to hear about.
   const { results } = await env.DB.prepare(
-    "SELECT * FROM sale_watch WHERE resolved = 0 AND (event_date IS NULL OR event_date >= ?)"
+    `SELECT sw.* FROM sale_watch sw
+     WHERE sw.resolved = 0 AND (sw.event_date IS NULL OR sw.event_date >= ?)
+       AND EXISTS (
+         SELECT 1 FROM sale_watchers w JOIN subscribers s ON s.id = w.subscriber_id
+         WHERE s.verified = 1 AND w.event_url = sw.event_url
+       )`
   )
     .bind(todayIso())
     .all<any>();
