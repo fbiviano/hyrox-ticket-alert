@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   reminder_1d_sent INTEGER NOT NULL DEFAULT 0,
   reminder_1h_sent INTEGER NOT NULL DEFAULT 0,
   reminder_5m_sent INTEGER NOT NULL DEFAULT 0,
+  reminder_0m_sent INTEGER NOT NULL DEFAULT 0,
   UNIQUE(handle, post_id)
 );
 

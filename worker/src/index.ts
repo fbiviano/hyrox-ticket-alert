@@ -1642,21 +1642,24 @@ const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const FIVE_MIN_MS = 5 * 60 * 1000;
 
-/** Fires countdown reminders (1 day / 1 hour / 5 minutes before) for any
- * announcement whose caption gave a specific expected go-live time -
+/** Fires countdown reminders (1 day / 1 hour / 5 minutes / right now) for
+ * any announcement whose caption gave a specific expected go-live time -
  * dispatched from the same 2-minute Cron Trigger as the ticket checks, so
- * the 5-minute window is never missed by more than a couple of minutes.
- * Each threshold is a one-shot flag on the row, so a tick that's already
- * past a threshold just skips it rather than re-sending. If the whole
- * thing is more than 6 hours overdue (e.g. after extended downtime), marks
- * the reminder sent without emailing - a stale countdown isn't useful. */
+ * even the "right now" one is never missed by more than a couple of
+ * minutes. Each threshold is a one-shot flag on the row, so a tick that's
+ * already past a threshold just skips it rather than re-sending. If the
+ * whole thing is more than 6 hours overdue (e.g. after extended downtime),
+ * marks the reminder sent without emailing - a stale countdown isn't
+ * useful. The "right now" reminder is a best-effort estimate, same as the
+ * others - checkSaleWatches is still the one that confirms the shop is
+ * actually live. */
 async function checkAnnouncementReminders(env: Env): Promise<void> {
   const now = Date.now();
   const { results } = await env.DB.prepare(
-    `SELECT id, event_url, post_url, live_at_utc, live_at_timezone, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent
+    `SELECT id, event_url, post_url, live_at_utc, live_at_timezone, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent, reminder_0m_sent
      FROM ig_flagged_posts
      WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
-       AND (reminder_1d_sent = 0 OR reminder_1h_sent = 0 OR reminder_5m_sent = 0)`
+       AND (reminder_1d_sent = 0 OR reminder_1h_sent = 0 OR reminder_5m_sent = 0 OR reminder_0m_sent = 0)`
   ).all<any>();
 
   for (const row of results || []) {
@@ -1682,6 +1685,12 @@ async function checkAnnouncementReminders(env: Env): Promise<void> {
         await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.live_at_timezone);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_5m_sent = 1 WHERE id = ?").bind(row.id).run();
+    }
+    if (!row.reminder_0m_sent && msUntil <= 0) {
+      if (!tooStaleToBother) {
+        await sendCountdownReminder(env, row.event_url, "should be going live right now", row.live_at_utc, row.live_at_timezone);
+      }
+      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_0m_sent = 1 WHERE id = ?").bind(row.id).run();
     }
   }
 }
