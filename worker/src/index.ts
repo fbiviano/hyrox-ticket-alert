@@ -1307,7 +1307,11 @@ async function checkSaleWatches(env: Env): Promise<void> {
   // Same reasoning as checkCommunityTickets - don't spend a checking slot
   // on a race nobody verified is actually waiting to hear about.
   const { results } = await env.DB.prepare(
-    `SELECT sw.* FROM sale_watch sw
+    `SELECT sw.*,
+       (SELECT live_at_utc FROM ig_flagged_posts
+        WHERE event_url = sw.event_url AND status = 'approved' AND live_at_utc IS NOT NULL
+        ORDER BY live_at_utc DESC LIMIT 1) AS announced_live_at
+     FROM sale_watch sw
      WHERE sw.resolved = 0 AND (sw.event_date IS NULL OR sw.event_date >= ?)
        AND EXISTS (
          SELECT 1 FROM sale_watchers w JOIN subscribers s ON s.id = w.subscriber_id
@@ -1317,6 +1321,17 @@ async function checkSaleWatches(env: Env): Promise<void> {
     .bind(todayIso())
     .all<any>();
   for (const row of results || []) {
+    // Some ticket shops are provisioned with real, buyable inventory well
+    // before the organizer's own site publicly reveals/links to it (seen
+    // live with HYROX Milan - the checkout page already had live stock
+    // hours before hyrox.com's own countdown reached zero). Detecting that
+    // public reveal itself isn't possible here (it's rendered by
+    // client-side JS the Worker's plain fetch() never sees), so instead we
+    // hold off alerting until the announced go-live time from a matched
+    // Instagram post has passed, if we have one - same time the countdown
+    // reminders below are already counting down to.
+    if (row.announced_live_at && Date.now() < Date.parse(row.announced_live_at)) continue;
+
     const found = await resolveEvent(row.event_url);
     if (!found) continue; // still not on sale
 
