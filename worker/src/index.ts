@@ -533,9 +533,55 @@ const RESOLVE_SCRIPT = `<script>
           if (sideCard) sideCard.style.display = 'none';
           return;
         }
+        // Intl's own 'short' timeZoneName silently falls back to a bare
+        // "GMT-3"/"GMT+8" offset for most zones outside Europe (confirmed
+        // for Brazil, all of the Americas, and most of Asia/Oceania) -
+        // there's just no short code in the browser's data for them. This
+        // table covers the zones HYROX races actually use so real
+        // acronyms (BRT, PDT, AEST...) show consistently instead of only
+        // working for Europe. [std, dst] pairs are looked up against the
+        // zone's own offset to pick the right one; a single string means
+        // the zone doesn't observe DST.
+        var TZ_ABBR = {
+          'America/Sao_Paulo': 'BRT', 'America/Argentina/Buenos_Aires': 'ART', 'America/Buenos_Aires': 'ART',
+          'America/Bogota': 'COT', 'America/Mexico_City': 'CST', 'America/Lima': 'PET', 'America/Santiago': 'CLT',
+          'America/Los_Angeles': ['PST', 'PDT'], 'America/Vancouver': ['PST', 'PDT'],
+          'America/Denver': ['MST', 'MDT'], 'America/Phoenix': 'MST',
+          'America/Chicago': ['CST', 'CDT'],
+          'America/New_York': ['EST', 'EDT'], 'America/Toronto': ['EST', 'EDT'],
+          'Europe/London': ['GMT', 'BST'], 'Europe/Dublin': ['GMT', 'IST'], 'Europe/Istanbul': 'TRT',
+          'Asia/Shanghai': 'CST', 'Asia/Taipei': 'CST', 'Asia/Hong_Kong': 'HKT', 'Asia/Tokyo': 'JST',
+          'Asia/Seoul': 'KST', 'Asia/Singapore': 'SGT', 'Asia/Kuala_Lumpur': 'MYT', 'Asia/Bangkok': 'ICT',
+          'Asia/Kolkata': 'IST', 'Asia/Riyadh': 'AST', 'Asia/Dubai': 'GST',
+          'Australia/Sydney': ['AEST', 'AEDT'], 'Australia/Melbourne': ['AEST', 'AEDT'],
+          'Australia/Brisbane': 'AEST', 'Australia/Perth': 'AWST',
+          'Pacific/Auckland': ['NZST', 'NZDT'], 'Africa/Johannesburg': 'SAST', 'Africa/Cairo': 'EET'
+        };
+        function tzOffsetMinutes(date, tz) {
+          var dtf = new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          var p = {};
+          dtf.formatToParts(date).forEach(function(x) { p[x.type] = x.value; });
+          var asUtc = Date.UTC(p.year, p.month - 1, p.day, p.hour === '24' ? 0 : p.hour, p.minute, p.second);
+          return (asUtc - date.getTime()) / 60000;
+        }
+        function tzAbbr(utcIso, tz) {
+          var entry = TZ_ABBR[tz];
+          if (!entry) return null;
+          if (typeof entry === 'string') return entry;
+          var date = new Date(utcIso);
+          var jan = tzOffsetMinutes(new Date(Date.UTC(date.getUTCFullYear(), 0, 15)), tz);
+          var jul = tzOffsetMinutes(new Date(Date.UTC(date.getUTCFullYear(), 6, 15)), tz);
+          var std = Math.min(jan, jul), dst = Math.max(jan, jul);
+          if (std === dst) return entry[0];
+          var actual = tzOffsetMinutes(date, tz);
+          return actual === dst ? entry[1] : entry[0];
+        }
         function formatLocal(utcIso, tz) {
           try {
-            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: tz || 'UTC' }).format(new Date(utcIso));
+            var abbr = tz ? tzAbbr(utcIso, tz) : null;
+            var opts = { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: abbr ? undefined : 'short', timeZone: tz || 'UTC' };
+            var out = new Intl.DateTimeFormat('en-GB', opts).format(new Date(utcIso));
+            return abbr ? out + ' ' + abbr : out;
           } catch (e) {
             return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
           }
@@ -2013,6 +2059,80 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Same fallback problem as the homepage's client-side formatLocal (see
+// RESOLVE_SCRIPT above, kept in sync with this table) - Intl's 'short'
+// timeZoneName silently degrades to a bare "GMT-3"/"GMT+8" offset for
+// most zones outside Europe, so countdown-reminder emails need their own
+// lookup for real acronyms.
+const TZ_ABBR: Record<string, string | [string, string]> = {
+  "America/Sao_Paulo": "BRT",
+  "America/Argentina/Buenos_Aires": "ART",
+  "America/Buenos_Aires": "ART",
+  "America/Bogota": "COT",
+  "America/Mexico_City": "CST",
+  "America/Lima": "PET",
+  "America/Santiago": "CLT",
+  "America/Los_Angeles": ["PST", "PDT"],
+  "America/Vancouver": ["PST", "PDT"],
+  "America/Denver": ["MST", "MDT"],
+  "America/Phoenix": "MST",
+  "America/Chicago": ["CST", "CDT"],
+  "America/New_York": ["EST", "EDT"],
+  "America/Toronto": ["EST", "EDT"],
+  "Europe/London": ["GMT", "BST"],
+  "Europe/Dublin": ["GMT", "IST"],
+  "Europe/Istanbul": "TRT",
+  "Asia/Shanghai": "CST",
+  "Asia/Taipei": "CST",
+  "Asia/Hong_Kong": "HKT",
+  "Asia/Tokyo": "JST",
+  "Asia/Seoul": "KST",
+  "Asia/Singapore": "SGT",
+  "Asia/Kuala_Lumpur": "MYT",
+  "Asia/Bangkok": "ICT",
+  "Asia/Kolkata": "IST",
+  "Asia/Riyadh": "AST",
+  "Asia/Dubai": "GST",
+  "Australia/Sydney": ["AEST", "AEDT"],
+  "Australia/Melbourne": ["AEST", "AEDT"],
+  "Australia/Brisbane": "AEST",
+  "Australia/Perth": "AWST",
+  "Pacific/Auckland": ["NZST", "NZDT"],
+  "Africa/Johannesburg": "SAST",
+  "Africa/Cairo": "EET",
+};
+
+function tzOffsetMinutes(date: Date, tz: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const p: Record<string, string> = {};
+  for (const part of dtf.formatToParts(date)) p[part.type] = part.value;
+  const asUtc = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), p.hour === "24" ? 0 : Number(p.hour), Number(p.minute), Number(p.second));
+  return (asUtc - date.getTime()) / 60000;
+}
+
+function tzAbbr(utcIso: string, tz: string): string | null {
+  const entry = TZ_ABBR[tz];
+  if (!entry) return null;
+  if (typeof entry === "string") return entry;
+  const date = new Date(utcIso);
+  const jan = tzOffsetMinutes(new Date(Date.UTC(date.getUTCFullYear(), 0, 15)), tz);
+  const jul = tzOffsetMinutes(new Date(Date.UTC(date.getUTCFullYear(), 6, 15)), tz);
+  const std = Math.min(jan, jul);
+  const dst = Math.max(jan, jul);
+  if (std === dst) return entry[0];
+  const actual = tzOffsetMinutes(date, tz);
+  return actual === dst ? entry[1] : entry[0];
+}
+
 /** Renders a UTC timestamp in the event's own local time (e.g. "Thu, 6 Aug
  * 2026, 12:00 CEST") instead of GMT/UTC, which reads as a foreign,
  * confusing time to most people. Falls back to UTC if the timezone is
@@ -2021,6 +2141,7 @@ function todayIso(): string {
 function formatInTimezone(utcIso: string, timezone: string | null): string {
   const d = new Date(utcIso);
   if (isNaN(d.getTime())) return utcIso;
+  const abbr = timezone ? tzAbbr(utcIso, timezone) : null;
   const opts: Intl.DateTimeFormatOptions = {
     weekday: "short",
     day: "numeric",
@@ -2028,12 +2149,13 @@ function formatInTimezone(utcIso: string, timezone: string | null): string {
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    timeZoneName: "short",
+    timeZoneName: abbr ? undefined : "short",
   };
   try {
-    return new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: timezone || "UTC" }).format(d);
+    const out = new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: timezone || "UTC" }).format(d);
+    return abbr ? `${out} ${abbr}` : out;
   } catch {
-    return new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: "UTC" }).format(d);
+    return new Intl.DateTimeFormat("en-GB", { ...opts, timeZoneName: "short", timeZone: "UTC" }).format(d);
   }
 }
 
