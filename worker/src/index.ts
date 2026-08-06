@@ -204,6 +204,7 @@ a{color:#111}
 .ticket-row button:hover{background:#fee}
 .ticket-row .buy-btn{color:#1e7e34;border-color:#bfe0c9}
 .ticket-row .buy-btn:hover{background:#e6f4ea}
+.ticket-row select{padding:5px 6px;font-size:0.85rem;border:1px solid #ccc;border-radius:6px;max-width:140px}
 .verify-banner{background:#fff4e0;border:1px solid #ffe1a8;color:#7a5b00;padding:12px 16px;border-radius:8px;margin-top:16px;font-size:0.9rem}
 .verify-banner p{margin:0}
 .verify-banner p+p{margin-top:6px}
@@ -734,6 +735,26 @@ interface SaleWatchSections {
   past: string;
 }
 
+/** Self-authored list of common HYROX ticket categories, used only for the
+ * "which ticket did you buy?" dropdown on race-level (sale_watch) purchases
+ * - deliberately not fetched from the shop, since exact ticket names vary
+ * per event/day and by the time someone's buying we don't want this to
+ * depend on re-resolving it. Good enough for a rough category count on
+ * /admin/subscribers, not meant to exactly match a shop's ticket_name. */
+const TICKET_TYPE_OPTIONS = [
+  "HYROX Men",
+  "HYROX Women",
+  "HYROX Pro Men",
+  "HYROX Pro Women",
+  "HYROX Doubles Men",
+  "HYROX Doubles Women",
+  "HYROX Doubles Mixed",
+  "HYROX Adaptive Men",
+  "HYROX Adaptive Women",
+  "HYROX Relay",
+  "Other / not sure",
+];
+
 async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<SaleWatchSections> {
   const { results } = await env.DB.prepare(
     `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone, sw.presale_is_live
@@ -748,11 +769,26 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
       <div><span>${escapeHtml(r.event_title)}</span>
       <span class="event-badge ${entry.badgeClass}">${escapeHtml(entry.badge)}</span>
       ${entry.subtitle ? `<div class="event-subtitle">${escapeHtml(entry.subtitle)}</div>` : ""}</div>
-      <form method="POST" action="/remove-sale-watch">
-        <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <input type="hidden" name="watcher_id" value="${r.id}">
-        <button type="submit">Remove</button>
-      </form>
+      <div class="row" style="gap:6px">
+        ${
+          entry.section === "live"
+            ? `<form method="POST" action="/mark-race-purchased">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="watcher_id" value="${r.id}">
+          <select name="ticket_type" required>
+            <option value="" disabled selected>Which ticket?</option>
+            ${TICKET_TYPE_OPTIONS.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("")}
+          </select>
+          <button type="submit" class="buy-btn">I bought this</button>
+        </form>`
+            : ""
+        }
+        <form method="POST" action="/remove-sale-watch">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="watcher_id" value="${r.id}">
+          <button type="submit">Remove</button>
+        </form>
+      </div>
     </div>`;
   const section = (rows: any[], sec: "live" | "soon" | "waiting") =>
     rows
@@ -1238,6 +1274,56 @@ async function handleRemoveSaleWatch(req: Request, env: Env): Promise<Response> 
   await env.DB.prepare("DELETE FROM sale_watchers WHERE id = ? AND subscriber_id = ?")
     .bind(watcherId, subscriber.id)
     .run();
+
+  return new Response(null, {
+    status: 303,
+    headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) },
+  });
+}
+
+/** Race-level equivalent of handleMarkPurchased - a sale_watch entry has no
+ * specific ticket_name (it's "notify me when this race goes on sale", not a
+ * specific ticket type), so there's nothing to flip a purchased_at flag on.
+ * Instead this creates a normal subscriptions row using the ticket type they
+ * picked from TICKET_TYPE_OPTIONS, already marked purchased - reuses the
+ * existing "Purchased" section and /admin/subscribers count as-is, no new
+ * schema needed. The race watch itself is then removed, since they've got
+ * what they were watching for. */
+async function handleMarkRacePurchased(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const watcherId = String(form.get("watcher_id") || "");
+  const ticketType = String(form.get("ticket_type") || "");
+  if (!TICKET_TYPE_OPTIONS.includes(ticketType)) {
+    return page("Something went wrong", `<div class="card"><p>Please pick a ticket type. <a href="/my-alerts">Go back</a></p></div>`);
+  }
+
+  const subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!subscriber) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+  const watch = await env.DB.prepare(
+    `SELECT sw.event_title, sw.event_date FROM sale_watchers w
+     JOIN sale_watch sw ON sw.event_url = w.event_url
+     WHERE w.id = ? AND w.subscriber_id = ?`
+  )
+    .bind(watcherId, subscriber.id)
+    .first<any>();
+  if (!watch) {
+    return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO subscriptions (subscriber_id, event_name, ticket_name, shop_url, event_date) VALUES (?, ?, ?, NULL, ?) ON CONFLICT(subscriber_id, event_name, ticket_name) DO NOTHING"
+  )
+    .bind(subscriber.id, watch.event_title, ticketType, watch.event_date)
+    .run();
+  await env.DB.prepare(
+    "UPDATE subscriptions SET purchased_at = datetime('now') WHERE subscriber_id = ? AND event_name = ? AND ticket_name = ?"
+  )
+    .bind(subscriber.id, watch.event_title, ticketType)
+    .run();
+  await env.DB.prepare("DELETE FROM sale_watchers WHERE id = ? AND subscriber_id = ?").bind(watcherId, subscriber.id).run();
 
   return new Response(null, {
     status: 303,
@@ -2238,6 +2324,7 @@ export default {
       if (url.pathname === "/remove-subscription" && req.method === "POST") return await handleRemoveSubscription(req, env);
       if (url.pathname === "/mark-purchased" && req.method === "POST") return await handleMarkPurchased(req, env);
       if (url.pathname === "/remove-sale-watch" && req.method === "POST") return await handleRemoveSaleWatch(req, env);
+      if (url.pathname === "/mark-race-purchased" && req.method === "POST") return await handleMarkRacePurchased(req, env);
       if (url.pathname === "/sign-out" && req.method === "GET") return handleSignOut(env);
       if (url.pathname === "/notify" && req.method === "POST") return await handleNotify(req, env);
       if (url.pathname === "/search-events" && req.method === "GET") return await handleSearchEvents(req, env);
