@@ -552,7 +552,7 @@ const RESOLVE_SCRIPT = `<script>
             // otherwise a just-opened sale immediately vanishes into the flat
             // "On sale now" list with dozens of other, older entries.
             if (ev.on_sale_since && (Date.now() - new Date(ev.on_sale_since).getTime()) <= RECENTLY_ON_SALE_MS) {
-              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: '' });
+              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: 'Just went on sale' });
             }
           } else if (ev.presale_is_live) {
             out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: truncateText(ev.presale_note || '', 55) });
@@ -577,8 +577,9 @@ const RESOLVE_SCRIPT = `<script>
         }
         function sideRowHtml(ev, entry) {
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
+          var showFire = (entry.section === 'soon' && isUrgent(ev)) || (entry.section === 'live' && ev.on_sale);
           var saleLine = entry.subtitle
-            ? '<div class="event-subtitle">' + (entry.section === 'soon' && isUrgent(ev) ? '🔥 ' : '') + esc(entry.subtitle) + '</div>'
+            ? '<div class="event-subtitle">' + (showFire ? '🔥 ' : '') + esc(entry.subtitle) + '</div>'
             : '';
           var raceLine = '<div class="event-race-date">Race: ' + esc(ev.event_date || 'date TBA') + '</div>';
           var monitorBtn = entry.section === 'soon'
