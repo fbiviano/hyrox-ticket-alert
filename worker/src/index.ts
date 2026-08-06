@@ -205,6 +205,11 @@ a{color:#111}
 .ticket-row .buy-btn{color:#1e7e34;border-color:#bfe0c9}
 .ticket-row .buy-btn:hover{background:#e6f4ea}
 .ticket-row select{padding:5px 6px;font-size:0.85rem;border:1px solid #ccc;border-radius:6px;max-width:140px}
+.subscriber-row{padding:10px 0;border-bottom:1px solid #eee}
+.subscriber-row:last-child{border-bottom:0}
+.subscriber-row summary{cursor:pointer}
+.subscriber-row ul{margin:8px 0 0;padding-left:20px;font-size:0.85rem;color:#333}
+.subscriber-row li{margin:2px 0}
 .verify-banner{background:#fff4e0;border:1px solid #ffe1a8;color:#7a5b00;padding:12px 16px;border-radius:8px;margin-top:16px;font-size:0.9rem}
 .verify-banner p{margin:0}
 .verify-banner p+p{margin-top:6px}
@@ -2215,7 +2220,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    `SELECT s.email, s.verified, s.created_at,
+    `SELECT s.id, s.email, s.verified, s.created_at,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
        (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id AND purchased_at IS NOT NULL) AS bought_count
@@ -2228,19 +2233,50 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   const totalBought = rows.reduce((sum: number, r: any) => sum + r.bought_count, 0);
   const totalTickets = rows.reduce((sum: number, r: any) => sum + r.ticket_count, 0);
 
+  // Two bulk queries (not one per subscriber) to build the "what are they
+  // actually watching" detail shown inside each row's <details> toggle.
+  const { results: ticketRows } = await env.DB.prepare(
+    "SELECT subscriber_id, event_name, ticket_name, purchased_at FROM subscriptions ORDER BY event_name, ticket_name"
+  ).all<any>();
+  const { results: watchRows } = await env.DB.prepare(
+    `SELECT w.subscriber_id, sw.event_title, sw.resolved FROM sale_watchers w
+     JOIN sale_watch sw ON sw.event_url = w.event_url
+     ORDER BY sw.event_title`
+  ).all<any>();
+
+  const ticketsBySubscriber = new Map<number, any[]>();
+  for (const t of ticketRows || []) {
+    if (!ticketsBySubscriber.has(t.subscriber_id)) ticketsBySubscriber.set(t.subscriber_id, []);
+    ticketsBySubscriber.get(t.subscriber_id)!.push(t);
+  }
+  const watchesBySubscriber = new Map<number, any[]>();
+  for (const w of watchRows || []) {
+    if (!watchesBySubscriber.has(w.subscriber_id)) watchesBySubscriber.set(w.subscriber_id, []);
+    watchesBySubscriber.get(w.subscriber_id)!.push(w);
+  }
+
   const rowsHtml = rows
-    .map(
-      (r: any) => `<div class="ticket-row">
-        <span>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></span>
-      </div>`
-    )
+    .map((r: any) => {
+      const items = [
+        ...(ticketsBySubscriber.get(r.id) || []).map(
+          (t: any) => `<li>${escapeHtml(t.event_name)} &mdash; ${escapeHtml(t.ticket_name)}${t.purchased_at ? " <small>(bought)</small>" : ""}</li>`
+        ),
+        ...(watchesBySubscriber.get(r.id) || []).map(
+          (w: any) => `<li>${escapeHtml(w.event_title)} <small>(race watch${w.resolved ? ", on sale" : ""})</small></li>`
+        ),
+      ].join("");
+      return `<details class="subscriber-row">
+        <summary>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></summary>
+        <ul>${items || "<li><small>Nothing watched.</small></li>"}</ul>
+      </details>`;
+    })
     .join("");
 
   return page(
     "Subscribers",
     `<div class="card">
       <h2>Subscribers (${rows.length})</h2>
-      <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall.</small></p>
+      <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall. Click a subscriber to see what they're watching.</small></p>
       ${rowsHtml || "<p>Nobody yet.</p>"}
     </div>`,
     { "cache-control": "private, no-store" }
