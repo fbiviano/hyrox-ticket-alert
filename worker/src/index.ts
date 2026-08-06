@@ -1489,7 +1489,7 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
   const today = todayIso();
   const nowIso = new Date().toISOString();
   const { results } = await env.DB.prepare(
-    `SELECT url FROM event_directory
+    `SELECT url, presale_live_at, presale_is_live FROM event_directory
      WHERE (event_date IS NULL OR event_date >= ?)
      ORDER BY on_sale ASC, (presale_live_at IS NOT NULL AND presale_live_at <= ?) DESC,
        event_date IS NULL, event_date ASC, last_sale_check IS NOT NULL, last_sale_check ASC
@@ -1505,18 +1505,28 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // this event's next rotation (~16 min) rather than self-correcting.
     let found = await resolveEvent(row.url);
     if (!found) found = await resolveEvent(row.url);
+    // Only stamp on_sale_since when this row was genuinely being counted
+    // down (a known presale_live_at, or an active pre-sale) right before
+    // confirmation - i.e. it's transitioning out of the sidebar's "Going
+    // live soon"/"Live now" buckets, not an event whose shop just happened
+    // to already be open when the daily sitemap crawl first found it.
+    const wasCountingDown = row.presale_live_at || row.presale_is_live ? 1 : 0;
     // Once the real shop is confirmed live, clear any Instagram-derived
     // presale info too - it's stale next to the real "on sale" status.
-    await env.DB.prepare(
-      found
-        ? `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
-           on_sale_since = COALESCE(on_sale_since, datetime('now')),
-           presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
-           WHERE url = ?`
-        : "UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?"
-    )
-      .bind(row.url)
-      .run();
+    if (found) {
+      await env.DB.prepare(
+        `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
+         on_sale_since = CASE WHEN ? THEN COALESCE(on_sale_since, datetime('now')) ELSE on_sale_since END,
+         presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
+         WHERE url = ?`
+      )
+        .bind(wasCountingDown, row.url)
+        .run();
+    } else {
+      await env.DB.prepare("UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?")
+        .bind(row.url)
+        .run();
+    }
   }
 }
 

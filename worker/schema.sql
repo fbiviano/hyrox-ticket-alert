@@ -56,10 +56,13 @@ CREATE TABLE IF NOT EXISTS event_directory (
   event_date TEXT,
   on_sale INTEGER NOT NULL DEFAULT 0,
   last_sale_check TEXT,
-  -- Set once, the first time on_sale flips to true (refreshEventDirectorySaleStatus
-  -- never overwrites it on later re-checks) - lets the sidebar keep a
-  -- just-opened sale in "Live now" for a few days even if its race date is
-  -- far off, instead of it vanishing straight into the flat "On sale now" list.
+  -- Set once, the first time on_sale flips to true while the row was
+  -- genuinely being counted down (a known presale_live_at or an active
+  -- pre-sale) - never overwritten on later re-checks, and left NULL for
+  -- events whose shop was simply already open when first discovered. Lets
+  -- the sidebar keep a just-opened sale in "Live now" for a few days
+  -- instead of it vanishing straight into the flat "On sale now" list,
+  -- without also flooding that box with every already-on-sale event.
   on_sale_since TEXT,
   -- Same best-effort Instagram-derived info as sale_watch, but shown to
   -- *everyone* browsing the homepage list, not just people who set up a
