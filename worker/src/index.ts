@@ -1516,8 +1516,7 @@ async function sendCountdownReminder(
   eventUrl: string,
   label: string,
   liveAtUtc: string,
-  liveAtTimezone: string | null,
-  postUrl: string
+  liveAtTimezone: string | null
 ): Promise<void> {
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
@@ -1538,10 +1537,10 @@ async function sendCountdownReminder(
         env,
         watcher.email,
         `${eventTitle} tickets: ${label}`,
-        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This is a best-effort estimate from an Instagram post, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-        `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${postUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
+        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(eventUrl)}">${escapeHtml(eventUrl)}</a></p><p><small>This is a best-effort estimate from an Instagram post, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
       );
-      await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${postUrl}`);
+      await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}`);
     } catch (e) {
       console.error(`Failed to email reminder to ${watcher.email}:`, e);
     }
@@ -1577,19 +1576,19 @@ async function checkAnnouncementReminders(env: Env): Promise<void> {
 
     if (!row.reminder_1d_sent && msUntil <= ONE_DAY_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.live_at_timezone, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.live_at_timezone);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1d_sent = 1 WHERE id = ?").bind(row.id).run();
     }
     if (!row.reminder_1h_sent && msUntil <= ONE_HOUR_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.live_at_timezone, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.live_at_timezone);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1h_sent = 1 WHERE id = ?").bind(row.id).run();
     }
     if (!row.reminder_5m_sent && msUntil <= FIVE_MIN_MS) {
       if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.live_at_timezone, row.post_url);
+        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.live_at_timezone);
       }
       await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_5m_sent = 1 WHERE id = ?").bind(row.id).run();
     }
