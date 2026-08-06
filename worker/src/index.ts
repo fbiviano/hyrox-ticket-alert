@@ -1470,16 +1470,25 @@ async function checkSaleWatches(env: Env): Promise<void> {
  * so unconfirmed (on_sale=0) events are checked first, soonest race date
  * first within that group - the ones someone's most likely checking on
  * roxracealerts.com right now. Confirmed on_sale=1 events only get
- * re-checked once the unconfirmed backlog is empty. */
+ * re-checked once the unconfirmed backlog is empty.
+ *
+ * On top of that, an event whose Instagram-estimated presale_live_at has
+ * already passed jumps to the very front regardless of race date - a
+ * far-future race (e.g. HYROX Milan's actual race is in December) would
+ * otherwise sit behind every soon-racing event in the queue for hours even
+ * though its announced sale time just passed and the sidebar is actively
+ * showing a stale "going live soon" countdown for it right now. */
 async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
   const today = todayIso();
+  const nowIso = new Date().toISOString();
   const { results } = await env.DB.prepare(
     `SELECT url FROM event_directory
      WHERE (event_date IS NULL OR event_date >= ?)
-     ORDER BY on_sale ASC, event_date IS NULL, event_date ASC, last_sale_check IS NOT NULL, last_sale_check ASC
+     ORDER BY on_sale ASC, (presale_live_at IS NOT NULL AND presale_live_at <= ?) DESC,
+       event_date IS NULL, event_date ASC, last_sale_check IS NOT NULL, last_sale_check ASC
      LIMIT ?`
   )
-    .bind(today, SALE_STATUS_BATCH_SIZE)
+    .bind(today, nowIso, SALE_STATUS_BATCH_SIZE)
     .all<any>();
 
   for (const row of results || []) {
