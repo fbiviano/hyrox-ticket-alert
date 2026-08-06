@@ -552,7 +552,7 @@ const RESOLVE_SCRIPT = `<script>
             // otherwise a just-opened sale immediately vanishes into the flat
             // "On sale now" list with dozens of other, older entries.
             if (ev.on_sale_since && (Date.now() - new Date(ev.on_sale_since).getTime()) <= RECENTLY_ON_SALE_MS) {
-              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: 'Just went on sale · ' + formatLocal(ev.on_sale_since, null) });
+              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: 'Just went on sale · ' + formatLocal(ev.on_sale_since, ev.presale_timezone) });
             }
           } else if (ev.presale_is_live) {
             out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: truncateText(ev.presale_note || '', 55) });
@@ -1521,10 +1521,14 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // shifting the displayed "went live at" time by the viewer's own
     // timezone offset.
     if (found) {
+      // presale_timezone is deliberately kept (not nulled like the other
+      // presale_* fields) - it's the only record of the event's own local
+      // zone, needed to show "just went on sale" at a sensible local time
+      // instead of a bare UTC timestamp nobody thinks in.
       await env.DB.prepare(
         `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
          on_sale_since = CASE WHEN ? THEN COALESCE(on_sale_since, ?) ELSE on_sale_since END,
-         presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
+         presale_note = NULL, presale_live_at = NULL, presale_is_live = 0
          WHERE url = ?`
       )
         .bind(wasCountingDown, nowIso, row.url)
