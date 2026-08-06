@@ -287,11 +287,20 @@ function navBar(
   currentPath: "/" | "/my-alerts",
   subscriber: { email: string } | null,
   watchCount = 0,
-  showSignIn = false
+  showSignIn = false,
+  env?: Env
 ): string {
   const myAlertsLabel = watchCount > 0 ? `My Alerts (${watchCount})` : "My Alerts";
+  // Only rendered on the page load of the signed-in admin's own browser -
+  // nobody else's session ever has subscriber.email match ADMIN_EMAIL, so
+  // no other visitor's page includes this link or the token it carries.
+  const isAdmin = !!(subscriber && env?.ADMIN_EMAIL && subscriber.email.toLowerCase() === env.ADMIN_EMAIL.toLowerCase());
+  const adminLink =
+    isAdmin && env?.WEBHOOK_SECRET
+      ? ` &middot; <a href="/admin/subscribers?token=${encodeURIComponent(env.WEBHOOK_SECRET)}">Admin</a>`
+      : "";
   const rightSlot = subscriber
-    ? `<span class="nav-user" id="navSignedIn">Signed in as ${escapeHtml(subscriber.email)} &middot; <a href="/sign-out">Sign out</a></span>`
+    ? `<span class="nav-user" id="navSignedIn">Signed in as ${escapeHtml(subscriber.email)}${adminLink} &middot; <a href="/sign-out">Sign out</a></span>`
     : showSignIn
     ? `<span class="nav-user">
         <a href="#" id="navSignIn">Sign in</a>
@@ -894,7 +903,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     const counts = await getWatchCounts(subscriber.id, env);
     return page(
       "RoxRaceAlerts",
-      `${navBar("/", subscriber, counts.tickets + counts.races)}
+      `${navBar("/", subscriber, counts.tickets + counts.races, false, env)}
       <div class="layout">
         <div class="main-col">
           ${hero}
@@ -1265,7 +1274,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
 
   return page(
     "My Alerts",
-    `${navBar("/my-alerts", subscriber, counts.tickets + counts.races)}
+    `${navBar("/my-alerts", subscriber, counts.tickets + counts.races, false, env)}
     ${verifyBanner}
     <div class="card">
       <h2>Your watched tickets</h2>
@@ -2305,7 +2314,7 @@ async function handleFeedbackPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   return page(
     "Feedback",
-    `${navBar("/", subscriber, 0, !subscriber)}
+    `${navBar("/", subscriber, 0, !subscriber, env)}
     <div class="card">
       <h2>Feedback</h2>
       <p class="hint">Bug, feature idea, anything else you want to tell us - we read every one.</p>
