@@ -1512,14 +1512,21 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // live soon"/"Live now" buckets, not an event whose shop just happened
     // to already be open when the daily sitemap crawl first found it.
     const wasCountingDown = row.presale_live_at || row.presale_is_live ? 1 : 0;
+    // Prefer the announced go-live time itself over "whenever we happened
+    // to confirm it" - the real shop can be live for minutes before our
+    // rotating check (every ~2 min, sometimes longer if other events are
+    // queued ahead of it) actually catches up and marks it confirmed, so
+    // "confirmed at" reads as later than the sale actually went live. Only
+    // falls back to nowIso when there's no announced time at all (a live
+    // pre-sale with no specific date ever given).
+    const wentLiveAt = row.presale_live_at || nowIso;
     // Once the real shop is confirmed live, clear any Instagram-derived
     // presale info too - it's stale next to the real "on sale" status.
-    // on_sale_since is stamped with the already-computed nowIso (proper
-    // "...T...Z" ISO format, same as presale_live_at) rather than SQLite's
-    // datetime('now') - that produces a space-separated "YYYY-MM-DD HH:MM:SS"
-    // string which browsers parse as *local* time, not UTC, silently
-    // shifting the displayed "went live at" time by the viewer's own
-    // timezone offset.
+    // wentLiveAt/nowIso are both proper "...T...Z" ISO strings (same as
+    // presale_live_at) rather than SQLite's datetime('now') - that produces
+    // a space-separated "YYYY-MM-DD HH:MM:SS" string which browsers parse
+    // as *local* time, not UTC, silently shifting the displayed time by
+    // the viewer's own timezone offset.
     if (found) {
       // presale_timezone is deliberately kept (not nulled like the other
       // presale_* fields) - it's the only record of the event's own local
@@ -1531,7 +1538,7 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
          presale_note = NULL, presale_live_at = NULL, presale_is_live = 0
          WHERE url = ?`
       )
-        .bind(wasCountingDown, nowIso, row.url)
+        .bind(wasCountingDown, wentLiveAt, row.url)
         .run();
     } else {
       await env.DB.prepare("UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?")
