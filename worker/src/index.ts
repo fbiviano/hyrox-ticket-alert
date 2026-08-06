@@ -552,7 +552,7 @@ const RESOLVE_SCRIPT = `<script>
             // otherwise a just-opened sale immediately vanishes into the flat
             // "On sale now" list with dozens of other, older entries.
             if (ev.on_sale_since && (Date.now() - new Date(ev.on_sale_since).getTime()) <= RECENTLY_ON_SALE_MS) {
-              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: 'Just went on sale' });
+              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: 'Just went on sale · ' + formatLocal(ev.on_sale_since, null) });
             }
           } else if (ev.presale_is_live) {
             out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: truncateText(ev.presale_note || '', 55) });
@@ -1514,14 +1514,20 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     const wasCountingDown = row.presale_live_at || row.presale_is_live ? 1 : 0;
     // Once the real shop is confirmed live, clear any Instagram-derived
     // presale info too - it's stale next to the real "on sale" status.
+    // on_sale_since is stamped with the already-computed nowIso (proper
+    // "...T...Z" ISO format, same as presale_live_at) rather than SQLite's
+    // datetime('now') - that produces a space-separated "YYYY-MM-DD HH:MM:SS"
+    // string which browsers parse as *local* time, not UTC, silently
+    // shifting the displayed "went live at" time by the viewer's own
+    // timezone offset.
     if (found) {
       await env.DB.prepare(
         `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
-         on_sale_since = CASE WHEN ? THEN COALESCE(on_sale_since, datetime('now')) ELSE on_sale_since END,
+         on_sale_since = CASE WHEN ? THEN COALESCE(on_sale_since, ?) ELSE on_sale_since END,
          presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
          WHERE url = ?`
       )
-        .bind(wasCountingDown, row.url)
+        .bind(wasCountingDown, nowIso, row.url)
         .run();
     } else {
       await env.DB.prepare("UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?")
