@@ -543,10 +543,17 @@ const RESOLVE_SCRIPT = `<script>
         function truncateText(s, max) {
           return s.length > max ? s.slice(0, max - 1).trimEnd() + '…' : s;
         }
+        var RECENTLY_ON_SALE_MS = 5 * 24 * 60 * 60 * 1000;
         function entriesFor(ev) {
           var out = [];
           if (ev.on_sale) {
             out.push({ section: 'on', badge: 'On sale', badgeClass: 'on', subtitle: '' });
+            // Also spotlight it in the sidebar's "Live now" for a few days -
+            // otherwise a just-opened sale immediately vanishes into the flat
+            // "On sale now" list with dozens of other, older entries.
+            if (ev.on_sale_since && (Date.now() - new Date(ev.on_sale_since).getTime()) <= RECENTLY_ON_SALE_MS) {
+              out.push({ section: 'live', badge: 'On sale', badgeClass: 'on', subtitle: '' });
+            }
           } else if (ev.presale_is_live) {
             out.push({ section: 'live', badge: 'Pre-sale (live now)', badgeClass: 'on', subtitle: truncateText(ev.presale_note || '', 55) });
           }
@@ -1503,6 +1510,7 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     await env.DB.prepare(
       found
         ? `UPDATE event_directory SET on_sale = 1, last_sale_check = datetime('now'),
+           on_sale_since = COALESCE(on_sale_since, datetime('now')),
            presale_note = NULL, presale_live_at = NULL, presale_timezone = NULL, presale_is_live = 0
            WHERE url = ?`
         : "UPDATE event_directory SET on_sale = 0, last_sale_check = datetime('now') WHERE url = ?"
@@ -2064,7 +2072,7 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
  * sort last rather than being hidden, since they're still real events. */
 async function handleListEvents(env: Env): Promise<Response> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
