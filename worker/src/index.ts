@@ -535,9 +535,9 @@ const RESOLVE_SCRIPT = `<script>
         }
         function formatLocal(utcIso, tz) {
           try {
-            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'long', timeZone: tz || 'UTC' }).format(new Date(utcIso));
+            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: tz || 'UTC' }).format(new Date(utcIso));
           } catch (e) {
-            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'long', timeZone: 'UTC' }).format(new Date(utcIso));
+            return new Intl.DateTimeFormat('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZoneName: 'short', timeZone: 'UTC' }).format(new Date(utcIso));
           }
         }
         function truncateText(s, max) {
@@ -2028,7 +2028,7 @@ function formatInTimezone(utcIso: string, timezone: string | null): string {
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    timeZoneName: "long",
+    timeZoneName: "short",
   };
   try {
     return new Intl.DateTimeFormat("en-GB", { ...opts, timeZone: timezone || "UTC" }).format(d);
