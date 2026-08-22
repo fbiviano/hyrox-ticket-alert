@@ -22,6 +22,15 @@ ADMIN_EMAIL = "francescobiviano609@gmail.com"
 #   TELEGRAM_BOT_TOKEN - mirrors alerts addressed to ADMIN_EMAIL to Telegram too
 #   TELEGRAM_CHAT_ID   - (optional pair - alerts still email-only if unset)
 
+[limits]
+# Free plan hard-caps CPU time at 10ms per invocation (not configurable) -
+# the */2 * * * * cron's four checking functions (HTML/JSON parsing across
+# a growing tracked-event list) kept exceeding that and getting killed
+# mid-run. 1000ms is generous headroom over realistic usage now that we're
+# on Workers Paid, which allows up to 30000ms - can raise further later at
+# no extra cost if ever needed.
+cpu_ms = 1000
+
 [triggers]
 # */2 * * * *  - re-checks watched tickets (checkCommunityTickets)
 # 0 3 * * *    - daily event-directory indexing batch (indexEvents)
