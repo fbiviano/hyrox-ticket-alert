@@ -1214,6 +1214,7 @@ async function handleLogin(req: Request, env: Env): Promise<Response> {
         `<p>Click to sign in and manage your alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
         `Sign in: ${link}\n\nIf you didn't request this, ignore this email.`
       );
+      await notifyAdminTelegram(env, email, `🔑 Sign-in link requested.\n${link}`);
     }
   }
 
@@ -2023,6 +2024,7 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
         `<p>${flaggedCount} new Instagram post(s) mentioned a ticket sale and were published automatically. Review or retract: <a href="${logLink}">${logLink}</a></p>`,
         `${flaggedCount} new Instagram post(s) mentioned a ticket sale and were published automatically.\nReview or retract: ${logLink}`
       );
+      await notifyAdminTelegram(env, env.ADMIN_EMAIL, `📸 ${flaggedCount} new Instagram post(s) published.\n${logLink}`);
     } catch (e) {
       console.error("Failed to send admin IG digest email:", e);
     }
@@ -2351,6 +2353,7 @@ async function handleFeedback(req: Request, env: Env): Promise<Response> {
         `<p>${escapeHtml(message).replace(/\n/g, "<br>")}</p>${email ? `<p>From: ${escapeHtml(email)}</p>` : ""}`,
         `${message}${email ? `\n\nFrom: ${email}` : ""}`
       );
+      await notifyAdminTelegram(env, env.ADMIN_EMAIL, `💬 New feedback: ${message}${email ? `\nFrom: ${email}` : ""}`);
     } catch (e) {
       console.error("Failed to email feedback to admin:", e);
     }
