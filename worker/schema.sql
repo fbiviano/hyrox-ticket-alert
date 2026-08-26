@@ -175,3 +175,23 @@ CREATE TABLE IF NOT EXISTS feedback (
   email TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- A hand-prepared queue of Instagram post graphics for the site's own
+-- @roxracealerts-style account - not user-facing, purely a personal
+-- posting-reminder tool for the admin. day_number is the upload order
+-- (matches the branding/ig-posts/DayN_*.png filenames); image_base64 is
+-- the same PNG's bytes, stored here so sendDailyIgPostReminder() can
+-- attach it to a Telegram message directly (the Worker has no access to
+-- local files on the admin's machine). posted_at is set the moment a
+-- day's reminder is sent - this is a one-shot notifier, not a tracker of
+-- whether the admin actually uploaded it to Instagram.
+CREATE TABLE IF NOT EXISTS ig_post_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day_number INTEGER NOT NULL UNIQUE,
+  filename TEXT NOT NULL,
+  caption TEXT NOT NULL,
+  hashtags TEXT NOT NULL,
+  image_base64 TEXT NOT NULL,
+  posted_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

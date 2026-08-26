@@ -121,6 +121,49 @@ async function sendTelegram(env: Env, text: string): Promise<void> {
   }
 }
 
+/** Same as sendTelegram but with an attached image - used for the daily IG
+ * post-queue reminder, where seeing the actual graphic matters. Telegram's
+ * sendPhoto needs multipart/form-data, not JSON. */
+async function sendTelegramPhoto(env: Env, photoBytes: Uint8Array, filename: string, caption: string): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const form = new FormData();
+  form.set("chat_id", env.TELEGRAM_CHAT_ID);
+  form.set("caption", caption);
+  form.set("photo", new Blob([photoBytes], { type: "image/png" }), filename);
+  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+    method: "POST",
+    body: form,
+  });
+  if (!resp.ok) {
+    console.error(`Telegram photo send failed: ${resp.status} ${await resp.text()}`);
+  }
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** Runs daily: reminds the admin which pre-made Instagram post to upload
+ * next, with the actual image attached and the caption/hashtags as text -
+ * everything needed to just copy-paste and post. Purely a personal
+ * reminder tool (ig_post_queue is hand-populated, not user-facing) - picks
+ * the lowest day_number not yet sent and marks it sent immediately, since
+ * this is a one-shot "here's today's post" nudge, not a tracker of
+ * whether the admin actually uploaded it. */
+async function sendDailyIgPostReminder(env: Env): Promise<void> {
+  const row = await env.DB.prepare(
+    "SELECT * FROM ig_post_queue WHERE posted_at IS NULL ORDER BY day_number ASC LIMIT 1"
+  ).first<any>();
+  if (!row) return;
+
+  const caption = `📅 Day ${row.day_number} - upload today\n\n${row.caption}\n\n${row.hashtags}`;
+  await sendTelegramPhoto(env, base64ToBytes(row.image_base64), row.filename, caption);
+  await env.DB.prepare("UPDATE ig_post_queue SET posted_at = datetime('now') WHERE id = ?").bind(row.id).run();
+}
+
 /** Mirrors an alert to Telegram, but only when it's addressed to the
  * site owner's own account (ADMIN_EMAIL) - other subscribers never get a
  * Telegram message, this is purely a personal secondary channel for the
@@ -2265,6 +2308,17 @@ async function handleSendNudges(req: Request, env: Env): Promise<Response> {
   return jsonResponse({ ok: true });
 }
 
+/** Manual trigger for sendDailyIgPostReminder, same pattern as
+ * /admin/reindex - useful for testing without waiting on the daily cron. */
+async function handleSendIgPostReminder(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("Authorization") || "";
+  if (auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+  await sendDailyIgPostReminder(env);
+  return jsonResponse({ ok: true });
+}
+
 /** Manual trigger for refreshEventDirectorySaleStatus, same pattern as
  * /admin/reindex - useful for testing without waiting on the real cron. */
 async function handleRefreshSaleStatus(req: Request, env: Env): Promise<Response> {
@@ -2556,6 +2610,7 @@ export default {
       if (url.pathname === "/admin/reindex" && req.method === "POST") return await handleReindex(req, env);
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
       if (url.pathname === "/admin/send-nudges" && req.method === "POST") return await handleSendNudges(req, env);
+      if (url.pathname === "/admin/send-ig-post-reminder" && req.method === "POST") return await handleSendIgPostReminder(req, env);
       if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
@@ -2583,6 +2638,7 @@ export default {
     } else if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
       ctx.waitUntil(sendVerificationNudges(env));
+      ctx.waitUntil(sendDailyIgPostReminder(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }
