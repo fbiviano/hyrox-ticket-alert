@@ -2075,6 +2075,55 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
   }
 }
 
+/** Finds and GETs a double-opt-in confirmation link inside an incoming
+ * email, if the subject looks like one. Newsletter platforms (Mailin/
+ * Sendinblue, Mailchimp, etc.) confirm a subscription with a plain GET to a
+ * token-bearing URL, so a server-side fetch has the same effect as a human
+ * clicking the button - which matters here since alerts@ has no real inbox
+ * a person could open to click it themselves. Only runs when the subject
+ * itself signals a confirmation email, so it never fetches arbitrary links
+ * out of a genuine ticket-sale newsletter. */
+async function tryAutoConfirmSubscription(
+  subject: string,
+  text: string,
+  html: string
+): Promise<{ attempted: boolean; confirmed: boolean; url?: string }> {
+  if (!/confirm|verify|activate|opt.?in/i.test(subject)) return { attempted: false, confirmed: false };
+
+  const candidates: { url: string; score: number }[] = [];
+  const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(html))) {
+    const url = decodeHtmlEntities(m[1]);
+    const anchorText = m[2].replace(/<[^>]+>/g, " ");
+    if (!/^https?:\/\//i.test(url)) continue;
+    let score = 0;
+    if (/confirm|verify|activate|subscri/i.test(url)) score += 2;
+    if (/confirm|verify|activate|subscri|yes|click here/i.test(anchorText)) score += 1;
+    if (score > 0) candidates.push({ url, score });
+  }
+  // Plain-text fallback for ESPs that send a text-only confirmation email.
+  if (candidates.length === 0) {
+    const urlRe = /https?:\/\/[^\s)>\]]+/gi;
+    let um: RegExpExecArray | null;
+    while ((um = urlRe.exec(text))) {
+      if (/confirm|verify|activate|subscri/i.test(um[0])) candidates.push({ url: um[0], score: 2 });
+    }
+  }
+  if (candidates.length === 0) return { attempted: false, confirmed: false };
+
+  candidates.sort((a, b) => b.score - a.score);
+  const target = candidates[0].url;
+  try {
+    const res = await fetch(target, { method: "GET", redirect: "follow" });
+    console.log(`Auto-confirm subscription GET ${res.status}: ${target}`);
+    return { attempted: true, confirmed: res.ok, url: target };
+  } catch (e) {
+    console.error("Failed to auto-confirm newsletter subscription:", target, e);
+    return { attempted: true, confirmed: false, url: target };
+  }
+}
+
 /** Cloudflare Email Routing invokes this directly whenever an email arrives
  * at alerts@roxracealerts.com - the newsletter-monitoring counterpart to
  * checkInstagramAnnouncements() above, reusing the exact same AI parser
@@ -2097,6 +2146,19 @@ async function handleIncomingEmail(message: ForwardableEmailMessage, env: Env): 
   const messageId = message.headers.get("message-id") || null;
   const fromAddress = message.from;
   const subject = parsed.subject || "";
+
+  // Regional HYROX sites almost all gate their newsletter with a double
+  // opt-in "confirm your subscription" email - but alerts@ has no real
+  // inbox a human can open to click that link, so the Worker clicks it
+  // itself the moment the email lands. See tryAutoConfirmSubscription().
+  const confirmResult = await tryAutoConfirmSubscription(subject, parsed.text || "", parsed.html || "");
+  if (confirmResult.attempted && env.ADMIN_EMAIL) {
+    const label = confirmResult.confirmed
+      ? `✅ Auto-confirmed a newsletter subscription\nSubject: "${subject}"\nFrom: ${fromAddress}`
+      : `⚠️ Saw a subscription-confirmation email but couldn't auto-confirm it - may need a manual resubscribe\nSubject: "${subject}"\nFrom: ${fromAddress}`;
+    await notifyAdminTelegram(env, env.ADMIN_EMAIL, label);
+  }
+
   // Keep the AI call cheap on what can be a long, image-heavy newsletter -
   // the sale-relevant sentence is almost always near the top.
   const body = (parsed.text || parsed.html || "").slice(0, 8000);
