@@ -165,6 +165,30 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   UNIQUE(handle, post_id)
 );
 
+-- Every incoming email to alerts@roxracealerts.com (see the email() handler
+-- in src/index.ts), read via Cloudflare Email Routing once the admin
+-- subscribes that address to each regional HYROX newsletter. Same
+-- read-and-match role as ig_flagged_posts, just fed newsletter bodies
+-- instead of Instagram captions through the same AI parser
+-- (parseAnnouncementWithAI) - newsletters are first-party and structured,
+-- so this is expected to be a more reliable signal than scraping captions.
+-- message_id (the email's own Message-ID header) guards against Cloudflare
+-- ever redelivering the same message.
+CREATE TABLE IF NOT EXISTS newsletter_flagged_emails (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id TEXT,
+  from_address TEXT NOT NULL,
+  subject TEXT,
+  received_at TEXT NOT NULL DEFAULT (datetime('now')),
+  status TEXT NOT NULL DEFAULT 'pending',
+  banner_text TEXT,
+  event_url TEXT,
+  live_at_utc TEXT,
+  live_at_timezone TEXT,
+  presale_is_live INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(message_id)
+);
+
 -- Free-text feedback/feature requests submitted via /feedback. Private -
 -- nothing here is shown to other visitors. Each submission also emails
 -- ADMIN_EMAIL immediately (see handleFeedback() in src/index.ts); this

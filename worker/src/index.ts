@@ -1,4 +1,5 @@
 import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS } from "./resolve";
+import PostalMime from "postal-mime";
 
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
 const INDEX_BATCH_SIZE = 30;
@@ -2074,6 +2075,82 @@ async function checkInstagramAnnouncements(env: Env): Promise<void> {
   }
 }
 
+/** Cloudflare Email Routing invokes this directly whenever an email arrives
+ * at alerts@roxracealerts.com - the newsletter-monitoring counterpart to
+ * checkInstagramAnnouncements() above, reusing the exact same AI parser
+ * (parseAnnouncementWithAI) on the email body instead of an Instagram
+ * caption. Newsletters are first-party HYROX comms rather than something an
+ * AI has to guess the relevance of from a social caption, so once the admin
+ * subscribes alerts@ to each regional site's newsletter, this should be a
+ * materially more reliable signal than Instagram scraping alone. No human
+ * approval gate, same as Instagram - a bad match can be spotted from the
+ * newsletter_flagged_emails table if it ever comes up. */
+async function handleIncomingEmail(message: ForwardableEmailMessage, env: Env): Promise<void> {
+  let parsed;
+  try {
+    parsed = await PostalMime.parse(message.raw);
+  } catch (e) {
+    console.error("Failed to parse incoming newsletter email:", e);
+    return;
+  }
+
+  const messageId = message.headers.get("message-id") || null;
+  const fromAddress = message.from;
+  const subject = parsed.subject || "";
+  // Keep the AI call cheap on what can be a long, image-heavy newsletter -
+  // the sale-relevant sentence is almost always near the top.
+  const body = (parsed.text || parsed.html || "").slice(0, 8000);
+  if (!body.trim()) return;
+
+  const { results } = await env.DB.prepare(
+    "SELECT title, url FROM event_directory WHERE event_date IS NULL OR event_date >= ?"
+  )
+    .bind(todayIso())
+    .all<any>();
+  const candidateEvents = results || [];
+
+  const ai = await parseAnnouncementWithAI(env, `Subject: ${subject}\n\n${body}`, new Date().toISOString(), candidateEvents);
+
+  await env.DB.prepare(
+    `INSERT INTO newsletter_flagged_emails (message_id, from_address, subject, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(message_id) DO NOTHING`
+  )
+    .bind(
+      messageId,
+      fromAddress,
+      subject,
+      ai && ai.isRaceTicketSale ? "approved" : "ignored",
+      ai?.bannerText || null,
+      ai?.eventUrl || null,
+      ai?.liveAtUtc || null,
+      ai?.liveAtTimezone || null,
+      ai?.presaleIsLive ? 1 : 0
+    )
+    .run();
+
+  if (!ai || !ai.isRaceTicketSale || !ai.eventUrl) return;
+
+  const { bannerText, eventUrl, liveAtUtc, liveAtTimezone } = ai;
+  const presaleIsLive = ai.presaleIsLive ? 1 : 0;
+
+  await notifySaleWatchers(env, eventUrl, bannerText, eventUrl);
+  await env.DB.prepare(
+    "UPDATE event_directory SET presale_note = ?, presale_live_at = ?, presale_timezone = ?, presale_is_live = ? WHERE url = ?"
+  )
+    .bind(bannerText, liveAtUtc, liveAtTimezone, presaleIsLive, eventUrl)
+    .run();
+  await env.DB.prepare(
+    "UPDATE sale_watch SET presale_note = ?, presale_live_at = ?, presale_timezone = ?, presale_is_live = ? WHERE event_url = ?"
+  )
+    .bind(bannerText, liveAtUtc, liveAtTimezone, presaleIsLive, eventUrl)
+    .run();
+
+  if (env.ADMIN_EMAIL) {
+    await notifyAdminTelegram(env, env.ADMIN_EMAIL, `📧 ${bannerText}\n(from newsletter: "${subject}")`);
+  }
+}
+
 function decodeHtmlEntities(s: string): string {
   return s
     .replace(/&#0?39;/g, "'")
@@ -2642,5 +2719,9 @@ export default {
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
     }
+  },
+
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(handleIncomingEmail(message, env));
   },
 };
