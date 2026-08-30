@@ -186,6 +186,13 @@ CREATE TABLE IF NOT EXISTS newsletter_flagged_emails (
   live_at_utc TEXT,
   live_at_timezone TEXT,
   presale_is_live INTEGER NOT NULL DEFAULT 0,
+  -- Diagnostics for tryAutoConfirmSubscription() (src/index.ts) - the link
+  -- it found and GETed (if the subject looked like a double opt-in email)
+  -- and whether that request came back ok. Without these, a failed
+  -- auto-confirm was only ever visible in the one-off Telegram ping at the
+  -- moment it happened, with nothing left to inspect afterward.
+  confirm_link TEXT,
+  confirm_result TEXT,
   UNIQUE(message_id)
 );
 

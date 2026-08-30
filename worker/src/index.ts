@@ -2090,6 +2090,12 @@ async function tryAutoConfirmSubscription(
 ): Promise<{ attempted: boolean; confirmed: boolean; url?: string }> {
   if (!/confirm|verify|activate|opt.?in/i.test(subject)) return { attempted: false, confirmed: false };
 
+  // "unsubscribe" contains "subscri" - without excluding it explicitly, a
+  // footer opt-out link scores identically to the real confirm button and
+  // can win the tie-break (first match wins on equal score), silently
+  // confirming nothing while still reporting "confirmed".
+  const isUnsubscribe = (s: string) => /unsubscrib|opt.?out/i.test(s);
+
   const candidates: { url: string; score: number }[] = [];
   const anchorRe = /<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
   let m: RegExpExecArray | null;
@@ -2097,6 +2103,7 @@ async function tryAutoConfirmSubscription(
     const url = decodeHtmlEntities(m[1]);
     const anchorText = m[2].replace(/<[^>]+>/g, " ");
     if (!/^https?:\/\//i.test(url)) continue;
+    if (isUnsubscribe(url) || isUnsubscribe(anchorText)) continue;
     let score = 0;
     if (/confirm|verify|activate|subscri/i.test(url)) score += 2;
     if (/confirm|verify|activate|subscri|yes|click here/i.test(anchorText)) score += 1;
@@ -2107,6 +2114,7 @@ async function tryAutoConfirmSubscription(
     const urlRe = /https?:\/\/[^\s)>\]]+/gi;
     let um: RegExpExecArray | null;
     while ((um = urlRe.exec(text))) {
+      if (isUnsubscribe(um[0])) continue;
       if (/confirm|verify|activate|subscri/i.test(um[0])) candidates.push({ url: um[0], score: 2 });
     }
   }
@@ -2115,7 +2123,10 @@ async function tryAutoConfirmSubscription(
   candidates.sort((a, b) => b.score - a.score);
   const target = candidates[0].url;
   try {
-    const res = await fetch(target, { method: "GET", redirect: "follow" });
+    // Same browser-like UA used for resolveEvent()'s fetches (see resolve.ts)
+    // - several ESPs block requests carrying no/unusual User-Agent as bot
+    // traffic, which silently killed some auto-confirm attempts before this.
+    const res = await fetch(target, { method: "GET", redirect: "follow", headers: HEADERS });
     console.log(`Auto-confirm subscription GET ${res.status}: ${target}`);
     return { attempted: true, confirmed: res.ok, url: target };
   } catch (e) {
@@ -2174,8 +2185,8 @@ async function handleIncomingEmail(message: ForwardableEmailMessage, env: Env): 
   const ai = await parseAnnouncementWithAI(env, `Subject: ${subject}\n\n${body}`, new Date().toISOString(), candidateEvents);
 
   await env.DB.prepare(
-    `INSERT INTO newsletter_flagged_emails (message_id, from_address, subject, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO newsletter_flagged_emails (message_id, from_address, subject, status, banner_text, event_url, live_at_utc, live_at_timezone, presale_is_live, confirm_link, confirm_result)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(message_id) DO NOTHING`
   )
     .bind(
@@ -2187,7 +2198,9 @@ async function handleIncomingEmail(message: ForwardableEmailMessage, env: Env): 
       ai?.eventUrl || null,
       ai?.liveAtUtc || null,
       ai?.liveAtTimezone || null,
-      ai?.presaleIsLive ? 1 : 0
+      ai?.presaleIsLive ? 1 : 0,
+      confirmResult.url || null,
+      confirmResult.attempted ? (confirmResult.confirmed ? "confirmed" : "failed") : null
     )
     .run();
 
