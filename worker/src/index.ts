@@ -2592,7 +2592,11 @@ async function handleFeedbackAdminPage(req: Request, env: Env): Promise<Response
     )
     .join("");
 
-  return page("Feedback inbox", rows || `<div class="card"><p>Nothing yet.</p></div>`, { "cache-control": "private, no-store" });
+  return page(
+    "Feedback inbox",
+    `${adminNav(token, "feedback")}${rows || `<div class="card"><p>Nothing yet.</p></div>`}`,
+    { "cache-control": "private, no-store" }
+  );
 }
 
 async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> {
@@ -2602,6 +2606,18 @@ async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> 
   const id = String(form.get("id") || "");
   await env.DB.prepare("DELETE FROM feedback WHERE id = ?").bind(id).run();
   return Response.redirect(`${env.SITE_URL}/admin/feedback?token=${encodeURIComponent(token)}`, 303);
+}
+
+/** Every /admin/* page was a dead-end reachable only by its own direct
+ * link, with no way to discover the others - the homepage's "Admin" link
+ * goes straight to /admin/subscribers, so /admin/feedback and
+ * /admin/ig-posts were invisible unless you already knew the URL. This bar
+ * fixes that by linking all three from wherever you land. */
+function adminNav(token: string, current: "subscribers" | "feedback" | "ig-posts"): string {
+  const t = encodeURIComponent(token);
+  const link = (page: "subscribers" | "feedback" | "ig-posts", label: string) =>
+    page === current ? `<b>${label}</b>` : `<a href="/admin/${page}?token=${t}">${label}</a>`;
+  return `<p><small>${link("subscribers", "Subscribers")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
 }
 
 /** Private, read-only list of everyone registered - who Resend itself has
@@ -2668,7 +2684,8 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
 
   return page(
     "Subscribers",
-    `<div class="card">
+    `${adminNav(token, "subscribers")}
+    <div class="card">
       <h2>Subscribers (${rows.length})</h2>
       <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall. Click a subscriber to see what they're watching.</small></p>
       ${rowsHtml || "<p>Nobody yet.</p>"}
@@ -2709,7 +2726,7 @@ async function handleIgAdminPage(req: Request, env: Env): Promise<Response> {
 
   return page(
     "Recently published Instagram announcements",
-    rows || "<div class=\"card\"><p>Nothing published yet.</p></div>",
+    `${adminNav(token, "ig-posts")}${rows || "<div class=\"card\"><p>Nothing published yet.</p></div>"}`,
     { "cache-control": "private, no-store" }
   );
 }
