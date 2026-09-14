@@ -2617,7 +2617,7 @@ function adminNav(token: string, current: "subscribers" | "feedback" | "ig-posts
   const t = encodeURIComponent(token);
   const link = (page: "subscribers" | "feedback" | "ig-posts", label: string) =>
     page === current ? `<b>${label}</b>` : `<a href="/admin/${page}?token=${t}">${label}</a>`;
-  return `<p><small>${link("subscribers", "Subscribers")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
+  return `<p><small><a href="/">Home</a> &middot; ${link("subscribers", "Subscribers")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
 }
 
 /** Private, read-only list of everyone registered - who Resend itself has
