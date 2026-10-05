@@ -934,8 +934,8 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     </details>`;
 
   const hero = `<div class="hero">
-    <h2>Get HYROX Ticket Dates &amp; Alerts</h2>
-    <p class="hero-sub">Free alerts for sold-out ticket types, pre-sales, and public sales going live &mdash; for any HYROX race, worldwide.</p>
+    <h2>Watch a HYROX race and get alerts when tickets become available</h2>
+    <p class="hero-sub">Free alerts for the races you pick: pre-sales, public sales going live, and sold-out tickets coming back. Any HYROX race, worldwide.</p>
   </div>`;
 
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
