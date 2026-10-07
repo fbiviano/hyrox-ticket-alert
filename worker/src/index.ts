@@ -2613,11 +2613,12 @@ async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> 
  * goes straight to /admin/subscribers, so /admin/feedback and
  * /admin/ig-posts were invisible unless you already knew the URL. This bar
  * fixes that by linking all three from wherever you land. */
-function adminNav(token: string, current: "subscribers" | "feedback" | "ig-posts"): string {
+type AdminPage = "subscribers" | "analytics" | "feedback" | "ig-posts";
+function adminNav(token: string, current: AdminPage): string {
   const t = encodeURIComponent(token);
-  const link = (page: "subscribers" | "feedback" | "ig-posts", label: string) =>
+  const link = (page: AdminPage, label: string) =>
     page === current ? `<b>${label}</b>` : `<a href="/admin/${page}?token=${t}">${label}</a>`;
-  return `<p><small><a href="/">Home</a> &middot; ${link("subscribers", "Subscribers")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
+  return `<p><small><a href="/">Home</a> &middot; ${link("subscribers", "Subscribers")} &middot; ${link("analytics", "Analytics")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
 }
 
 /** Private, read-only list of everyone registered - who Resend itself has
@@ -2689,6 +2690,219 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
       <h2>Subscribers (${rows.length})</h2>
       <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall. Click a subscriber to see what they're watching.</small></p>
       ${rowsHtml || "<p>Nobody yet.</p>"}
+    </div>`,
+    { "cache-control": "private, no-store" }
+  );
+}
+
+/** Which feature people actually use: "race watch" (sale_watch/sale_watchers -
+ * be told when a not-yet-on-sale race opens) vs "ticket watch" (subscriptions
+ * - be told when a specific sold-out ticket type comes back). Built purely
+ * from rows that already exist, verified subscribers only, so it's a
+ * snapshot of what people are watching *now*, not a history: removing a
+ * watch, marking a race watch as bought, or unsubscribing deletes the row,
+ * and nothing records email opens/clicks. Treat "bought" as the one real
+ * value signal available. */
+async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const db = env.DB;
+  const [counts, usage, ticketStats, raceStats, firstFeat, recent, topRaceW, topRaceT, ticketRows, weekly] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS total, COALESCE(SUM(verified), 0) AS verified FROM subscribers").first<any>(),
+    db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN t > 0 THEN 1 ELSE 0 END), 0) AS with_ticket,
+           COALESCE(SUM(CASE WHEN r > 0 THEN 1 ELSE 0 END), 0) AS with_race,
+           COALESCE(SUM(CASE WHEN t > 0 AND r > 0 THEN 1 ELSE 0 END), 0) AS both_feat,
+           COALESCE(SUM(CASE WHEN t = 0 AND r = 0 THEN 1 ELSE 0 END), 0) AS neither
+         FROM (SELECT (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS t,
+                      (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS r
+               FROM subscribers s WHERE s.verified = 1)`
+      )
+      .first<any>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS total, COUNT(sub.purchased_at) AS bought
+         FROM subscriptions sub JOIN subscribers s ON s.id = sub.subscriber_id WHERE s.verified = 1`
+      )
+      .first<any>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(sw.resolved), 0) AS live
+         FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
+         JOIN subscribers s ON s.id = w.subscriber_id WHERE s.verified = 1`
+      )
+      .first<any>(),
+    db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN tmin IS NOT NULL AND (rmin IS NULL OR tmin <= rmin) THEN 1 ELSE 0 END), 0) AS ticket_first,
+           COALESCE(SUM(CASE WHEN rmin IS NOT NULL AND (tmin IS NULL OR rmin < tmin) THEN 1 ELSE 0 END), 0) AS race_first
+         FROM (SELECT (SELECT MIN(created_at) FROM subscriptions WHERE subscriber_id = s.id) AS tmin,
+                      (SELECT MIN(created_at) FROM sale_watchers WHERE subscriber_id = s.id) AS rmin
+               FROM subscribers s WHERE s.verified = 1)`
+      )
+      .first<any>(),
+    db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM sale_watchers WHERE created_at >= datetime('now', '-7 days')) AS race7,
+           (SELECT COUNT(*) FROM sale_watchers WHERE created_at >= datetime('now', '-30 days')) AS race30,
+           (SELECT COUNT(*) FROM subscriptions WHERE created_at >= datetime('now', '-7 days')) AS ticket7,
+           (SELECT COUNT(*) FROM subscriptions WHERE created_at >= datetime('now', '-30 days')) AS ticket30`
+      )
+      .first<any>(),
+    db
+      .prepare(
+        `SELECT sw.event_title AS name, COUNT(DISTINCT w.subscriber_id) AS people
+         FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
+         JOIN subscribers s ON s.id = w.subscriber_id AND s.verified = 1
+         GROUP BY sw.event_url ORDER BY people DESC, name LIMIT 10`
+      )
+      .all<any>(),
+    db
+      .prepare(
+        `SELECT sub.event_name AS name, COUNT(DISTINCT sub.subscriber_id) AS people
+         FROM subscriptions sub JOIN subscribers s ON s.id = sub.subscriber_id AND s.verified = 1
+         GROUP BY sub.event_name ORDER BY people DESC, name LIMIT 10`
+      )
+      .all<any>(),
+    db
+      .prepare(
+        `SELECT sub.ticket_name, sub.subscriber_id FROM subscriptions sub
+         JOIN subscribers s ON s.id = sub.subscriber_id AND s.verified = 1`
+      )
+      .all<any>(),
+    db
+      .prepare(
+        `SELECT date(created_at, 'weekday 0', '-6 days') AS wk, COUNT(*) AS signups, COALESCE(SUM(verified), 0) AS verified
+         FROM subscribers GROUP BY wk ORDER BY wk DESC LIMIT 8`
+      )
+      .all<any>(),
+  ]);
+
+  const verified = counts?.verified || 0;
+  const total = counts?.total || 0;
+  const pct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "0%");
+  const bar = (n: number, max: number) =>
+    `<div class="bar"><span style="width:${max > 0 ? Math.round((n / max) * 100) : 0}%"></span></div>`;
+  const listRows = (rows: { name: string; n: number }[], emptyMsg: string) => {
+    if (!rows.length) return `<p><small>${emptyMsg}</small></p>`;
+    const max = Math.max(...rows.map((r) => r.n));
+    return rows
+      .map((r) => `<div class="arow"><span>${escapeHtml(r.name)}</span><b>${r.n}</b>${bar(r.n, max)}</div>`)
+      .join("");
+  };
+  const tile = (value: string | number, label: string) => `<div class="tile"><b>${value}</b><small>${label}</small></div>`;
+
+  // Collapse "HYROX PRO MEN | Friday" / "... | Saturday" into one ticket type
+  // so a division isn't split across race days.
+  const typePeople = new Map<string, Set<number>>();
+  for (const r of ticketRows.results || []) {
+    const type = String(r.ticket_name)
+      .replace(/\s*\|\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!typePeople.has(type)) typePeople.set(type, new Set());
+    typePeople.get(type)!.add(r.subscriber_id);
+  }
+  const topTypes = [...typePeople.entries()]
+    .map(([name, set]) => ({ name, n: set.size }))
+    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name))
+    .slice(0, 10);
+
+  const weeklyRows = weekly.results || [];
+  const weeklyMax = Math.max(0, ...weeklyRows.map((r: any) => r.signups));
+
+  const raceUsers = usage?.with_race || 0;
+  const ticketUsers = usage?.with_ticket || 0;
+  const mostUsed =
+    raceUsers === ticketUsers
+      ? "Race watch and ticket watch are used by the same number of people."
+      : raceUsers > ticketUsers
+        ? `Race watch is the more used feature: ${raceUsers} people vs ${ticketUsers} for ticket watch.`
+        : `Ticket watch is the more used feature: ${ticketUsers} people vs ${raceUsers} for race watch.`;
+
+  const style = `<style>
+    .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:12px}
+    .tile{background:#f7f7f7;border-radius:8px;padding:12px}
+    .tile b{display:block;font-size:1.5rem}
+    .tile small{display:block;margin-top:2px}
+    .arow{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:7px 0;border-bottom:1px solid #eee;font-size:0.9rem}
+    .arow:last-child{border-bottom:0}
+    .bar{grid-column:1/-1;height:6px;background:#eee;border-radius:3px}
+    .bar span{display:block;height:100%;background:#ff6a00;border-radius:3px}
+  </style>`;
+
+  return page(
+    "Analytics",
+    `${style}${adminNav(token, "analytics")}
+    <div class="card">
+      <h2>What people use most</h2>
+      <p>${escapeHtml(mostUsed)}</p>
+      <p><small>Verified subscribers only. A snapshot of what people are watching now - removed watches and unsubscribes leave no trace, and there's no email open/click tracking, so "bought" is the only hard value signal.</small></p>
+      <div class="tiles">
+        ${tile(verified, `verified subscribers (${total - verified} unverified)`)}
+        ${tile(`${raceUsers} <small>(${pct(raceUsers, verified)})</small>`, "use race watch")}
+        ${tile(`${ticketUsers} <small>(${pct(ticketUsers, verified)})</small>`, "use ticket watch")}
+        ${tile(usage?.both_feat || 0, "use both")}
+        ${tile(usage?.neither || 0, "verified but watching nothing")}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Race watch vs ticket watch</h2>
+      <p><small>Race watch = told when a not-yet-on-sale race opens. Ticket watch = told when a specific sold-out ticket type comes back.</small></p>
+      <div class="tiles">
+        ${tile(raceStats?.total || 0, "active race watches")}
+        ${tile(raceStats?.live || 0, "of those: race now on sale")}
+        ${tile(ticketStats?.total || 0, "active ticket watches")}
+        ${tile(`${ticketStats?.bought || 0} <small>(${pct(ticketStats?.bought || 0, ticketStats?.total || 0)})</small>`, "ticket watches marked bought")}
+      </div>
+      <h2 style="margin-top:20px">New watches added</h2>
+      <div class="tiles">
+        ${tile(recent?.race7 || 0, "race watches, last 7 days")}
+        ${tile(recent?.ticket7 || 0, "ticket watches, last 7 days")}
+        ${tile(recent?.race30 || 0, "race watches, last 30 days")}
+        ${tile(recent?.ticket30 || 0, "ticket watches, last 30 days")}
+      </div>
+      <h2 style="margin-top:20px">First thing people set up</h2>
+      <div class="tiles">
+        ${tile(firstFeat?.race_first || 0, "started with a race watch")}
+        ${tile(firstFeat?.ticket_first || 0, "started with a ticket watch")}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Most-watched races (race watch)</h2>
+      ${listRows((topRaceW.results || []).map((r: any) => ({ name: r.name, n: r.people })), "No race watches yet.")}
+    </div>
+
+    <div class="card">
+      <h2>Most-watched races (ticket watch)</h2>
+      ${listRows((topRaceT.results || []).map((r: any) => ({ name: r.name, n: r.people })), "No ticket watches yet.")}
+    </div>
+
+    <div class="card">
+      <h2>Most-watched ticket types</h2>
+      <p><small>Race days merged (e.g. Friday and Saturday count as one). Number = people.</small></p>
+      ${listRows(topTypes, "No ticket watches yet.")}
+    </div>
+
+    <div class="card">
+      <h2>Signups per week</h2>
+      ${
+        weeklyRows.length
+          ? weeklyRows
+              .map(
+                (r: any) =>
+                  `<div class="arow"><span>Week of ${escapeHtml(r.wk)} <small>(${r.verified} verified)</small></span><b>${r.signups}</b>${bar(r.signups, weeklyMax)}</div>`
+              )
+              .join("")
+          : "<p><small>No signups yet.</small></p>"
+      }
     </div>`,
     { "cache-control": "private, no-store" }
   );
@@ -2787,6 +3001,7 @@ export default {
       if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
       if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
       if (url.pathname === "/admin/subscribers" && req.method === "GET") return await handleSubscribersAdminPage(req, env);
+      if (url.pathname === "/admin/analytics" && req.method === "GET") return await handleAnalyticsAdminPage(req, env);
       if (url.pathname === "/admin/feedback/dismiss" && req.method === "POST") return await handleFeedbackDismiss(req, env);
       return new Response("Not found", { status: 404 });
     } catch (e: any) {
