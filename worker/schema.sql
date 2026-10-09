@@ -165,6 +165,21 @@ CREATE TABLE IF NOT EXISTS ig_flagged_posts (
   UNIQUE(handle, post_id)
 );
 
+-- One row per countdown reminder step already sent (1d / 1h / 5m / 0m before
+-- an announced go-live time), keyed by event and the announced time in
+-- 10-minute buckets. checkAnnouncementReminders() (src/index.ts) inserts
+-- here first and only emails when the insert actually added a row, so a
+-- reminder can never repeat - and it covers Instagram posts AND newsletters
+-- under one countdown per event. Replaces the reminder_*_sent flags on
+-- ig_flagged_posts, which are no longer read (kept so history survives).
+CREATE TABLE IF NOT EXISTS countdown_sent (
+  event_url TEXT NOT NULL,
+  live_key INTEGER NOT NULL,
+  step TEXT NOT NULL,
+  sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (event_url, live_key, step)
+);
+
 -- Every incoming email to alerts@roxracealerts.com (see the email() handler
 -- in src/index.ts), read via Cloudflare Email Routing once the admin
 -- subscribes that address to each regional HYROX newsletter. Same

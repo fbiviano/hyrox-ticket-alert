@@ -1735,7 +1735,13 @@ const IG_HANDLES_LOWER = new Set(IG_HANDLES.map((h) => h.toLowerCase()));
  * sale_watch.resolved: an Instagram pre-sale (e.g. a gym-only early-access
  * link) isn't the same as the real public sale being live, so
  * checkSaleWatches keeps polling independently. */
-async function notifySaleWatchers(env: Env, eventUrl: string, bannerText: string, postUrl: string): Promise<void> {
+async function notifySaleWatchers(
+  env: Env,
+  eventUrl: string,
+  bannerText: string,
+  postUrl: string,
+  source: "instagram" | "newsletter" = "instagram"
+): Promise<void> {
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
   const { results: watchers } = await env.DB.prepare(
@@ -1753,9 +1759,12 @@ async function notifySaleWatchers(env: Env, eventUrl: string, bannerText: string
       await sendEmail(
         env,
         watcher.email,
-        `Instagram update on ${eventTitle} tickets`,
-        `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>This may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-        `${eventTitle}: ${bannerText}\n${postUrl}\n\nThis may not be the full public sale yet - check the post for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
+        // Newsletter-sourced updates used to go out labelled "Instagram
+        // update ... check the post" with just the event page as the link,
+        // which read as wrong to anyone who'd never seen an Instagram post.
+        source === "newsletter" ? `HYROX update on ${eventTitle} tickets` : `Instagram update on ${eventTitle} tickets`,
+        `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle}: ${bannerText}\n${postUrl}\n\n${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `📣 ${eventTitle}: ${bannerText}\n${postUrl}`);
     } catch (e) {
@@ -1790,7 +1799,7 @@ async function sendCountdownReminder(
         env,
         watcher.email,
         `${eventTitle} tickets: ${label}`,
-        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(eventUrl)}">${escapeHtml(eventUrl)}</a></p><p><small>This is a best-effort estimate from an Instagram post, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(eventUrl)}">${escapeHtml(eventUrl)}</a></p><p><small>This is a best-effort estimate from an official HYROX announcement, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
         `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}`);
@@ -1817,42 +1826,56 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
  * actually live. */
 async function checkAnnouncementReminders(env: Env): Promise<void> {
   const now = Date.now();
+  // Announcements come from two sources - Instagram posts AND the regional
+  // newsletters read by handleIncomingEmail() - and the newest one per event
+  // wins, so a correction ("[Rettifica] ...") replaces an earlier time
+  // instead of both counting down. Guards, all from real newsletter data:
+  //  - newsletter rows with presale_is_live = 1 are "registration closes" /
+  //    "price goes up" notices carrying a deadline, not a go-live time;
+  //  - a time of exactly T00:00:00Z is what the AI fills in when the
+  //    email only gives a date, and would otherwise override a precise
+  //    earlier time (Warsaw: 12:00 CET, then a date-only follow-up).
   const { results } = await env.DB.prepare(
-    `SELECT id, event_url, post_url, live_at_utc, live_at_timezone, reminder_1d_sent, reminder_1h_sent, reminder_5m_sent, reminder_0m_sent
-     FROM ig_flagged_posts
-     WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
-       AND (reminder_1d_sent = 0 OR reminder_1h_sent = 0 OR reminder_5m_sent = 0 OR reminder_0m_sent = 0)`
+    `SELECT event_url, live_at_utc, live_at_timezone FROM (
+       SELECT event_url, live_at_utc, live_at_timezone, detected_at AS seen_at FROM ig_flagged_posts
+         WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
+           AND live_at_utc NOT LIKE '%T00:00:00Z'
+       UNION ALL
+       SELECT event_url, live_at_utc, live_at_timezone, received_at AS seen_at FROM newsletter_flagged_emails
+         WHERE status = 'approved' AND event_url IS NOT NULL AND live_at_utc IS NOT NULL
+           AND presale_is_live = 0 AND live_at_utc NOT LIKE '%T00:00:00Z'
+     ) ORDER BY seen_at ASC`
   ).all<any>();
+  const latest = new Map<string, any>();
+  for (const r of results || []) latest.set(r.event_url, r);
 
-  for (const row of results || []) {
+  const steps: [string, number, string][] = [
+    ["1d", ONE_DAY_MS, "is expected to go live in about 1 day"],
+    ["1h", ONE_HOUR_MS, "is expected to go live in about 1 hour"],
+    ["5m", FIVE_MIN_MS, "is expected to go live in about 5 minutes"],
+    ["0m", 0, "should be going live right now"],
+  ];
+
+  for (const row of latest.values()) {
     const liveAt = Date.parse(row.live_at_utc);
     if (isNaN(liveAt)) continue;
     const msUntil = liveAt - now;
-    const tooStaleToBother = msUntil < -6 * ONE_HOUR_MS;
+    // Nothing due yet, or too stale to bother (e.g. after extended downtime).
+    if (msUntil > ONE_DAY_MS || msUntil < -6 * ONE_HOUR_MS) continue;
 
-    if (!row.reminder_1d_sent && msUntil <= ONE_DAY_MS) {
-      if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 day", row.live_at_utc, row.live_at_timezone);
+    // 10-minute buckets so two sources quoting the same time a few seconds
+    // apart count as one; a corrected time gets a new key and so a new
+    // countdown. countdown_sent's primary key is what stops repeats - the
+    // INSERT only changes a row the first time.
+    const liveKey = Math.round(liveAt / (10 * 60 * 1000));
+    for (const [step, threshold, label] of steps) {
+      if (msUntil > threshold) continue;
+      const mark = await env.DB.prepare("INSERT OR IGNORE INTO countdown_sent (event_url, live_key, step) VALUES (?, ?, ?)")
+        .bind(row.event_url, liveKey, step)
+        .run();
+      if (mark.meta.changes) {
+        await sendCountdownReminder(env, row.event_url, label, row.live_at_utc, row.live_at_timezone);
       }
-      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1d_sent = 1 WHERE id = ?").bind(row.id).run();
-    }
-    if (!row.reminder_1h_sent && msUntil <= ONE_HOUR_MS) {
-      if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 1 hour", row.live_at_utc, row.live_at_timezone);
-      }
-      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_1h_sent = 1 WHERE id = ?").bind(row.id).run();
-    }
-    if (!row.reminder_5m_sent && msUntil <= FIVE_MIN_MS) {
-      if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "is expected to go live in about 5 minutes", row.live_at_utc, row.live_at_timezone);
-      }
-      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_5m_sent = 1 WHERE id = ?").bind(row.id).run();
-    }
-    if (!row.reminder_0m_sent && msUntil <= 0) {
-      if (!tooStaleToBother) {
-        await sendCountdownReminder(env, row.event_url, "should be going live right now", row.live_at_utc, row.live_at_timezone);
-      }
-      await env.DB.prepare("UPDATE ig_flagged_posts SET reminder_0m_sent = 1 WHERE id = ?").bind(row.id).run();
     }
   }
 }
@@ -2226,7 +2249,7 @@ async function handleIncomingEmail(message: ForwardableEmailMessage, env: Env): 
   const { bannerText, eventUrl, liveAtUtc, liveAtTimezone } = ai;
   const presaleIsLive = ai.presaleIsLive ? 1 : 0;
 
-  await notifySaleWatchers(env, eventUrl, bannerText, eventUrl);
+  await notifySaleWatchers(env, eventUrl, bannerText, eventUrl, "newsletter");
   await env.DB.prepare(
     "UPDATE event_directory SET presale_note = ?, presale_live_at = ?, presale_timezone = ?, presale_is_live = ? WHERE url = ?"
   )
