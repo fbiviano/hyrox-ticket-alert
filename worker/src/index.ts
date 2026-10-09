@@ -96,17 +96,34 @@ function clearSessionCookieHeader(): string {
 }
 
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
-  const resp = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ from: env.SEND_FROM, to: [to], subject, html, text }),
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Resend send failed: ${resp.status} ${body}`);
+  let error: string | null = null;
+  try {
+    const resp = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from: env.SEND_FROM, to: [to], subject, html, text }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      error = `${resp.status} ${body}`.slice(0, 300);
+      throw new Error(`Resend send failed: ${resp.status} ${body}`);
+    }
+  } catch (e) {
+    if (!error) error = String(e).slice(0, 300);
+    throw e;
+  } finally {
+    // Every attempt is logged (see email_log in schema.sql) - and a logging
+    // failure must never turn a delivered alert into a failed one.
+    try {
+      await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, ?, ?)")
+        .bind(to, subject, error ? 0 : 1, error)
+        .run();
+    } catch (logErr) {
+      console.error("Failed to write email_log:", logErr);
+    }
   }
 }
 
@@ -2788,6 +2805,59 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
       .all<any>(),
   ]);
 
+  // Email delivery log (email_log): "Resend accepted it", not inbox delivery.
+  const emailQ = (new URL(req.url).searchParams.get("email") || "").trim().toLowerCase();
+  const transactional =
+    "subject NOT LIKE 'Confirm your RoxRaceAlerts%' AND subject NOT LIKE 'You''re not getting alerts%' AND subject NOT LIKE 'Your RoxRaceAlerts sign-in%' AND subject NOT LIKE 'New RoxRaceAlerts feedback' AND subject NOT LIKE '% new HYROX Instagram post(s) published'";
+  const [mailStats, mailRecent, mailFailed, mailLookup] = await Promise.all([
+    db
+      .prepare(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(ok), 0) AS ok, (SELECT MIN(created_at) FROM email_log) AS since
+         FROM email_log WHERE created_at >= datetime('now', '-7 days')`
+      )
+      .first<any>(),
+    db
+      .prepare(`SELECT to_address, subject, ok, created_at FROM email_log WHERE ${transactional} ORDER BY id DESC LIMIT 30`)
+      .all<any>(),
+    db
+      .prepare("SELECT to_address, subject, error, created_at FROM email_log WHERE ok = 0 ORDER BY id DESC LIMIT 15")
+      .all<any>(),
+    emailQ
+      ? db
+          .prepare("SELECT subject, ok, error, created_at FROM email_log WHERE lower(to_address) = ? ORDER BY id DESC LIMIT 50")
+          .bind(emailQ)
+          .all<any>()
+      : Promise.resolve({ results: [] as any[] }),
+  ]);
+  const mailRow = (r: any) =>
+    `<div class="arow"><span>${r.ok ? "&#10003;" : "&#10007;"} ${escapeHtml(r.subject)}${r.to_address ? ` <small>&rarr; ${escapeHtml(r.to_address)}</small>` : ""}${r.error ? `<br><small>${escapeHtml(r.error)}</small>` : ""}</span><small>${escapeHtml(r.created_at)}</small></div>`;
+  const mailCardHtml = () => `<div class="card">
+      <h2>Email delivery</h2>
+      <p><small>Logged since ${escapeHtml(mailStats?.since || "now")}. &#10003; = Resend accepted the email. That is the most the app can see - bounces, spam-folder placement and opens only show in Resend's dashboard (resend.com/emails). Alerts to other people are not mirrored to your Telegram; only ones addressed to your own email are.</small></p>
+      <div class="tiles">
+        ${tile(mailStats?.total || 0, "emails, last 7 days")}
+        ${tile(mailStats?.ok || 0, "accepted by Resend")}
+        ${tile((mailStats?.total || 0) - (mailStats?.ok || 0), "failed to send")}
+      </div>
+      <form method="GET" action="/admin/analytics" style="margin-top:14px">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <div class="row"><input type="text" name="email" placeholder="Look up one person's emails (e.g. name@gmail.com)" value="${escapeHtml(emailQ)}"><button type="submit">Look up</button></div>
+      </form>
+      ${
+        emailQ
+          ? `<h2 style="margin-top:16px">Emails to ${escapeHtml(emailQ)}</h2>${
+              (mailLookup.results || []).length
+                ? (mailLookup.results || []).map(mailRow).join("")
+                : "<p><small>Nothing logged for that address (logging only started recently, so older emails won't appear).</small></p>"
+            }`
+          : ""
+      }
+      <h2 style="margin-top:16px">Latest alert emails</h2>
+      ${(mailRecent.results || []).length ? (mailRecent.results || []).map(mailRow).join("") : "<p><small>None logged yet.</small></p>"}
+      <h2 style="margin-top:16px">Failed sends</h2>
+      ${(mailFailed.results || []).length ? (mailFailed.results || []).map(mailRow).join("") : "<p><small>None.</small></p>"}
+    </div>`;
+
   const verified = counts?.verified || 0;
   const total = counts?.total || 0;
   const pct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "0%");
@@ -2856,6 +2926,8 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(usage?.neither || 0, "verified but watching nothing")}
       </div>
     </div>
+
+    ${mailCardHtml()}
 
     <div class="card">
       <h2>Race watch vs ticket watch</h2>
@@ -3030,6 +3102,7 @@ export default {
       ctx.waitUntil(sendDailyIgPostReminder(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
+      ctx.waitUntil(env.DB.prepare("DELETE FROM email_log WHERE created_at < datetime('now', '-90 days')").run());
     }
   },
 

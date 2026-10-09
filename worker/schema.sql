@@ -196,6 +196,25 @@ CREATE TABLE IF NOT EXISTS newsletter_flagged_emails (
   UNIQUE(message_id)
 );
 
+-- One row per outgoing email attempt (written by sendEmail() in
+-- src/index.ts), so "did this person actually get the alert?" can be
+-- answered after the fact from /admin/analytics. ok = 1 means Resend
+-- accepted the message (HTTP 2xx) - it says nothing about inbox delivery,
+-- bounces or spam placement, which only Resend's own dashboard shows.
+-- Before this table existed a failed send was only a console.error, and
+-- the watch it belonged to had already been marked resolved, so a failure
+-- left no trace anywhere.
+CREATE TABLE IF NOT EXISTS email_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  to_address TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_email_log_created ON email_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_email_log_to ON email_log(to_address);
+
 -- Free-text feedback/feature requests submitted via /feedback. Private -
 -- nothing here is shown to other visitors. Each submission also emails
 -- ADMIN_EMAIL immediately (see handleFeedback() in src/index.ts); this
