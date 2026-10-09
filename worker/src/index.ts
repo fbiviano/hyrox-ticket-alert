@@ -1176,6 +1176,16 @@ async function sendManualVerificationNotices(env: Env): Promise<void> {
   ).all<any>();
 
   for (const s of results || []) {
+    // Claim the row before sending, atomically: two overlapping cron
+    // invocations both read the same pending list, and stamping *after* the
+    // send let one subscriber get the notice twice in the same second.
+    const claim = await env.DB.prepare(
+      "UPDATE subscribers SET manual_verify_email_sent_at = datetime('now') WHERE id = ? AND manual_verify_email_sent_at IS NULL"
+    )
+      .bind(s.id)
+      .run();
+    if (!claim.meta.changes) continue;
+
     const { results: races } = await env.DB.prepare(
       `SELECT sw.event_title, sw.event_url, sw.resolved FROM sale_watchers w
        JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? ORDER BY sw.event_title`
@@ -1216,7 +1226,6 @@ async function sendManualVerificationNotices(env: Env): Promise<void> {
     } catch (e) {
       console.error(`Failed to send activation notice to ${s.email}:`, e);
     }
-    await env.DB.prepare("UPDATE subscribers SET manual_verify_email_sent_at = datetime('now') WHERE id = ?").bind(s.id).run();
   }
 }
 
