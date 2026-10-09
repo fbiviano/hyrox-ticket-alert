@@ -1159,6 +1159,67 @@ async function sendVerificationNudges(env: Env): Promise<void> {
   }
 }
 
+/** Tells a subscriber the admin activated their alerts by hand (verified = 1
+ * with manually_verified_at set, e.g. people who signed up but never clicked
+ * their confirmation link). They never saw a "you're confirmed" page, so
+ * without this they'd have no idea alerts had started - and no way to say
+ * "that wasn't me": the email carries a one-click unsubscribe that deletes
+ * the address. Races that opened while they were unverified get called out
+ * explicitly, since checkSaleWatches only ever emails watchers who were
+ * verified at the moment the sale opened. One attempt per subscriber, success
+ * or not (email_log records failures), so a bad address can't retry forever. */
+async function sendManualVerificationNotices(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM subscribers
+     WHERE verified = 1 AND manually_verified_at IS NOT NULL AND manual_verify_email_sent_at IS NULL
+     LIMIT 25`
+  ).all<any>();
+
+  for (const s of results || []) {
+    const { results: races } = await env.DB.prepare(
+      `SELECT sw.event_title, sw.event_url, sw.resolved FROM sale_watchers w
+       JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? ORDER BY sw.event_title`
+    )
+      .bind(s.id)
+      .all<any>();
+    const { results: tickets } = await env.DB.prepare(
+      "SELECT event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? AND purchased_at IS NULL ORDER BY event_name, ticket_name"
+    )
+      .bind(s.id)
+      .all<any>();
+
+    const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${s.unsubscribe_token}`;
+    const unsubLink = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
+    const raceHtml = (races || [])
+      .map((r: any) =>
+        r.resolved
+          ? `<li><b>${escapeHtml(r.event_title)}</b> &mdash; tickets are <b>already on sale</b>: <a href="${escapeHtml(r.event_url)}">${escapeHtml(r.event_url)}</a></li>`
+          : `<li><b>${escapeHtml(r.event_title)}</b> &mdash; we'll email you the moment tickets open</li>`
+      )
+      .join("");
+    const ticketHtml = (tickets || [])
+      .map((t: any) => `<li>${escapeHtml(t.event_name)} &mdash; ${escapeHtml(t.ticket_name)} (we'll email you if it becomes available)</li>`)
+      .join("");
+    const raceText = (races || [])
+      .map((r: any) => (r.resolved ? `- ${r.event_title}: tickets are already on sale: ${r.event_url}` : `- ${r.event_title}: we'll email you the moment tickets open`))
+      .join("\n");
+    const ticketText = (tickets || []).map((t: any) => `- ${t.event_name} - ${t.ticket_name}`).join("\n");
+
+    try {
+      await sendEmail(
+        env,
+        s.email,
+        "Your RoxRaceAlerts alerts are now active",
+        `<p>You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.</p><p>You're watching:</p><ul>${raceHtml}${ticketHtml}</ul><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; Didn't sign up, or don't want these? <a href="${unsubLink}">Unsubscribe and delete my address</a>.</small></p>`,
+        `You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.\n\nYou're watching:\n${raceText}${raceText && ticketText ? "\n" : ""}${ticketText}\n\nManage my alerts: ${myAlertsLink}\nDidn't sign up, or don't want these? Unsubscribe and delete my address: ${unsubLink}`
+      );
+    } catch (e) {
+      console.error(`Failed to send activation notice to ${s.email}:`, e);
+    }
+    await env.DB.prepare("UPDATE subscribers SET manual_verify_email_sent_at = datetime('now') WHERE id = ?").bind(s.id).run();
+  }
+}
+
 /** Redirect to the homepage with the session cookie set - used whenever an
  * action completes for an already-verified subscriber, so the browser lands
  * on the personalized "Signed in as ..." view instead of a static
@@ -3119,6 +3180,7 @@ export default {
       ctx.waitUntil(checkSaleWatches(env));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
       ctx.waitUntil(checkAnnouncementReminders(env));
+      ctx.waitUntil(sendManualVerificationNotices(env));
     } else if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
       ctx.waitUntil(sendVerificationNudges(env));

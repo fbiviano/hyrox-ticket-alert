@@ -8,7 +8,15 @@ CREATE TABLE IF NOT EXISTS subscribers (
   -- Set the one time a "you haven't confirmed yet" nudge email goes out
   -- (see sendVerificationNudges() in src/index.ts) - stops it from being
   -- sent more than once per subscriber. Irrelevant once verified = 1.
-  nudge_sent_at TEXT
+  nudge_sent_at TEXT,
+  -- Set when the admin switched a subscriber's alerts on by hand instead of
+  -- the subscriber clicking their confirmation link (UPDATE ... SET
+  -- verified = 1, manually_verified_at = datetime('now')). The cron then
+  -- sends them one "your alerts are now active" email with a one-click
+  -- unsubscribe (sendManualVerificationNotices() in src/index.ts) and stamps
+  -- manual_verify_email_sent_at.
+  manually_verified_at TEXT,
+  manual_verify_email_sent_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
