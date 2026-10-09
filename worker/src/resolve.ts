@@ -113,13 +113,40 @@ export async function getEventData(eventId: string, shopUrl: string): Promise<Re
   return extractNextDataEvent(await fetchHtml(checkoutUrlFor(shopUrl, eventId)));
 }
 
+/** vivenu moved some shops (usa.hyrox.com so far) onto a newer storefront:
+ * /event/<slug> now 307s to /events/<slug> and is rendered without the old
+ * __NEXT_DATA__ blob, so extractNextDataEvent() sees nothing and a shop with
+ * live stock looked "not on sale" - race watches on seven live US races never
+ * fired and the homepage listed them as not on sale. The event's id is still
+ * embedded in the page's serialized payload and /checkout/<id> still serves
+ * the old shape, so recover the event that way. Gated on storefront-only
+ * markers so ordinary marketing pages never trigger the extra fetches. */
+async function eventViaCheckout(html: string, pageUrl: string): Promise<ResolvedEvent | null> {
+  if (!/checkoutExpirationMinutes|checkoutSteps/.test(html)) return null;
+  const origin = new URL(pageUrl).origin;
+  const ids: string[] = [];
+  const add = (id: string) => {
+    if (!ids.includes(id)) ids.push(id);
+  };
+  // The event's own id sits directly before its "name" key in the payload;
+  // try those first so the usual case is one checkout fetch, not several.
+  for (const m of html.matchAll(/(?<![0-9a-f])([0-9a-f]{24})(?![0-9a-f])[\\"',\s]{1,12}name[\\"']/g)) add(m[1]);
+  for (const m of html.matchAll(/(?<![0-9a-f])[0-9a-f]{24}(?![0-9a-f])/g)) add(m[0]);
+  for (const id of ids.slice(0, 6)) {
+    const event = extractNextDataEvent(await fetchHtml(`${origin}/checkout/${id}`));
+    if (event) return event;
+  }
+  return null;
+}
+
 async function resolveViaStatic(url: string): Promise<{ event: ResolvedEvent; shopUrl: string } | null> {
   const html = await fetchHtml(url);
   if (!html) return null;
-  let event = extractNextDataEvent(html);
+  let event = extractNextDataEvent(html) || (await eventViaCheckout(html, url));
   if (event) return { event, shopUrl: url };
   for (const candidate of await findCandidateLinks(html, url)) {
-    event = extractNextDataEvent(await fetchHtml(candidate));
+    const candidateHtml = await fetchHtml(candidate);
+    event = extractNextDataEvent(candidateHtml) || (candidateHtml ? await eventViaCheckout(candidateHtml, candidate) : null);
     if (event) return { event, shopUrl: candidate };
   }
   return null;

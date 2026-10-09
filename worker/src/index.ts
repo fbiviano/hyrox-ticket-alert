@@ -2414,10 +2414,15 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
   if (q.length < 2) {
     return jsonResponse({ results: [] });
   }
+  // Past events stay in event_directory (never deleted), so without this
+  // filter a finished race with the same title as its next season (two
+  // "BYD HYROX Bangkok" rows) is offered too - picking the dead one creates
+  // a watch the checks skip forever, which is how a subscriber waited on
+  // Bangkok and never heard anything.
   const { results } = await env.DB.prepare(
-    "SELECT url, title FROM event_directory WHERE title LIKE ? ORDER BY title LIMIT 8"
+    "SELECT url, title FROM event_directory WHERE title LIKE ? AND (event_date IS NULL OR event_date >= ?) ORDER BY title LIMIT 8"
   )
-    .bind(`%${q}%`)
+    .bind(`%${q}%`, todayIso())
     .all<any>();
   return jsonResponse({ results: results || [] });
 }
