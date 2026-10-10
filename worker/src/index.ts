@@ -1159,6 +1159,62 @@ async function sendVerificationNudges(env: Env): Promise<void> {
   }
 }
 
+/** Second and last chance, five days after signup, for anyone who ignored
+ * the one-day nudge above. Of the ten people who were still unconfirmed on
+ * 2026-10-09, eight had already had that nudge and not clicked - most were
+ * Outlook/Hotmail/iCloud addresses, where an unknown sender's first email
+ * often lands in junk - so this one says to check spam and spells out that
+ * no alerts go out until they confirm. Carries the one-click unsubscribe
+ * too, as the way out for a mistaken or typo'd signup. Claimed atomically
+ * before sending (see sendManualVerificationNotices) and capped at one per
+ * subscriber via final_nudge_sent_at. */
+async function sendFinalVerificationReminders(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM subscribers
+     WHERE verified = 0 AND nudge_sent_at IS NOT NULL AND final_nudge_sent_at IS NULL
+       AND created_at <= datetime('now', '-5 days')
+     LIMIT 25`
+  ).all<any>();
+
+  for (const s of results || []) {
+    const claim = await env.DB.prepare(
+      "UPDATE subscribers SET final_nudge_sent_at = datetime('now') WHERE id = ? AND final_nudge_sent_at IS NULL"
+    )
+      .bind(s.id)
+      .run();
+    if (!claim.meta.changes) continue;
+
+    const { results: races } = await env.DB.prepare(
+      `SELECT sw.event_title FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
+       WHERE w.subscriber_id = ? ORDER BY sw.event_title`
+    )
+      .bind(s.id)
+      .all<any>();
+    const { results: tickets } = await env.DB.prepare(
+      "SELECT DISTINCT event_name FROM subscriptions WHERE subscriber_id = ? ORDER BY event_name"
+    )
+      .bind(s.id)
+      .all<any>();
+    const watching = [...(races || []).map((r: any) => r.event_title), ...(tickets || []).map((t: any) => t.event_name)];
+
+    const link = `${env.SITE_URL}/verify?token=${s.verify_token}`;
+    const unsubLink = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
+    const listHtml = watching.length ? `<p>You asked to be alerted about: <b>${watching.map(escapeHtml).join(", ")}</b>.</p>` : "";
+    const listText = watching.length ? `You asked to be alerted about: ${watching.join(", ")}.\n\n` : "";
+    try {
+      await sendEmail(
+        env,
+        s.email,
+        "Last reminder: confirm to get your HYROX ticket alerts",
+        `<p>This is our last reminder. You signed up at roxracealerts.com for HYROX ticket alerts, but until you confirm your email we can't send you any - and a sale could open at any time.</p>${listHtml}<p><b>Click to confirm:</b> <a href="${link}">${link}</a></p><p>Can't find our earlier email? Check your spam or junk folder (Outlook, Hotmail and iCloud often put a first email from a new sender there) and mark it as not spam.</p><p><small>Didn't sign up, or changed your mind? <a href="${unsubLink}">Unsubscribe and delete my address</a>.</small></p>`,
+        `This is our last reminder. You signed up at roxracealerts.com for HYROX ticket alerts, but until you confirm your email we can't send you any - and a sale could open at any time.\n\n${listText}Confirm here: ${link}\n\nCan't find our earlier email? Check your spam or junk folder (Outlook, Hotmail and iCloud often put a first email from a new sender there) and mark it as not spam.\n\nDidn't sign up, or changed your mind? Unsubscribe and delete my address: ${unsubLink}`
+      );
+    } catch (e) {
+      console.error(`Failed to send final reminder to ${s.email}:`, e);
+    }
+  }
+}
+
 /** Tells a subscriber the admin activated their alerts by hand (verified = 1
  * with manually_verified_at set, e.g. people who signed up but never clicked
  * their confirmation link). They never saw a "you're confirmed" page, so
@@ -3193,6 +3249,7 @@ export default {
     } else if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
       ctx.waitUntil(sendVerificationNudges(env));
+      ctx.waitUntil(sendFinalVerificationReminders(env));
       ctx.waitUntil(sendDailyIgPostReminder(env));
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));

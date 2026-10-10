@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS subscribers (
   -- unsubscribe (sendManualVerificationNotices() in src/index.ts) and stamps
   -- manual_verify_email_sent_at.
   manually_verified_at TEXT,
-  manual_verify_email_sent_at TEXT
+  manual_verify_email_sent_at TEXT,
+  -- Set when the one "last reminder" (5 days after signup, for anyone who
+  -- ignored the nudge) has gone out - see sendFinalVerificationReminders().
+  final_nudge_sent_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
