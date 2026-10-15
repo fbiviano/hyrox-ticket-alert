@@ -232,6 +232,8 @@ CREATE TABLE IF NOT EXISTS sponsors (
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'gym',
   tagline TEXT,
+  -- Shown on the tile above the pitch, e.g. 'Zurich, Switzerland'.
+  location TEXT,
   url TEXT NOT NULL,
   logo_url TEXT,
   active INTEGER NOT NULL DEFAULT 1,

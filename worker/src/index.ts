@@ -331,6 +331,7 @@ body.wide{max-width:980px}
 .rail-tile img,.rail-tile .sp-ico{width:44px;height:44px;border-radius:10px;object-fit:contain}
 .rail-cta{background:#fff;border:2px dashed #d6d6d6}
 .rail-tile .rail-spots{color:#999}
+.sp-loc{font-weight:600;color:#9a6700 !important}
 .rail-badge{align-self:flex-end;font-size:0.62rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#777;background:rgba(255,255,255,0.75);border:1px solid #ddd;border-radius:10px;padding:1px 7px}
 .sp-body b .rail-badge{margin-left:4px;vertical-align:middle}
 @media (min-width:1420px){.rail{display:flex;flex-direction:column;gap:12px;position:fixed;top:24px;width:170px;max-height:calc(100vh - 48px);overflow-y:auto;z-index:5}.rail-left{left:calc((100vw - 1020px)/2 - 185px)}#sponsorsCard{display:none}}
@@ -1078,7 +1079,7 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
     const all =
       (
         await env.DB.prepare(
-          "SELECT id, name, kind, tagline, logo_url, is_example FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
+          "SELECT id, name, kind, tagline, location, logo_url, is_example FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
         )
           .bind(SPONSOR_SLOTS + 4)
           .all<any>()
@@ -1111,7 +1112,8 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
     s.logo_url && /^(https:\/\/|\/partner-logo\/\d+$)/i.test(s.logo_url)
       ? `<img src="${escapeHtml(s.logo_url)}" alt="" loading="lazy">`
       : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
-  const tagline = (s: any) => (s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : "");
+  const tagline = (s: any) =>
+    (s.location ? `<small class="sp-loc">${escapeHtml(s.location)}</small>` : "") + (s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : "");
 
   // One column, left margin only: samples first, then real partners, then the offer.
   const ordered = [...examples, ...results];
@@ -1432,10 +1434,10 @@ async function handlePartnersDecide(req: Request, env: Env): Promise<Response> {
 
   if (a.status === "pending" && (action === "live" || action === "pay")) {
     const created = await env.DB.prepare(
-      `INSERT INTO sponsors (name, kind, tagline, url, logo_url, active, sort_order)
-       VALUES (?, ?, ?, ?, NULL, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sponsors))`
+      `INSERT INTO sponsors (name, kind, tagline, location, url, logo_url, active, sort_order)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sponsors))`
     )
-      .bind(a.name, a.kind === "brand" ? "brand" : "gym", a.tagline, a.link, action === "live" ? 1 : 0)
+      .bind(a.name, a.kind === "brand" ? "brand" : "gym", a.tagline, a.location, a.link, action === "live" ? 1 : 0)
       .run();
     const sponsorId = created.meta.last_row_id;
     if (a.logo_b64) await env.DB.prepare("UPDATE sponsors SET logo_url = ? WHERE id = ?").bind(`/partner-logo/${sponsorId}`, sponsorId).run();
