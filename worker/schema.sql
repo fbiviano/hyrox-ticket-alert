@@ -250,6 +250,29 @@ CREATE TABLE IF NOT EXISTS sponsor_stats (
   PRIMARY KEY (sponsor_id, day)
 );
 
+-- Applications for a homepage partner tile (POST /partners), logo included
+-- as base64 (validated PNG/JPEG/WebP, max 256 KB). status: pending ->
+-- approved (a sponsors row exists: live, or inactive until payment is
+-- confirmed) or rejected. The logo is only ever served for a live tile
+-- (/partner-logo/<sponsor id>); the admin reviews it inline on
+-- /admin/partners. Rejecting or removing deletes the sponsors row.
+CREATE TABLE IF NOT EXISTS partner_applications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'gym',
+  link TEXT NOT NULL,
+  tagline TEXT,
+  location TEXT,
+  email TEXT NOT NULL,
+  message TEXT,
+  logo_type TEXT,
+  logo_b64 TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  sponsor_id INTEGER REFERENCES sponsors(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_partner_applications_status ON partner_applications(status);
+
 -- One row per outgoing email attempt (written by sendEmail() in
 -- src/index.ts), so "did this person actually get the alert?" can be
 -- answered after the fact from /admin/analytics. ok = 1 means Resend

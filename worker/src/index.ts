@@ -1100,7 +1100,7 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
   const spotsLeft = Math.max(0, SPONSOR_SLOTS - results.length);
   const spotsText = `${spotsLeft} of ${SPONSOR_SLOTS} spots left`;
   const icon = (s: any) =>
-    s.logo_url && /^https:\/\//i.test(s.logo_url)
+    s.logo_url && /^(https:\/\/|\/partner-logo\/\d+$)/i.test(s.logo_url)
       ? `<img src="${escapeHtml(s.logo_url)}" alt="" loading="lazy">`
       : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
   const tagline = (s: any) => (s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : "");
@@ -1128,14 +1128,61 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
   return { card, rails };
 }
 
+/** Stripe Payment Link for a partner spot (buy.stripe.com/...). Empty until
+ * one exists - the "approved, please pay" email then says payment details
+ * follow by email instead of linking to it. Not a secret. */
+const PARTNER_PAYMENT_URL = "";
+const PARTNER_MAX_LOGO_BYTES = 256 * 1024;
+const PARTNER_KINDS: Record<string, string> = { gym: "Gym or training club", brand: "Brand or business", coach: "Coach or creator" };
+
+/** Image type from the file's own first bytes, never from the filename or the
+ * browser-supplied type. SVG is deliberately not accepted: it can carry
+ * script, and these logos are served from our own domain. */
+function detectImageType(b: Uint8Array): string | null {
+  if (b.length < 12) return null;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return "image/webp";
+  return null;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** "@yourgym" -> its Instagram page; a bare domain gets https://; anything
+ * that isn't https with a real-looking host is refused (no javascript:,
+ * no http:). The result is what the tile will link to. */
+function normalizePartnerLink(raw: string): string | null {
+  let v = raw.trim();
+  if (v.startsWith("@")) {
+    const handle = v.slice(1).replace(/[^A-Za-z0-9._]/g, "");
+    if (!handle) return null;
+    v = `https://www.instagram.com/${handle}/`;
+  } else {
+    v = v.replace(/^http:\/\//i, "https://");
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(v)) v = `https://${v}`;
+  }
+  try {
+    const u = new URL(v);
+    return u.protocol === "https:" && u.hostname.includes(".") ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The page every "your gym here" tile points to - also the link to send gym
  * owners and brands directly. No price on it on purpose (not decided yet):
- * it explains the placement and collects a request, which lands in the
- * feedback inbox and pings the admin, same as feedback does. */
-async function handlePartnersPage(req: Request, env: Env): Promise<Response> {
-  const subscriber = await getSessionSubscriber(req, env);
+ * it explains the placement and takes an application, logo included.
+ * Applications are reviewed before anything is shown or charged. */
+function partnersPageResponse(subscriber: any, env: Env, error = "", v: Record<string, string> = {}, status = 200): Response {
   const fieldStyle = "width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px;font-family:inherit";
-  return page(
+  const kindOptions = Object.entries(PARTNER_KINDS)
+    .map(([k, label]) => `<option value="${k}"${v.kind === k ? " selected" : ""}>${label}</option>`)
+    .join("");
+  const r = page(
     "Partner with RoxRaceAlerts",
     `${navBar("/", subscriber, 0, !subscriber, env)}
     <div class="card">
@@ -1145,87 +1192,265 @@ async function handlePartnersPage(req: Request, env: Env): Promise<Response> {
       <ul>
         <li>Your logo, name and a one-line pitch on the homepage: in the side columns on desktop, in the sidebar on mobile</li>
         <li>A link to your website or Instagram</li>
-        <li>A monthly report of how many people saw and clicked your tile</li>
+        <li>On request, how many people saw and clicked your tile</li>
       </ul>
-      <p class="hint">For HYROX gyms and training clubs, coaches, and brands for hybrid athletes. There are ${SPONSOR_SLOTS} spots in total.</p>
+      <p class="hint">For HYROX gyms and training clubs, coaches, and brands for hybrid athletes. There are ${SPONSOR_SLOTS} spots in total. Every application is reviewed before anything is shown or charged.</p>
     </div>
     <div class="card">
-      <h2>Request a spot</h2>
-      <form method="POST" action="/partners">
+      <h2>Apply for a spot</h2>
+      ${error ? `<p style="color:#b00"><b>${escapeHtml(error)}</b></p>` : ""}
+      <form method="POST" action="/partners" enctype="multipart/form-data">
         <label>Gym or brand name
-          <input type="text" name="name" required maxlength="100">
+          <input type="text" name="name" required maxlength="60" value="${escapeHtml(v.name || "")}">
+        </label>
+        <label>We are a
+          <select name="kind" style="${fieldStyle}">${kindOptions}</select>
         </label>
         <label>Website or Instagram
-          <input type="text" name="link" required maxlength="300" placeholder="https://... or @yourgym">
+          <input type="text" name="link" required maxlength="300" placeholder="https://... or @yourgym" value="${escapeHtml(v.link || "")}">
+        </label>
+        <label>One-line pitch shown on your tile (optional, max 80 characters)
+          <input type="text" name="tagline" maxlength="80" placeholder="e.g. HYROX prep and team training in Zurich" value="${escapeHtml(v.tagline || "")}">
         </label>
         <label>City and country (optional)
-          <input type="text" name="location" maxlength="100">
+          <input type="text" name="location" maxlength="100" value="${escapeHtml(v.location || "")}">
+        </label>
+        <label>Logo (optional - PNG, JPG or WebP, under 250 KB, square works best)
+          <input type="file" name="logo" accept="image/png,image/jpeg,image/webp">
         </label>
         <label>Your email
-          <input type="email" name="email" required maxlength="200" placeholder="you@example.com">
+          <input type="email" name="email" required maxlength="200" placeholder="you@example.com" value="${escapeHtml(v.email || "")}">
         </label>
         <label>Anything else (optional)
-          <textarea name="message" rows="3" maxlength="1000" style="${fieldStyle}"></textarea>
+          <textarea name="message" rows="3" maxlength="1000" style="${fieldStyle}">${escapeHtml(v.message || "")}</textarea>
         </label>
         <div style="position:absolute;left:-9999px" aria-hidden="true"><label>Leave this empty <input type="text" name="company_site" tabindex="-1" autocomplete="off"></label></div>
-        <p class="consent">We'll only use your email to reply about a partner spot.</p>
-        <button type="submit">Request a spot</button>
+        <p class="consent">We'll only use your email to reply about your application.</p>
+        <button type="submit">Apply for a spot</button>
       </form>
     </div>`
   );
+  return status === 200 ? r : new Response(r.body, { status, headers: r.headers });
 }
 
-/** Stores a partner request in the feedback inbox (prefixed so it stands out
- * on /admin/feedback) and emails + Telegrams the admin. The hidden
- * company_site field is a honeypot: the public feedback form already draws
- * spam bots, and they fill in every field - a filled one gets the normal
- * thank-you page but nothing is stored or sent. */
+async function handlePartnersPage(req: Request, env: Env): Promise<Response> {
+  return partnersPageResponse(await getSessionSubscriber(req, env), env);
+}
+
+/** Stores an application (logo included, validated by its bytes) as
+ * 'pending' and pings the admin by email + Telegram with the review link.
+ * Nothing is public until the admin approves it, and the applicant is never
+ * emailed from here - so this form can't be used to send mail to a stranger.
+ * The hidden company_site field is a honeypot (the public feedback form
+ * already draws spam bots): a filled one gets the normal thank-you page but
+ * nothing is stored or sent. A daily cap bounds how much junk can pile up. */
 async function handlePartnersRequest(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
-  const clip = (v: unknown, n: number) => String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+  const clip = (x: unknown, n: number) => String(x ?? "").replace(/\s+/g, " ").trim().slice(0, n);
   const thanks = (email: string) =>
     page(
       "Thanks",
-      `<div class="card"><p>Thanks - we've got your request${email ? ` and will reply to <b>${escapeHtml(email)}</b>` : ""}.</p><p><a href="/">Back to RoxRaceAlerts</a></p></div>`
+      `<div class="card"><p>Thanks - we've got your application${email ? ` and will reply to <b>${escapeHtml(email)}</b>` : ""}.</p><p><a href="/">Back to RoxRaceAlerts</a></p></div>`
     );
   if (clip(form.get("company_site"), 200)) return thanks("");
 
-  const name = clip(form.get("name"), 100);
-  const link = clip(form.get("link"), 300);
-  const location = clip(form.get("location"), 100);
-  const email = clip(form.get("email"), 200).toLowerCase();
-  const message = String(form.get("message") || "").trim().slice(0, 1000);
-  if (!name || !link || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return page(
-      "Request a spot",
-      `<div class="card"><p>Please fill in your gym or brand name, a link and a valid email. <a href="/partners">Go back</a></p></div>`
-    );
+  const v = {
+    name: clip(form.get("name"), 60),
+    kind: clip(form.get("kind"), 10),
+    link: clip(form.get("link"), 300),
+    tagline: clip(form.get("tagline"), 80),
+    location: clip(form.get("location"), 100),
+    email: clip(form.get("email"), 200).toLowerCase(),
+    message: String(form.get("message") ?? "").trim().slice(0, 1000),
+  };
+  const subscriber = await getSessionSubscriber(req, env);
+  const fail = (msg: string) => partnersPageResponse(subscriber, env, msg, v, 400);
+
+  const link = normalizePartnerLink(v.link);
+  if (!v.name) return fail("Please enter your gym or brand name.");
+  if (!link) return fail("Please enter a website (https://...) or an Instagram handle (@yourgym).");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.email)) return fail("Please enter a valid email address.");
+  if (!PARTNER_KINDS[v.kind]) v.kind = "gym";
+
+  let logoType: string | null = null;
+  let logoB64: string | null = null;
+  // The runtime hands back a File for a file input; the bundled type for
+  // FormData.get only says string, hence the cast.
+  const file = form.get("logo") as unknown as File | string | null;
+  if (file && typeof file !== "string" && file.size > 0) {
+    if (file.size > PARTNER_MAX_LOGO_BYTES) return fail("That logo is too large - please use an image under 250 KB.");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    logoType = detectImageType(bytes);
+    if (!logoType) return fail("The logo must be a PNG, JPG or WebP image.");
+    logoB64 = bytesToBase64(bytes);
   }
 
-  const text = `[Partner request] ${name}\nLink: ${link}${location ? `\nLocation: ${location}` : ""}${message ? `\n\n${message}` : ""}`;
-  await env.DB.prepare("INSERT INTO feedback (message, email) VALUES (?, ?)").bind(text, email).run();
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS n FROM partner_applications WHERE created_at >= datetime('now', '-1 day')").first<any>();
+  if ((recent?.n || 0) >= 30) return fail("We're receiving a lot of applications right now - please try again tomorrow.");
+
+  await env.DB.prepare(
+    `INSERT INTO partner_applications (name, kind, link, tagline, location, email, message, logo_type, logo_b64)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(v.name, v.kind, link, v.tagline || null, v.location || null, v.email, v.message || null, logoType, logoB64)
+    .run();
 
   if (env.ADMIN_EMAIL) {
     try {
+      const review = `${env.SITE_URL}/admin/partners?token=${encodeURIComponent(env.WEBHOOK_SECRET)}`;
+      const summary = `${v.name} (${PARTNER_KINDS[v.kind]})\n${link}${v.location ? `\n${v.location}` : ""}${v.tagline ? `\n"${v.tagline}"` : ""}${logoType ? "\nlogo attached" : "\nno logo"}\nFrom: ${v.email}`;
       await sendEmail(
         env,
         env.ADMIN_EMAIL,
-        `Partner request: ${name}`,
-        `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p><p>From: ${escapeHtml(email)}</p>`,
-        `${text}\n\nFrom: ${email}`
+        `Partner application: ${v.name}`,
+        `<p>${escapeHtml(summary).replace(/\n/g, "<br>")}</p>${v.message ? `<p>${escapeHtml(v.message).replace(/\n/g, "<br>")}</p>` : ""}<p><a href="${review}">Review applications</a></p>`,
+        `${summary}${v.message ? `\n\n${v.message}` : ""}\n\nReview: ${review}`
       );
-      await notifyAdminTelegram(env, env.ADMIN_EMAIL, `🤝 Partner request: ${name}\n${link}${location ? `\n${location}` : ""}\nFrom: ${email}`);
+      await notifyAdminTelegram(env, env.ADMIN_EMAIL, `🤝 Partner application: ${summary}\n${review}`);
     } catch (e) {
-      console.error("Failed to notify admin of partner request:", e);
+      console.error("Failed to notify admin of partner application:", e);
     }
   }
-  return thanks(email);
+  return thanks(v.email);
+}
+
+/** An approved partner's logo, served from our own domain. Only for tiles
+ * that are live - a pending or rejected upload is never publicly reachable,
+ * so this can't be used as a free image host. Type comes from the bytes
+ * checked at upload; nosniff + a locked-down CSP keep it inert. */
+async function handlePartnerLogo(env: Env, sponsorId: number): Promise<Response> {
+  const row = await env.DB.prepare(
+    `SELECT a.logo_type, a.logo_b64 FROM partner_applications a JOIN sponsors s ON s.id = a.sponsor_id
+     WHERE s.id = ? AND s.active = 1 AND a.logo_b64 IS NOT NULL`
+  )
+    .bind(sponsorId)
+    .first<any>();
+  if (!row) return new Response("Not found", { status: 404 });
+  return new Response(base64ToBytes(row.logo_b64), {
+    headers: {
+      "content-type": row.logo_type,
+      "cache-control": "public, max-age=3600",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'",
+    },
+  });
+}
+
+/** Review queue: applications waiting for a decision, and approved ones
+ * waiting for payment. Approve-then-pay on purpose - a logo or pitch can be
+ * refused before anyone has been charged. Logos here are inlined as data:
+ * URIs, so pending uploads are visible to the admin only. */
+async function handlePartnersAdminPage(req: Request, env: Env): Promise<Response> {
+  const token = new URL(req.url).searchParams.get("token") || "";
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const { results } = await env.DB.prepare(
+    `SELECT a.*, s.active AS sponsor_active FROM partner_applications a LEFT JOIN sponsors s ON s.id = a.sponsor_id
+     WHERE a.status = 'pending' OR (a.status = 'approved' AND s.active = 0)
+     ORDER BY a.status = 'pending' DESC, a.id DESC LIMIT 50`
+  ).all<any>();
+
+  const btn = (id: number, action: string, label: string, extra = "") =>
+    `<button type="submit" name="action" value="${action}" style="margin-top:8px;margin-right:6px;${extra}">${label}</button>`;
+  const rows = (results || [])
+    .map((a: any) => {
+      const pending = a.status === "pending";
+      const logo = a.logo_b64
+        ? `<img src="data:${escapeHtml(a.logo_type)};base64,${a.logo_b64}" alt="" style="width:56px;height:56px;object-fit:contain;border:1px solid #eee;border-radius:8px;float:right;margin-left:12px">`
+        : "";
+      return `<div class="card">
+        ${logo}
+        <p><b>${escapeHtml(a.name)}</b> <small>${escapeHtml(PARTNER_KINDS[a.kind] || a.kind)} &middot; ${pending ? "waiting for review" : "approved, waiting for payment"} &middot; ${escapeHtml(a.created_at)}</small></p>
+        <p><a href="${escapeHtml(a.link)}" target="_blank" rel="noopener">${escapeHtml(a.link)}</a>${a.location ? `<br><small>${escapeHtml(a.location)}</small>` : ""}${a.tagline ? `<br>"${escapeHtml(a.tagline)}"` : ""}<br><small>${escapeHtml(a.email)}</small></p>
+        ${a.message ? `<p><small>${escapeHtml(a.message).replace(/\n/g, "<br>")}</small></p>` : ""}
+        <form method="POST" action="/admin/partners/decide" style="clear:both">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="id" value="${a.id}">
+          ${
+            pending
+              ? btn(a.id, "live", "Approve &amp; go live (free spot)") + btn(a.id, "pay", "Approve &amp; ask for payment") + btn(a.id, "reject", "Reject", "background:#fff;color:#b00;border:1px solid #e2b3b3")
+              : btn(a.id, "activate", "Payment received - go live") + btn(a.id, "reject", "Remove", "background:#fff;color:#b00;border:1px solid #e2b3b3")
+          }
+        </form>
+      </div>`;
+    })
+    .join("");
+
+  return page(
+    "Partner applications",
+    `${adminNav(token, "partners")}${rows || `<div class="card"><p>No applications waiting.</p></div>`}`,
+    { "cache-control": "private, no-store" }
+  );
+}
+
+async function sendPartnerEmail(env: Env, to: string, subject: string, html: string, text: string): Promise<void> {
+  try {
+    await sendEmail(env, to, subject, html, text);
+  } catch (e) {
+    // Logged in email_log too; the decision itself has already been saved.
+    console.error(`Failed to email partner ${to}:`, e);
+  }
+}
+
+async function handlePartnersDecide(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+  const id = Number(String(form.get("id") || ""));
+  const action = String(form.get("action") || "");
+  const back = Response.redirect(`${env.SITE_URL}/admin/partners?token=${encodeURIComponent(token)}`, 303);
+
+  const a = await env.DB.prepare("SELECT * FROM partner_applications WHERE id = ?").bind(id).first<any>();
+  if (!a) return back;
+
+  const liveEmail = () =>
+    sendPartnerEmail(
+      env,
+      a.email,
+      `${a.name} is now on RoxRaceAlerts`,
+      `<p>Your tile for <b>${escapeHtml(a.name)}</b> is live on <a href="${env.SITE_URL}">${env.SITE_URL}</a> - in the side columns on desktop and in the sidebar on mobile.</p><p>Want to know how many people saw and clicked it? Just reply and ask.</p>`,
+      `Your tile for ${a.name} is live on ${env.SITE_URL} - in the side columns on desktop and in the sidebar on mobile.\n\nWant to know how many people saw and clicked it? Just reply and ask.`
+    );
+
+  if (a.status === "pending" && (action === "live" || action === "pay")) {
+    const created = await env.DB.prepare(
+      `INSERT INTO sponsors (name, kind, tagline, url, logo_url, active, sort_order)
+       VALUES (?, ?, ?, ?, NULL, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sponsors))`
+    )
+      .bind(a.name, a.kind === "brand" ? "brand" : "gym", a.tagline, a.link, action === "live" ? 1 : 0)
+      .run();
+    const sponsorId = created.meta.last_row_id;
+    if (a.logo_b64) await env.DB.prepare("UPDATE sponsors SET logo_url = ? WHERE id = ?").bind(`/partner-logo/${sponsorId}`, sponsorId).run();
+    await env.DB.prepare("UPDATE partner_applications SET status = 'approved', sponsor_id = ? WHERE id = ?").bind(sponsorId, id).run();
+
+    if (action === "live") {
+      await liveEmail();
+    } else {
+      const pay = PARTNER_PAYMENT_URL
+        ? { html: `<p>To reserve your spot: <a href="${PARTNER_PAYMENT_URL}">${PARTNER_PAYMENT_URL}</a></p>`, text: `To reserve your spot: ${PARTNER_PAYMENT_URL}` }
+        : { html: `<p>We'll send you the payment details shortly.</p>`, text: `We'll send you the payment details shortly.` };
+      await sendPartnerEmail(
+        env,
+        a.email,
+        `Your RoxRaceAlerts partner spot: ${a.name}`,
+        `<p>Thanks for applying - we'd like to feature <b>${escapeHtml(a.name)}</b> on RoxRaceAlerts.</p>${pay.html}<p>Your tile goes live as soon as payment is confirmed (we switch it on by hand, usually within a day).</p>`,
+        `Thanks for applying - we'd like to feature ${a.name} on RoxRaceAlerts.\n\n${pay.text}\n\nYour tile goes live as soon as payment is confirmed (we switch it on by hand, usually within a day).`
+      );
+    }
+  } else if (a.status === "approved" && action === "activate" && a.sponsor_id) {
+    await env.DB.prepare("UPDATE sponsors SET active = 1 WHERE id = ?").bind(a.sponsor_id).run();
+    await liveEmail();
+  } else if (action === "reject") {
+    if (a.sponsor_id) await env.DB.prepare("DELETE FROM sponsors WHERE id = ?").bind(a.sponsor_id).run();
+    await env.DB.prepare("UPDATE partner_applications SET status = 'rejected', sponsor_id = NULL WHERE id = ?").bind(id).run();
+  }
+  return back;
 }
 
 /** Click-through for a sponsor tile: count the click, then 302 to the stored
  * https URL. The destination only ever comes from the sponsors table (set by
- * the admin), never from the request, so this can't be used as an open
- * redirect. */
+ * the admin or an approved application), never from the request, so this
+ * can't be used as an open redirect. */
 async function handleSponsorOut(req: Request, env: Env, id: number): Promise<Response> {
   const s = await env.DB.prepare("SELECT url FROM sponsors WHERE id = ? AND active = 1").bind(id).first<any>();
   if (!s || !/^https:\/\//i.test(s.url)) return new Response("Not found", { status: 404 });
@@ -3006,12 +3231,12 @@ async function handleFeedbackDismiss(req: Request, env: Env): Promise<Response> 
  * goes straight to /admin/subscribers, so /admin/feedback and
  * /admin/ig-posts were invisible unless you already knew the URL. This bar
  * fixes that by linking all three from wherever you land. */
-type AdminPage = "subscribers" | "analytics" | "feedback" | "ig-posts";
+type AdminPage = "subscribers" | "analytics" | "partners" | "feedback" | "ig-posts";
 function adminNav(token: string, current: AdminPage): string {
   const t = encodeURIComponent(token);
   const link = (page: AdminPage, label: string) =>
     page === current ? `<b>${label}</b>` : `<a href="/admin/${page}?token=${t}">${label}</a>`;
-  return `<p><small><a href="/">Home</a> &middot; ${link("subscribers", "Subscribers")} &middot; ${link("analytics", "Analytics")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
+  return `<p><small><a href="/">Home</a> &middot; ${link("subscribers", "Subscribers")} &middot; ${link("analytics", "Analytics")} &middot; ${link("partners", "Partners")} &middot; ${link("feedback", "Feedback")} &middot; ${link("ig-posts", "IG Posts")}</small></p>`;
 }
 
 /** Private, read-only list of everyone registered - who Resend itself has
@@ -3475,6 +3700,10 @@ export default {
       if (url.pathname === "/feedback" && req.method === "GET") return await handleFeedbackPage(req, env);
       if (url.pathname === "/partners" && req.method === "GET") return await handlePartnersPage(req, env);
       if (url.pathname === "/partners" && req.method === "POST") return await handlePartnersRequest(req, env);
+      const logoMatch = url.pathname.match(/^\/partner-logo\/(\d{1,9})$/);
+      if (logoMatch && req.method === "GET") return await handlePartnerLogo(env, Number(logoMatch[1]));
+      if (url.pathname === "/admin/partners" && req.method === "GET") return await handlePartnersAdminPage(req, env);
+      if (url.pathname === "/admin/partners/decide" && req.method === "POST") return await handlePartnersDecide(req, env);
       if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
       if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
       if (url.pathname === "/admin/subscribers" && req.method === "GET") return await handleSubscribersAdminPage(req, env);
