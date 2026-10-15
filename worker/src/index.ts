@@ -952,10 +952,10 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
   };
 }
 
-async function handleSignupPage(req: Request, env: Env): Promise<Response> {
+async function handleSignupPage(req: Request, env: Env, previewPartners = false): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
-  const { card: sponsorsCard, rails: sponsorRails } = await renderSponsors(req, env);
+  const { card: sponsorsCard, rails: sponsorRails } = await renderSponsors(req, env, previewPartners);
 
   const searchBox = `<div class="row">
       <div class="urlWrap">
@@ -1072,7 +1072,7 @@ const RAIL_PASTELS = ["#e9fbf0", "#fdeff6", "#fff5e6", "#f3ecff", "#eaf4ff"];
  * while spots are free, so the offer is visible before anyone has signed up.
  * Real tiles link through /out/<id> to count clicks; rendering counts one
  * view per tile for the day (bots excluded) - the evidence a partner gets. */
-async function renderSponsors(req: Request, env: Env): Promise<{ card: string; rails: string }> {
+async function renderSponsors(req: Request, env: Env, preview = false): Promise<{ card: string; rails: string }> {
   let results: any[] = []; // real tiles: these count against the 10 spots
   let examples: any[] = []; // clearly-labelled sample tiles: placeholders, never counted
   try {
@@ -1087,7 +1087,7 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
     results = all.filter((s: any) => !s.is_example).slice(0, SPONSOR_SLOTS);
     // Samples fill the column only until real tiles take over, and their
     // views/clicks are not tracked - nobody is paying for them.
-    examples = results.length < SPONSOR_SLOTS / 2 ? all.filter((s: any) => s.is_example).slice(0, 3) : [];
+    examples = preview || results.length < SPONSOR_SLOTS / 2 ? all.filter((s: any) => s.is_example).slice(0, 3) : [];
     if (results.length && !isBot(req)) {
       const day = dayKey();
       await env.DB.batch(
@@ -1120,19 +1120,22 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
   const railTile = (s: any, i: number) => {
     const bg = RAIL_PASTELS[i % RAIL_PASTELS.length];
     return s.is_example
-      ? `<a class="rail-tile" style="background:${bg}" href="/partners"><span class="rail-badge">Example</span>${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`
+      ? `<a class="rail-tile" style="background:${bg}" href="${preview ? "#" : "/partners"}">${preview ? "" : '<span class="rail-badge">Example</span>'}${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`
       : `<a class="rail-tile" style="background:${bg}" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`;
   };
   const railCta = spotsLeft
     ? `<a class="rail-tile rail-cta" href="/partners"><span class="sp-ico">+</span><b>Your gym here</b><small>Make your gym known to HYROX athletes worldwide</small><small class="rail-spots">${spotsText}</small></a>`
     : "";
-  const rails = `<div class="rail rail-left">${ordered.map(railTile).join("")}${railCta}</div>`;
+  const previewNote = preview
+    ? `<div style="position:fixed;top:8px;right:8px;z-index:20;background:#111;color:#fff;font-size:12px;padding:4px 12px;border-radius:12px">Private preview - visitors don't see this</div>`
+    : "";
+  const rails = `<div class="rail rail-left">${ordered.map(railTile).join("")}${railCta}</div>${previewNote}`;
 
   // Narrow screens: the same list as a sidebar card.
   const cardTiles = ordered
     .map((s: any) =>
       s.is_example
-        ? `<a class="sponsor" href="/partners">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)} <span class="rail-badge">Example</span></b>${tagline(s)}</span></a>`
+        ? `<a class="sponsor" href="${preview ? "#" : "/partners"}">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)}${preview ? "" : ' <span class="rail-badge">Example</span>'}</b>${tagline(s)}</span></a>`
         : `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${tagline(s)}</span></a>`
     )
     .join("");
@@ -1398,7 +1401,7 @@ async function handlePartnersAdminPage(req: Request, env: Env): Promise<Response
 
   return page(
     "Partner applications",
-    `${adminNav(token, "partners")}${rows || `<div class="card"><p>No applications waiting.</p></div>`}`,
+    `${adminNav(token, "partners")}<p><small><a href="/admin/partners/preview?token=${encodeURIComponent(token)}" target="_blank">Preview the tile column with sample partners, no labels (only you can see it)</a></small></p>${rows || `<div class="card"><p>No applications waiting.</p></div>`}`,
     { "cache-control": "private, no-store" }
   );
 }
@@ -3724,6 +3727,15 @@ export default {
       const logoMatch = url.pathname.match(/^\/partner-logo\/(\d{1,9})$/);
       if (logoMatch && req.method === "GET") return await handlePartnerLogo(env, Number(logoMatch[1]));
       if (url.pathname === "/admin/partners" && req.method === "GET") return await handlePartnersAdminPage(req, env);
+      if (url.pathname === "/admin/partners/preview" && req.method === "GET") {
+        // Same homepage with the sample tiles shown without their "Example" label,
+        // for the admin to see how real partners will look. Token-gated, no-store,
+        // noindex - visitors never get this version.
+        if ((url.searchParams.get("token") || "") !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+        const r = await handleSignupPage(req, env, true);
+        r.headers.set("X-Robots-Tag", "noindex");
+        return r;
+      }
       if (url.pathname === "/admin/partners/decide" && req.method === "POST") return await handlePartnersDecide(req, env);
       if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
       if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
