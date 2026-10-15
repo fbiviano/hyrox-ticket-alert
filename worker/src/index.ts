@@ -1349,7 +1349,7 @@ async function handlePartnerLogo(env: Env, sponsorId: number): Promise<Response>
   return new Response(base64ToBytes(row.logo_b64), {
     headers: {
       "content-type": row.logo_type,
-      "cache-control": "public, max-age=3600",
+      "cache-control": "public, max-age=300",
       "X-Content-Type-Options": "nosniff",
       "Content-Security-Policy": "default-src 'none'",
     },
