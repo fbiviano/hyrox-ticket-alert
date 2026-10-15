@@ -19,26 +19,8 @@ CREATE TABLE IF NOT EXISTS subscribers (
   manual_verify_email_sent_at TEXT,
   -- Set when the one "last reminder" (5 days after signup, for anyone who
   -- ignored the nudge) has gone out - see sendFinalVerificationReminders().
-  final_nudge_sent_at TEXT,
-  -- First-touch attribution: the gyms.slug of the co-branded page (/g/<slug>)
-  -- they were on when the subscriber record was created. NULL for everyone
-  -- who signed up on the plain homepage. Set once, never reassigned.
-  gym_slug TEXT
+  final_nudge_sent_at TEXT
 );
-
--- Gyms with their own co-branded share page at /g/<slug> (same signup page
--- with the gym's name and optional https logo on top). stats_key is the
--- secret in the gym's stats link (/g/<slug>/stats?key=...), which shows the
--- owner their share link, a paste-ready group-chat message and signup
--- totals - counts only, never who signed up. Added by the admin with SQL.
-CREATE TABLE IF NOT EXISTS gyms (
-  slug TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  logo_url TEXT,
-  stats_key TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_subscribers_gym ON subscribers(gym_slug);
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -228,13 +228,12 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
   return sent;
 }
 
-function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false, headExtra = ""): Response {
+function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false): Response {
   return new Response(
     `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>${escapeHtml(title)}</title>
-${headExtra}
 <style>
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#1a1a1a;background:#fafafa}
 h1{font-size:1.5rem}
@@ -315,9 +314,6 @@ body.wide{max-width:980px}
 .hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
-.gym-banner{display:flex;gap:14px;align-items:center;border-left:4px solid #ff6a00;margin-top:0}
-.gym-banner img{width:52px;height:52px;object-fit:contain;border-radius:8px;flex-shrink:0}
-.gym-banner p{margin:0}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
@@ -410,8 +406,6 @@ const RESOLVE_SCRIPT = `<script>
   var browseDetails = document.getElementById('browseEvents');
   var submitBtn = document.querySelector('.submit-step');
   var signedIn = !!document.getElementById('navSignedIn');
-  var gymEl = document.getElementById('gymCtx');
-  var gym = gymEl ? gymEl.getAttribute('data-gym') : '';
   function updateClearX() {
     if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
   }
@@ -465,7 +459,6 @@ const RESOLVE_SCRIPT = `<script>
               fd.set('event_title', data.event_title);
               fd.set('event_date', data.event_date || '');
               if (email) fd.set('email', email);
-              if (gym) fd.set('gym', gym);
               var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
               if (subResp.redirected) {
                 // Already-verified subscriber - server set the session
@@ -584,7 +577,6 @@ const RESOLVE_SCRIPT = `<script>
       fd.set('event_url', url);
       fd.set('event_title', title);
       fd.set('event_date', date || '');
-      if (gym) fd.set('gym', gym);
       fetch('/watch-sale', { method: 'POST', body: fd }).then(function(resp) {
         if (resp.ok) {
           btn.textContent = '✓ Monitoring';
@@ -939,7 +931,7 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
   };
 }
 
-async function handleSignupPage(req: Request, env: Env, gym: any = null): Promise<Response> {
+async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
 
@@ -963,25 +955,6 @@ async function handleSignupPage(req: Request, env: Env, gym: any = null): Promis
     <p class="hero-sub">Free alerts for the races you pick: pre-sales, public sales going live, and tickets becoming available again for sold-out races. Any HYROX race, worldwide.</p>
   </div>`;
 
-  // Co-branded gym page (/g/<slug>): the same signup page with the gym's name
-  // (and logo, if it has an https one) on top, the gym carried through the
-  // signup via a hidden field / #gymCtx so new subscribers are attributed to
-  // it, and kept out of search results - it's a share link, not content.
-  const gymTitle = gym ? `${gym.name} x RoxRaceAlerts - free HYROX ticket alerts` : "";
-  const gymDesc = gym
-    ? `Get an email the moment HYROX tickets open (or come back after selling out) for any race. Free alerts for ${gym.name} members.`
-    : "";
-  const gymHead = gym
-    ? `<meta name="description" content="${escapeHtml(gymDesc)}"><meta property="og:title" content="${escapeHtml(gymTitle)}"><meta property="og:description" content="${escapeHtml(gymDesc)}"><meta property="og:type" content="website"><meta property="og:site_name" content="RoxRaceAlerts">`
-    : "";
-  const gymHeaders: Record<string, string> = gym ? { "X-Robots-Tag": "noindex" } : {};
-  const gymLogoOk = !!(gym && gym.logo_url && /^https:\/\//i.test(gym.logo_url));
-  const gymBanner = gym
-    ? `<div class="card gym-banner">${gymLogoOk ? `<img src="${escapeHtml(gym.logo_url)}" alt="" loading="lazy">` : ""}<p><b>${escapeHtml(gym.name)}</b> &times; RoxRaceAlerts<br><small>Free HYROX ticket alerts for ${escapeHtml(gym.name)} members. Pick your race below and we'll email you the moment tickets open.</small></p></div>`
-    : "";
-  const gymField = gym ? `<input type="hidden" name="gym" value="${escapeHtml(gym.slug)}">` : "";
-  const gymCtx = gym ? `<div id="gymCtx" data-gym="${escapeHtml(gym.slug)}" hidden></div>` : "";
-
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
     <h2>Live &amp; upcoming sales</h2>
     <div id="eventListSide" class="event-list"><p>Loading...</p></div>
@@ -994,11 +967,11 @@ async function handleSignupPage(req: Request, env: Env, gym: any = null): Promis
       `${navBar("/", subscriber, counts.tickets + counts.races, false, env)}
       <div class="layout">
         <div class="main-col">
-          ${gymBanner}${hero}
+          ${hero}
           <div class="card">
             <h2>Monitor race tickets</h2>
             <form method="POST" action="/subscribe" id="signupForm">
-              ${gymField}${searchBox}
+              ${searchBox}
               <button type="submit" class="submit-step" style="display:none">Add selected ticket(s)</button>
             </form>
             ${browseSection}
@@ -1009,24 +982,23 @@ async function handleSignupPage(req: Request, env: Env, gym: any = null): Promis
           ${announcements}
         </div>
       </div>
-      ${gymCtx}${RESOLVE_SCRIPT}`,
-      gymHeaders,
-      true,
-      gymHead
+      ${RESOLVE_SCRIPT}`,
+      {},
+      true
     );
   }
 
   return page(
-    gym ? gymTitle : "Get notified when sold-out HYROX tickets become available",
+    "Get notified when sold-out HYROX tickets become available",
     `${navBar("/", null, 0, true)}
     <div class="layout">
       <div class="main-col">
-        ${gymBanner}${hero}
+        ${hero}
         <div class="card">
           <h2>Monitor race tickets</h2>
           <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
           <form method="POST" action="/subscribe" id="signupForm">
-            ${gymField}${searchBox}
+            ${searchBox}
             <div class="submit-step" style="display:none">
               <label>Your email
                 <input type="email" name="email" required placeholder="you@example.com">
@@ -1043,115 +1015,9 @@ async function handleSignupPage(req: Request, env: Env, gym: any = null): Promis
         ${announcements}
       </div>
     </div>
-    ${gymCtx}${RESOLVE_SCRIPT}`,
-    gymHeaders,
-    true,
-    gymHead
-  );
-}
-
-/** A gym slug is only honoured if it exists in the gyms table, so a mistyped
- * or made-up `gym` value in a form post just becomes "no gym" instead of
- * tagging a subscriber with something that doesn't exist. */
-async function validGymSlug(env: Env, raw: string): Promise<string | null> {
-  const slug = raw.trim().toLowerCase();
-  if (!/^[a-z0-9-]{2,40}$/.test(slug)) return null;
-  const row = await env.DB.prepare("SELECT slug FROM gyms WHERE slug = ?").bind(slug).first<any>();
-  return row ? row.slug : null;
-}
-
-function notFoundPage(): Response {
-  const r = page("Not found", `<div class="card"><p>This page doesn't exist. <a href="/">Go to RoxRaceAlerts</a></p></div>`);
-  return new Response(r.body, { status: 404, headers: r.headers });
-}
-
-async function handleGymPage(req: Request, env: Env, slug: string): Promise<Response> {
-  const gym = await env.DB.prepare("SELECT slug, name, logo_url FROM gyms WHERE slug = ?").bind(slug).first<any>();
-  if (!gym) return notFoundPage();
-  return handleSignupPage(req, env, gym);
-}
-
-/** What a gym owner sees: their share link, a message to paste into their
- * group chat, and totals for people who signed up from their page. The key
- * in the URL is the only access control (the admin hands each gym its own),
- * and it only ever shows counts and race names - never an email address or
- * who watches what. The race list is withheld until three people have signed
- * up, since with one or two a "top race" would point at a single member. */
-async function handleGymStats(req: Request, env: Env, slug: string): Promise<Response> {
-  const key = new URL(req.url).searchParams.get("key") || "";
-  const gym = await env.DB.prepare("SELECT slug, name, stats_key FROM gyms WHERE slug = ?").bind(slug).first<any>();
-  if (!gym || !key || key !== gym.stats_key) return notFoundPage();
-
-  const [totals, week, raceRows, ticketRows] = await Promise.all([
-    env.DB.prepare("SELECT COUNT(*) AS signups, COALESCE(SUM(verified), 0) AS verified FROM subscribers WHERE gym_slug = ?").bind(slug).first<any>(),
-    env.DB
-      .prepare("SELECT COUNT(*) AS n FROM subscribers WHERE gym_slug = ? AND created_at >= datetime('now', '-7 days')")
-      .bind(slug)
-      .first<any>(),
-    env.DB
-      .prepare(
-        `SELECT sw.event_title AS name, w.subscriber_id AS sid FROM sale_watchers w
-         JOIN sale_watch sw ON sw.event_url = w.event_url
-         JOIN subscribers s ON s.id = w.subscriber_id WHERE s.gym_slug = ?`
-      )
-      .bind(slug)
-      .all<any>(),
-    env.DB
-      .prepare(
-        `SELECT sub.event_name AS name, sub.subscriber_id AS sid FROM subscriptions sub
-         JOIN subscribers s ON s.id = sub.subscriber_id WHERE s.gym_slug = ?`
-      )
-      .bind(slug)
-      .all<any>(),
-  ]);
-
-  const signups = totals?.signups || 0;
-  // Ticket watches name the race "HYROX Dallas | Season 26/27"; race watches
-  // just "HYROX Dallas" - strip the suffix so one race isn't counted twice.
-  const people = new Map<string, Set<number>>();
-  for (const r of [...(raceRows.results || []), ...(ticketRows.results || [])]) {
-    const name = String(r.name).replace(/\s*\|\s*Season.*$/i, "").trim();
-    if (!people.has(name)) people.set(name, new Set());
-    people.get(name)!.add(r.sid);
-  }
-  const top = [...people.entries()]
-    .map(([name, set]) => ({ name, n: set.size }))
-    .sort((a, b) => b.n - a.n || a.name.localeCompare(b.name))
-    .slice(0, 5);
-
-  const link = `${env.SITE_URL}/g/${gym.slug}`;
-  const message = `HYROX tickets sell out fast. This free page emails you the moment tickets open for any race (or come back after selling out): ${link}`;
-  const tile = (value: number | string, label: string) =>
-    `<div style="background:#f7f7f7;border-radius:8px;padding:12px"><b style="display:block;font-size:1.5rem">${value}</b><small>${label}</small></div>`;
-
-  return page(
-    `${gym.name} x RoxRaceAlerts`,
-    `<div class="card">
-      <h2>${escapeHtml(gym.name)} &times; RoxRaceAlerts</h2>
-      <p>A free HYROX ticket-alert page with your gym's name on it. Share it with your members.</p>
-      <p><b>Your link</b><br><a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
-      <p><b>Message to paste into your group chat</b></p>
-      <textarea id="msg" readonly rows="4" style="width:100%;box-sizing:border-box;padding:10px;font:inherit;border:1px solid #ccc;border-radius:6px">${escapeHtml(message)}</textarea>
-      <button type="button" id="copyBtn">Copy message</button>
-    </div>
-    <div class="card">
-      <h2>Signups from your page</h2>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:12px">
-        ${tile(signups, "people signed up")}
-        ${tile(totals?.verified || 0, "confirmed their email")}
-        ${tile(week?.n || 0, "in the last 7 days")}
-      </div>
-      ${
-        signups >= 3 && top.length
-          ? `<h2 style="margin-top:20px">Races your members are watching</h2>${top
-              .map((t) => `<div class="ticket-row"><span>${escapeHtml(t.name)}</span><b>${t.n}</b></div>`)
-              .join("")}`
-          : `<p><small>The races your members watch show up here once three people have signed up.</small></p>`
-      }
-      <p><small>You only ever see totals - never who signed up.</small></p>
-    </div>
-    <script>document.getElementById('copyBtn').addEventListener('click',function(){var t=document.getElementById('msg');t.select();if(navigator.clipboard){navigator.clipboard.writeText(t.value)}else{document.execCommand('copy')}this.textContent='Copied';});</script>`,
-    { "X-Robots-Tag": "noindex" }
+    ${RESOLVE_SCRIPT}`,
+    {},
+    true
   );
 }
 
@@ -1229,14 +1095,10 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
     const unsubToken = subscriber ? subscriber.unsubscribe_token : randomToken();
 
     if (!subscriber) {
-      // First touch only: set once, when the subscriber is created, from the
-      // gym page (/g/<slug>) they signed up on. Existing subscribers keep
-      // whatever they had, so visiting a gym page later can't re-assign them.
-      const gymSlug = await validGymSlug(env, String(form.get("gym") || ""));
       await env.DB.prepare(
-        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, gym_slug) VALUES (?, 0, ?, ?, ?)"
+        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token) VALUES (?, 0, ?, ?)"
       )
-        .bind(email, verifyToken, unsubToken, gymSlug)
+        .bind(email, verifyToken, unsubToken)
         .run();
       subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
       needsVerification = true;
@@ -3145,29 +3007,6 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
       ${(mailFailed.results || []).length ? (mailFailed.results || []).map(mailRow).join("") : "<p><small>None.</small></p>"}
     </div>`;
 
-  // Signups that started on a gym's own page (/g/<slug>) - see gyms in schema.sql.
-  const gymRows = await db
-    .prepare(
-      `SELECT g.slug, g.name, g.stats_key, COUNT(s.id) AS signups, COALESCE(SUM(s.verified), 0) AS verified
-       FROM gyms g LEFT JOIN subscribers s ON s.gym_slug = g.slug
-       GROUP BY g.slug ORDER BY signups DESC, g.name`
-    )
-    .all<any>();
-  const gymCard = `<div class="card">
-      <h2>Gyms</h2>
-      <p><small>Signups that started on a gym's own page. Send the gym its stats link: it shows them their share link, a message to paste into their group chat, and totals only - never who signed up. To add a gym, tell Claude the name (and a logo URL if there is one).</small></p>
-      ${
-        (gymRows.results || []).length
-          ? (gymRows.results || [])
-              .map(
-                (g: any) =>
-                  `<div class="arow"><span><b>${escapeHtml(g.name)}</b> <small>${g.verified} of ${g.signups} confirmed</small><br><small><a href="/g/${escapeHtml(g.slug)}">page</a> &middot; <a href="/g/${escapeHtml(g.slug)}/stats?key=${escapeHtml(g.stats_key)}">stats link for the gym</a></small></span><b>${g.signups}</b></div>`
-              )
-              .join("")
-          : "<p><small>No gyms yet.</small></p>"
-      }
-    </div>`;
-
   const verified = counts?.verified || 0;
   const total = counts?.total || 0;
   const pct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "0%");
@@ -3238,8 +3077,6 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
     </div>
 
     ${mailCardHtml()}
-
-    ${gymCard}
 
     <div class="card">
       <h2>Race watch vs ticket watch</h2>
@@ -3363,10 +3200,6 @@ export default {
     const url = new URL(req.url);
     try {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
-      const gymMatch = url.pathname.match(/^\/g\/([a-z0-9-]{2,40})(\/stats)?\/?$/);
-      if (gymMatch && req.method === "GET") {
-        return gymMatch[2] ? await handleGymStats(req, env, gymMatch[1]) : await handleGymPage(req, env, gymMatch[1]);
-      }
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
