@@ -322,10 +322,20 @@ body.wide{max-width:980px}
 .sp-body{display:flex;flex-direction:column;min-width:0}
 .sp-body b{font-size:0.9rem}
 .sp-body small{color:#666;font-size:0.78rem;line-height:1.25}
+.sponsor-cta{border-style:dashed;border-color:#d6d6d6}
+.rail{display:none}
+.rail-tile{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:16px 12px;border-radius:12px;border:1px solid #eaeaea;text-decoration:none;color:#1a1a1a}
+.rail-tile:hover{filter:brightness(0.97)}
+.rail-tile b{font-size:0.95rem}
+.rail-tile small{color:#555;font-size:0.78rem;line-height:1.3}
+.rail-tile img,.rail-tile .sp-ico{width:44px;height:44px;border-radius:10px;object-fit:contain}
+.rail-cta{background:#fff;border:2px dashed #d6d6d6}
+.rail-tile .rail-spots{color:#999}
+@media (min-width:1420px){.rail{display:flex;flex-direction:column;gap:12px;position:fixed;top:24px;width:170px;max-height:calc(100vh - 48px);overflow-y:auto;z-index:5}.rail-left{left:calc((100vw - 1020px)/2 - 185px)}.rail-right{right:calc((100vw - 1020px)/2 - 185px)}#sponsorsCard{display:none}}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a> &middot; <a href="/partners">Partner with us</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -942,7 +952,7 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
-  const sponsorsCard = await renderSponsorsCard(req, env);
+  const { card: sponsorsCard, rails: sponsorRails } = await renderSponsors(req, env);
 
   const searchBox = `<div class="row">
       <div class="urlWrap">
@@ -992,7 +1002,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
           ${announcements}
         </div>
       </div>
-      ${RESOLVE_SCRIPT}`,
+      ${sponsorRails}${RESOLVE_SCRIPT}`,
       {},
       true
     );
@@ -1026,7 +1036,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         ${announcements}
       </div>
     </div>
-    ${RESOLVE_SCRIPT}`,
+    ${sponsorRails}${RESOLVE_SCRIPT}`,
     {},
     true
   );
@@ -1045,19 +1055,33 @@ function dayKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** "Gyms & partners" sidebar card: small tiles for gyms and brands that get
- * a name on the homepage. Hidden entirely while there are none. Each tile
- * links through /out/<id> so clicks can be counted, and rendering the card
- * counts an impression per tile for the day (bots excluded) - that pair is
- * the evidence a gym or brand gets, and the basis for pricing a tile later. */
-async function renderSponsorsCard(req: Request, env: Env): Promise<string> {
-  try {
-    const { results } = await env.DB.prepare(
-      "SELECT id, name, kind, tagline, logo_url FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT 12"
-    ).all<any>();
-    if (!results || !results.length) return "";
+/** Total partner tiles the homepage has room for - also the "X of N spots
+ * left" shown on the "your gym here" tiles and the cap on the partners page. */
+const SPONSOR_SLOTS = 10;
+const RAIL_PASTELS = ["#e9fbf0", "#fdeff6", "#fff5e6", "#f3ecff", "#eaf4ff"];
 
-    if (!isBot(req)) {
+/** Partner tiles for gyms and brands, two ways at once (CSS shows one):
+ *  - rails: TrustMRR-style columns fixed in the empty margins left and right
+ *    of the page on wide screens (>= 1420px), so they stay in view while
+ *    scrolling;
+ *  - card: a "Gyms & partners" list in the sidebar, shown on narrower
+ *    screens where there are no margins to use.
+ * Both always end with a "your gym / brand here" tile linking to /partners
+ * while spots are free, so the offer is visible before anyone has signed up.
+ * Real tiles link through /out/<id> to count clicks; rendering counts one
+ * view per tile for the day (bots excluded) - the evidence a partner gets. */
+async function renderSponsors(req: Request, env: Env): Promise<{ card: string; rails: string }> {
+  let results: any[] = [];
+  try {
+    results =
+      (
+        await env.DB.prepare(
+          "SELECT id, name, kind, tagline, logo_url FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
+        )
+          .bind(SPONSOR_SLOTS)
+          .all<any>()
+      ).results || [];
+    if (results.length && !isBot(req)) {
       const day = dayKey();
       await env.DB.batch(
         results.map((s: any) =>
@@ -1067,22 +1091,135 @@ async function renderSponsorsCard(req: Request, env: Env): Promise<string> {
         )
       );
     }
-
-    const tiles = results
-      .map((s: any) => {
-        const icon =
-          s.logo_url && /^https:\/\//i.test(s.logo_url)
-            ? `<img src="${escapeHtml(s.logo_url)}" alt="" loading="lazy">`
-            : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
-        return `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : ""}</span></a>`;
-      })
-      .join("");
-    return `<div class="card" id="sponsorsCard"><h2>Gyms &amp; partners</h2><div class="sponsors">${tiles}</div></div>`;
   } catch (e) {
     // A broken ad slot must never take the homepage down with it.
-    console.error("Failed to render sponsors card:", e);
-    return "";
+    console.error("Failed to load sponsors:", e);
+    results = [];
   }
+
+  const spotsLeft = Math.max(0, SPONSOR_SLOTS - results.length);
+  const spotsText = `${spotsLeft} of ${SPONSOR_SLOTS} spots left`;
+  const icon = (s: any) =>
+    s.logo_url && /^https:\/\//i.test(s.logo_url)
+      ? `<img src="${escapeHtml(s.logo_url)}" alt="" loading="lazy">`
+      : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
+  const tagline = (s: any) => (s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : "");
+
+  const railTile = (s: any, i: number) =>
+    `<a class="rail-tile" style="background:${RAIL_PASTELS[i % RAIL_PASTELS.length]}" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`;
+  const railCta = (title: string, pitch: string) =>
+    spotsLeft
+      ? `<a class="rail-tile rail-cta" href="/partners"><span class="sp-ico">+</span><b>${title}</b><small>${pitch}</small><small class="rail-spots">${spotsText}</small></a>`
+      : "";
+  const left = results.filter((_, i) => i % 2 === 0).map((s, i) => railTile(s, i * 2)).join("");
+  const right = results.filter((_, i) => i % 2 === 1).map((s, i) => railTile(s, i * 2 + 1)).join("");
+  const rails = `<div class="rail rail-left">${left}${railCta("Your gym here", "Make your gym known to HYROX athletes worldwide")}</div><div class="rail rail-right">${right}${railCta("Your brand here", "Get in front of HYROX athletes checking race tickets")}</div>`;
+
+  const cardTiles = results
+    .map(
+      (s: any) =>
+        `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${tagline(s)}</span></a>`
+    )
+    .join("");
+  const cardCta = spotsLeft
+    ? `<a class="sponsor sponsor-cta" href="/partners"><span class="sp-ico">+</span><span class="sp-body"><b>Your gym or brand here</b><small>Make your name known to HYROX athletes worldwide &middot; ${spotsText}</small></span></a>`
+    : "";
+  const card = `<div class="card" id="sponsorsCard"><h2>Gyms &amp; partners</h2><div class="sponsors">${cardTiles}${cardCta}</div></div>`;
+  return { card, rails };
+}
+
+/** The page every "your gym here" tile points to - also the link to send gym
+ * owners and brands directly. No price on it on purpose (not decided yet):
+ * it explains the placement and collects a request, which lands in the
+ * feedback inbox and pings the admin, same as feedback does. */
+async function handlePartnersPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const fieldStyle = "width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px;font-family:inherit";
+  return page(
+    "Partner with RoxRaceAlerts",
+    `${navBar("/", subscriber, 0, !subscriber, env)}
+    <div class="card">
+      <h2>Make your gym known to HYROX athletes worldwide</h2>
+      <p>RoxRaceAlerts is where HYROX athletes check when race tickets open, and get an email when sold-out tickets come back. Partner gyms and brands get a tile on the homepage, in front of exactly those people.</p>
+      <h2 style="margin-top:20px">What you get</h2>
+      <ul>
+        <li>Your logo, name and a one-line pitch on the homepage: in the side columns on desktop, in the sidebar on mobile</li>
+        <li>A link to your website or Instagram</li>
+        <li>A monthly report of how many people saw and clicked your tile</li>
+      </ul>
+      <p class="hint">For HYROX gyms and training clubs, coaches, and brands for hybrid athletes. There are ${SPONSOR_SLOTS} spots in total.</p>
+    </div>
+    <div class="card">
+      <h2>Request a spot</h2>
+      <form method="POST" action="/partners">
+        <label>Gym or brand name
+          <input type="text" name="name" required maxlength="100">
+        </label>
+        <label>Website or Instagram
+          <input type="text" name="link" required maxlength="300" placeholder="https://... or @yourgym">
+        </label>
+        <label>City and country (optional)
+          <input type="text" name="location" maxlength="100">
+        </label>
+        <label>Your email
+          <input type="email" name="email" required maxlength="200" placeholder="you@example.com">
+        </label>
+        <label>Anything else (optional)
+          <textarea name="message" rows="3" maxlength="1000" style="${fieldStyle}"></textarea>
+        </label>
+        <div style="position:absolute;left:-9999px" aria-hidden="true"><label>Leave this empty <input type="text" name="company_site" tabindex="-1" autocomplete="off"></label></div>
+        <p class="consent">We'll only use your email to reply about a partner spot.</p>
+        <button type="submit">Request a spot</button>
+      </form>
+    </div>`
+  );
+}
+
+/** Stores a partner request in the feedback inbox (prefixed so it stands out
+ * on /admin/feedback) and emails + Telegrams the admin. The hidden
+ * company_site field is a honeypot: the public feedback form already draws
+ * spam bots, and they fill in every field - a filled one gets the normal
+ * thank-you page but nothing is stored or sent. */
+async function handlePartnersRequest(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const clip = (v: unknown, n: number) => String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+  const thanks = (email: string) =>
+    page(
+      "Thanks",
+      `<div class="card"><p>Thanks - we've got your request${email ? ` and will reply to <b>${escapeHtml(email)}</b>` : ""}.</p><p><a href="/">Back to RoxRaceAlerts</a></p></div>`
+    );
+  if (clip(form.get("company_site"), 200)) return thanks("");
+
+  const name = clip(form.get("name"), 100);
+  const link = clip(form.get("link"), 300);
+  const location = clip(form.get("location"), 100);
+  const email = clip(form.get("email"), 200).toLowerCase();
+  const message = String(form.get("message") || "").trim().slice(0, 1000);
+  if (!name || !link || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return page(
+      "Request a spot",
+      `<div class="card"><p>Please fill in your gym or brand name, a link and a valid email. <a href="/partners">Go back</a></p></div>`
+    );
+  }
+
+  const text = `[Partner request] ${name}\nLink: ${link}${location ? `\nLocation: ${location}` : ""}${message ? `\n\n${message}` : ""}`;
+  await env.DB.prepare("INSERT INTO feedback (message, email) VALUES (?, ?)").bind(text, email).run();
+
+  if (env.ADMIN_EMAIL) {
+    try {
+      await sendEmail(
+        env,
+        env.ADMIN_EMAIL,
+        `Partner request: ${name}`,
+        `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p><p>From: ${escapeHtml(email)}</p>`,
+        `${text}\n\nFrom: ${email}`
+      );
+      await notifyAdminTelegram(env, env.ADMIN_EMAIL, `🤝 Partner request: ${name}\n${link}${location ? `\n${location}` : ""}\nFrom: ${email}`);
+    } catch (e) {
+      console.error("Failed to notify admin of partner request:", e);
+    }
+  }
+  return thanks(email);
 }
 
 /** Click-through for a sponsor tile: count the click, then 302 to the stored
@@ -3336,6 +3473,8 @@ export default {
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
       if (url.pathname === "/feedback" && req.method === "GET") return await handleFeedbackPage(req, env);
+      if (url.pathname === "/partners" && req.method === "GET") return await handlePartnersPage(req, env);
+      if (url.pathname === "/partners" && req.method === "POST") return await handlePartnersRequest(req, env);
       if (url.pathname === "/feedback" && req.method === "POST") return await handleFeedback(req, env);
       if (url.pathname === "/admin/feedback" && req.method === "GET") return await handleFeedbackAdminPage(req, env);
       if (url.pathname === "/admin/subscribers" && req.method === "GET") return await handleSubscribersAdminPage(req, env);
