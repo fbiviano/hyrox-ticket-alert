@@ -314,6 +314,14 @@ body.wide{max-width:980px}
 .hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
+.sponsors{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.sponsor{display:flex;gap:10px;align-items:center;padding:10px;border:1px solid #eee;border-radius:8px;text-decoration:none;color:inherit}
+.sponsor:hover{background:#f7f7f7;border-color:#ddd}
+.sponsor img,.sp-ico{width:42px;height:42px;border-radius:8px;flex-shrink:0;object-fit:contain}
+.sp-ico{display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#ff3d00,#ffb800);color:#fff;font-weight:700;font-size:1.1rem}
+.sp-body{display:flex;flex-direction:column;min-width:0}
+.sp-body b{font-size:0.9rem}
+.sp-body small{color:#666;font-size:0.78rem;line-height:1.25}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
@@ -934,6 +942,7 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
 async function handleSignupPage(req: Request, env: Env): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
+  const sponsorsCard = await renderSponsorsCard(req, env);
 
   const searchBox = `<div class="row">
       <div class="urlWrap">
@@ -979,6 +988,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
         </div>
         <div class="sidebar">
           ${sideOnSaleCard}
+          ${sponsorsCard}
           ${announcements}
         </div>
       </div>
@@ -1012,6 +1022,7 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
       </div>
       <div class="sidebar">
         ${sideOnSaleCard}
+        ${sponsorsCard}
         ${announcements}
       </div>
     </div>
@@ -1019,6 +1030,80 @@ async function handleSignupPage(req: Request, env: Env): Promise<Response> {
     {},
     true
   );
+}
+
+/** Crawlers, link-preview fetchers and scripts shouldn't inflate a sponsor's
+ * numbers (or be billed to them one day). A user-agent check is only a rough
+ * filter - good enough to keep the obvious ones out, not an audit. */
+function isBot(req: Request): boolean {
+  const ua = req.headers.get("user-agent") || "";
+  return !ua || /bot|crawl|spider|slurp|preview|monitor|facebookexternalhit|whatsapp|telegram|curl|wget|python|headless|go-http|java\//i.test(ua);
+}
+
+/** Today in UTC as YYYY-MM-DD - sponsor_stats rows are per-day. */
+function dayKey(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** "Gyms & partners" sidebar card: small tiles for gyms and brands that get
+ * a name on the homepage. Hidden entirely while there are none. Each tile
+ * links through /out/<id> so clicks can be counted, and rendering the card
+ * counts an impression per tile for the day (bots excluded) - that pair is
+ * the evidence a gym or brand gets, and the basis for pricing a tile later. */
+async function renderSponsorsCard(req: Request, env: Env): Promise<string> {
+  try {
+    const { results } = await env.DB.prepare(
+      "SELECT id, name, kind, tagline, logo_url FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT 12"
+    ).all<any>();
+    if (!results || !results.length) return "";
+
+    if (!isBot(req)) {
+      const day = dayKey();
+      await env.DB.batch(
+        results.map((s: any) =>
+          env.DB.prepare(
+            "INSERT INTO sponsor_stats (sponsor_id, day, impressions, clicks) VALUES (?, ?, 1, 0) ON CONFLICT(sponsor_id, day) DO UPDATE SET impressions = impressions + 1"
+          ).bind(s.id, day)
+        )
+      );
+    }
+
+    const tiles = results
+      .map((s: any) => {
+        const icon =
+          s.logo_url && /^https:\/\//i.test(s.logo_url)
+            ? `<img src="${escapeHtml(s.logo_url)}" alt="" loading="lazy">`
+            : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
+        return `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : ""}</span></a>`;
+      })
+      .join("");
+    return `<div class="card" id="sponsorsCard"><h2>Gyms &amp; partners</h2><div class="sponsors">${tiles}</div></div>`;
+  } catch (e) {
+    // A broken ad slot must never take the homepage down with it.
+    console.error("Failed to render sponsors card:", e);
+    return "";
+  }
+}
+
+/** Click-through for a sponsor tile: count the click, then 302 to the stored
+ * https URL. The destination only ever comes from the sponsors table (set by
+ * the admin), never from the request, so this can't be used as an open
+ * redirect. */
+async function handleSponsorOut(req: Request, env: Env, id: number): Promise<Response> {
+  const s = await env.DB.prepare("SELECT url FROM sponsors WHERE id = ? AND active = 1").bind(id).first<any>();
+  if (!s || !/^https:\/\//i.test(s.url)) return new Response("Not found", { status: 404 });
+  if (!isBot(req)) {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO sponsor_stats (sponsor_id, day, impressions, clicks) VALUES (?, ?, 0, 1) ON CONFLICT(sponsor_id, day) DO UPDATE SET clicks = clicks + 1"
+      )
+        .bind(id, dayKey())
+        .run();
+    } catch (e) {
+      console.error("Failed to count sponsor click:", e);
+    }
+  }
+  return new Response(null, { status: 302, headers: { Location: s.url, "cache-control": "no-store", "X-Robots-Tag": "noindex" } });
 }
 
 /** All JSON API responses go through here - ticket/event status can change
@@ -3007,6 +3092,29 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
       ${(mailFailed.results || []).length ? (mailFailed.results || []).map(mailRow).join("") : "<p><small>None.</small></p>"}
     </div>`;
 
+  // Sponsor tiles (sponsors / sponsor_stats): the last 30 days per tile.
+  const sponsorRows = await db
+    .prepare(
+      `SELECT p.id, p.name, p.kind, p.active, COALESCE(SUM(st.impressions), 0) AS imp, COALESCE(SUM(st.clicks), 0) AS clk
+       FROM sponsors p LEFT JOIN sponsor_stats st ON st.sponsor_id = p.id AND st.day >= date('now', '-30 days')
+       GROUP BY p.id ORDER BY p.active DESC, clk DESC, p.name`
+    )
+    .all<any>();
+  const sponsorCard = `<div class="card">
+      <h2>Gyms &amp; partners (homepage sidebar)</h2>
+      <p><small>Last 30 days. A view is counted each time the homepage loads with the tile showing (bots filtered out roughly, so treat it as approximate); a click is a visitor opening the tile's link. To add, pause or edit a tile, tell Claude the name, link, one-line tagline and logo URL.</small></p>
+      ${
+        (sponsorRows.results || []).length
+          ? (sponsorRows.results || [])
+              .map(
+                (p: any) =>
+                  `<div class="arow"><span><b>${escapeHtml(p.name)}</b> <small>${escapeHtml(p.kind)}${p.active ? "" : " &middot; paused"}</small><br><small>${p.imp} views &middot; ${p.clk} clicks &middot; ${p.imp ? ((p.clk / p.imp) * 100).toFixed(1) : "0.0"}% click rate</small></span><b>${p.clk}</b></div>`
+              )
+              .join("")
+          : "<p><small>No tiles yet.</small></p>"
+      }
+    </div>`;
+
   const verified = counts?.verified || 0;
   const total = counts?.total || 0;
   const pct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "0%");
@@ -3077,6 +3185,8 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
     </div>
 
     ${mailCardHtml()}
+
+    ${sponsorCard}
 
     <div class="card">
       <h2>Race watch vs ticket watch</h2>
@@ -3200,6 +3310,8 @@ export default {
     const url = new URL(req.url);
     try {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
+      const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
+      if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);

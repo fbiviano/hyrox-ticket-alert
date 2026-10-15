@@ -222,6 +222,34 @@ CREATE TABLE IF NOT EXISTS newsletter_flagged_emails (
   UNIQUE(message_id)
 );
 
+-- Gyms and brands shown as small tiles in the homepage sidebar ("Gyms &
+-- partners"). url must be https and is only ever reached through
+-- /out/<id>, which counts the click; logo_url is optional (https) - tiles
+-- without one show the name's first letter on the brand gradient. Added and
+-- paused by the admin with SQL; sort_order lowest first.
+CREATE TABLE IF NOT EXISTS sponsors (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'gym',
+  tagline TEXT,
+  url TEXT NOT NULL,
+  logo_url TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Per-tile, per-day views and clicks (UTC day). Views are counted when the
+-- homepage renders with the tile showing; both skip obvious bots by
+-- user-agent, so they are approximate. Shown on /admin/analytics.
+CREATE TABLE IF NOT EXISTS sponsor_stats (
+  sponsor_id INTEGER NOT NULL REFERENCES sponsors(id) ON DELETE CASCADE,
+  day TEXT NOT NULL,
+  impressions INTEGER NOT NULL DEFAULT 0,
+  clicks INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (sponsor_id, day)
+);
+
 -- One row per outgoing email attempt (written by sendEmail() in
 -- src/index.ts), so "did this person actually get the alert?" can be
 -- answered after the fact from /admin/analytics. ok = 1 means Resend
