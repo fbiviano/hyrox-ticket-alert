@@ -331,7 +331,9 @@ body.wide{max-width:980px}
 .rail-tile img,.rail-tile .sp-ico{width:44px;height:44px;border-radius:10px;object-fit:contain}
 .rail-cta{background:#fff;border:2px dashed #d6d6d6}
 .rail-tile .rail-spots{color:#999}
-@media (min-width:1420px){.rail{display:flex;flex-direction:column;gap:12px;position:fixed;top:24px;width:170px;max-height:calc(100vh - 48px);overflow-y:auto;z-index:5}.rail-left{left:calc((100vw - 1020px)/2 - 185px)}.rail-right{right:calc((100vw - 1020px)/2 - 185px)}#sponsorsCard{display:none}}
+.rail-badge{align-self:flex-end;font-size:0.62rem;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;color:#777;background:rgba(255,255,255,0.75);border:1px solid #ddd;border-radius:10px;padding:1px 7px}
+.sp-body b .rail-badge{margin-left:4px;vertical-align:middle}
+@media (min-width:1420px){.rail{display:flex;flex-direction:column;gap:12px;position:fixed;top:24px;width:170px;max-height:calc(100vh - 48px);overflow-y:auto;z-index:5}.rail-left{left:calc((100vw - 1020px)/2 - 185px)}#sponsorsCard{display:none}}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
@@ -1061,9 +1063,8 @@ const SPONSOR_SLOTS = 10;
 const RAIL_PASTELS = ["#e9fbf0", "#fdeff6", "#fff5e6", "#f3ecff", "#eaf4ff"];
 
 /** Partner tiles for gyms and brands, two ways at once (CSS shows one):
- *  - rails: TrustMRR-style columns fixed in the empty margins left and right
- *    of the page on wide screens (>= 1420px), so they stay in view while
- *    scrolling;
+ *  - rail: a TrustMRR-style column fixed in the empty margin left of the page
+ *    on wide screens (>= 1420px), so it stays in view while scrolling;
  *  - card: a "Gyms & partners" list in the sidebar, shown on narrower
  *    screens where there are no margins to use.
  * Both always end with a "your gym / brand here" tile linking to /partners
@@ -1071,16 +1072,21 @@ const RAIL_PASTELS = ["#e9fbf0", "#fdeff6", "#fff5e6", "#f3ecff", "#eaf4ff"];
  * Real tiles link through /out/<id> to count clicks; rendering counts one
  * view per tile for the day (bots excluded) - the evidence a partner gets. */
 async function renderSponsors(req: Request, env: Env): Promise<{ card: string; rails: string }> {
-  let results: any[] = [];
+  let results: any[] = []; // real tiles: these count against the 10 spots
+  let examples: any[] = []; // clearly-labelled sample tiles: placeholders, never counted
   try {
-    results =
+    const all =
       (
         await env.DB.prepare(
-          "SELECT id, name, kind, tagline, logo_url FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
+          "SELECT id, name, kind, tagline, logo_url, is_example FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
         )
-          .bind(SPONSOR_SLOTS)
+          .bind(SPONSOR_SLOTS + 4)
           .all<any>()
       ).results || [];
+    results = all.filter((s: any) => !s.is_example).slice(0, SPONSOR_SLOTS);
+    // Samples fill the column only until real tiles take over, and their
+    // views/clicks are not tracked - nobody is paying for them.
+    examples = results.length < SPONSOR_SLOTS / 2 ? all.filter((s: any) => s.is_example).slice(0, 3) : [];
     if (results.length && !isBot(req)) {
       const day = dayKey();
       await env.DB.batch(
@@ -1095,8 +1101,10 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
     // A broken ad slot must never take the homepage down with it.
     console.error("Failed to load sponsors:", e);
     results = [];
+    examples = [];
   }
 
+  // Only real tiles use up a spot, so "N of 10 spots left" is always true.
   const spotsLeft = Math.max(0, SPONSOR_SLOTS - results.length);
   const spotsText = `${spotsLeft} of ${SPONSOR_SLOTS} spots left`;
   const icon = (s: any) =>
@@ -1105,20 +1113,25 @@ async function renderSponsors(req: Request, env: Env): Promise<{ card: string; r
       : `<span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span>`;
   const tagline = (s: any) => (s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : "");
 
-  const railTile = (s: any, i: number) =>
-    `<a class="rail-tile" style="background:${RAIL_PASTELS[i % RAIL_PASTELS.length]}" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`;
-  const railCta = (title: string, pitch: string) =>
-    spotsLeft
-      ? `<a class="rail-tile rail-cta" href="/partners"><span class="sp-ico">+</span><b>${title}</b><small>${pitch}</small><small class="rail-spots">${spotsText}</small></a>`
-      : "";
-  const left = results.filter((_, i) => i % 2 === 0).map((s, i) => railTile(s, i * 2)).join("");
-  const right = results.filter((_, i) => i % 2 === 1).map((s, i) => railTile(s, i * 2 + 1)).join("");
-  const rails = `<div class="rail rail-left">${left}${railCta("Your gym here", "Make your gym known to HYROX athletes worldwide")}</div><div class="rail rail-right">${right}${railCta("Your brand here", "Get in front of HYROX athletes checking race tickets")}</div>`;
+  // One column, left margin only: samples first, then real partners, then the offer.
+  const ordered = [...examples, ...results];
+  const railTile = (s: any, i: number) => {
+    const bg = RAIL_PASTELS[i % RAIL_PASTELS.length];
+    return s.is_example
+      ? `<a class="rail-tile" style="background:${bg}" href="/partners"><span class="rail-badge">Example</span>${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`
+      : `<a class="rail-tile" style="background:${bg}" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<b>${escapeHtml(s.name)}</b>${tagline(s)}</a>`;
+  };
+  const railCta = spotsLeft
+    ? `<a class="rail-tile rail-cta" href="/partners"><span class="sp-ico">+</span><b>Your gym here</b><small>Make your gym known to HYROX athletes worldwide</small><small class="rail-spots">${spotsText}</small></a>`
+    : "";
+  const rails = `<div class="rail rail-left">${ordered.map(railTile).join("")}${railCta}</div>`;
 
-  const cardTiles = results
-    .map(
-      (s: any) =>
-        `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${tagline(s)}</span></a>`
+  // Narrow screens: the same list as a sidebar card.
+  const cardTiles = ordered
+    .map((s: any) =>
+      s.is_example
+        ? `<a class="sponsor" href="/partners">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)} <span class="rail-badge">Example</span></b>${tagline(s)}</span></a>`
+        : `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="sponsored noopener">${icon(s)}<span class="sp-body"><b>${escapeHtml(s.name)}</b>${tagline(s)}</span></a>`
     )
     .join("");
   const cardCta = spotsLeft
@@ -1193,6 +1206,7 @@ function partnersPageResponse(subscriber: any, env: Env, error = "", v: Record<s
         <li>Your logo, name and a one-line pitch on the homepage: in the side columns on desktop, in the sidebar on mobile</li>
         <li>A link to your website or Instagram</li>
         <li>On request, how many people saw and clicked your tile</li>
+        <li>The first position, at the very top of the column, is a premium spot and costs more - there's only one</li>
       </ul>
       <p class="hint">For HYROX gyms and training clubs, coaches, and brands for hybrid athletes. There are ${SPONSOR_SLOTS} spots in total. Every application is reviewed before anything is shown or charged.</p>
     </div>
@@ -1205,6 +1219,9 @@ function partnersPageResponse(subscriber: any, env: Env, error = "", v: Record<s
         </label>
         <label>We are a
           <select name="kind" style="${fieldStyle}">${kindOptions}</select>
+        </label>
+        <label>Which spot are you interested in?
+          <select name="placement" style="${fieldStyle}"><option value="any"${v.placement === "any" ? " selected" : ""}>Any spot</option><option value="top"${v.placement === "top" ? " selected" : ""}>The top spot (premium)</option></select>
         </label>
         <label>Website or Instagram
           <input type="text" name="link" required maxlength="300" placeholder="https://... or @yourgym" value="${escapeHtml(v.link || "")}">
@@ -1257,6 +1274,7 @@ async function handlePartnersRequest(req: Request, env: Env): Promise<Response> 
   const v = {
     name: clip(form.get("name"), 60),
     kind: clip(form.get("kind"), 10),
+    placement: clip(form.get("placement"), 10) === "top" ? "top" : "any",
     link: clip(form.get("link"), 300),
     tagline: clip(form.get("tagline"), 80),
     location: clip(form.get("location"), 100),
@@ -1289,16 +1307,16 @@ async function handlePartnersRequest(req: Request, env: Env): Promise<Response> 
   if ((recent?.n || 0) >= 30) return fail("We're receiving a lot of applications right now - please try again tomorrow.");
 
   await env.DB.prepare(
-    `INSERT INTO partner_applications (name, kind, link, tagline, location, email, message, logo_type, logo_b64)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO partner_applications (name, kind, placement, link, tagline, location, email, message, logo_type, logo_b64)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(v.name, v.kind, link, v.tagline || null, v.location || null, v.email, v.message || null, logoType, logoB64)
+    .bind(v.name, v.kind, v.placement, link, v.tagline || null, v.location || null, v.email, v.message || null, logoType, logoB64)
     .run();
 
   if (env.ADMIN_EMAIL) {
     try {
       const review = `${env.SITE_URL}/admin/partners?token=${encodeURIComponent(env.WEBHOOK_SECRET)}`;
-      const summary = `${v.name} (${PARTNER_KINDS[v.kind]})\n${link}${v.location ? `\n${v.location}` : ""}${v.tagline ? `\n"${v.tagline}"` : ""}${logoType ? "\nlogo attached" : "\nno logo"}\nFrom: ${v.email}`;
+      const summary = `${v.name} (${PARTNER_KINDS[v.kind]})${v.placement === "top" ? " - wants the TOP spot" : ""}\n${link}${v.location ? `\n${v.location}` : ""}${v.tagline ? `\n"${v.tagline}"` : ""}${logoType ? "\nlogo attached" : "\nno logo"}\nFrom: ${v.email}`;
       await sendEmail(
         env,
         env.ADMIN_EMAIL,
@@ -1360,7 +1378,7 @@ async function handlePartnersAdminPage(req: Request, env: Env): Promise<Response
         : "";
       return `<div class="card">
         ${logo}
-        <p><b>${escapeHtml(a.name)}</b> <small>${escapeHtml(PARTNER_KINDS[a.kind] || a.kind)} &middot; ${pending ? "waiting for review" : "approved, waiting for payment"} &middot; ${escapeHtml(a.created_at)}</small></p>
+        <p><b>${escapeHtml(a.name)}</b> <small>${escapeHtml(PARTNER_KINDS[a.kind] || a.kind)} &middot; ${pending ? "waiting for review" : "approved, waiting for payment"} &middot; ${escapeHtml(a.created_at)}</small>${a.placement === "top" ? ` <b style="color:#9a6700">wants the TOP spot</b>` : ""}</p>
         <p><a href="${escapeHtml(a.link)}" target="_blank" rel="noopener">${escapeHtml(a.link)}</a>${a.location ? `<br><small>${escapeHtml(a.location)}</small>` : ""}${a.tagline ? `<br>"${escapeHtml(a.tagline)}"` : ""}<br><small>${escapeHtml(a.email)}</small></p>
         ${a.message ? `<p><small>${escapeHtml(a.message).replace(/\n/g, "<br>")}</small></p>` : ""}
         <form method="POST" action="/admin/partners/decide" style="clear:both">
@@ -3459,6 +3477,7 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
     .prepare(
       `SELECT p.id, p.name, p.kind, p.active, COALESCE(SUM(st.impressions), 0) AS imp, COALESCE(SUM(st.clicks), 0) AS clk
        FROM sponsors p LEFT JOIN sponsor_stats st ON st.sponsor_id = p.id AND st.day >= date('now', '-30 days')
+       WHERE p.is_example = 0
        GROUP BY p.id ORDER BY p.active DESC, clk DESC, p.name`
     )
     .all<any>();

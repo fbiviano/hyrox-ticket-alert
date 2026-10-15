@@ -236,6 +236,10 @@ CREATE TABLE IF NOT EXISTS sponsors (
   logo_url TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  -- 1 = a clearly labelled "Example" sample tile (links to /partners, no
+  -- tracking, never counted against the 10 spots, hidden once real tiles
+  -- reach half the spots). Never presented as a real partner.
+  is_example INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -260,6 +264,9 @@ CREATE TABLE IF NOT EXISTS partner_applications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'gym',
+  -- 'top' if they asked for the single premium top position, else 'any'.
+  -- Only a preference shown to the admin; ordering is set by hand.
+  placement TEXT NOT NULL DEFAULT 'any',
   link TEXT NOT NULL,
   tagline TEXT,
   location TEXT,
