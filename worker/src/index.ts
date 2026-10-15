@@ -1072,7 +1072,15 @@ const RAIL_PASTELS = ["#e9fbf0", "#fdeff6", "#fff5e6", "#f3ecff", "#eaf4ff"];
  * while spots are free, so the offer is visible before anyone has signed up.
  * Real tiles link through /out/<id> to count clicks; rendering counts one
  * view per tile for the day (bots excluded) - the evidence a partner gets. */
+/** Master switch for the partner tiles on the public homepage (the left
+ * column and the narrow-screen sidebar card). Off while there are no real
+ * partners - the sample tiles on their own made the page look worse. The
+ * tiles, their data, /partners and the admin preview all stay; flip to true
+ * and redeploy to bring the column back. */
+const SHOW_PARTNER_TILES = false;
+
 async function renderSponsors(req: Request, env: Env, preview = false): Promise<{ card: string; rails: string }> {
+  if (!SHOW_PARTNER_TILES && !preview) return { card: "", rails: "" };
   let results: any[] = []; // real tiles: these count against the 10 spots
   let examples: any[] = []; // clearly-labelled sample tiles: placeholders, never counted
   try {
