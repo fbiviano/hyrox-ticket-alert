@@ -26,6 +26,8 @@ export interface Env {
   ADMIN_EMAIL: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
+  TELEGRAM_WEBHOOK_SECRET?: string; // header secret Telegram echoes on every webhook call
   // WhatsApp Cloud API (see sendWhatsAppAlert). All optional: unset = WhatsApp off.
   WHATSAPP_TOKEN?: string;
   WHATSAPP_PHONE_NUMBER_ID?: string;
@@ -309,7 +311,7 @@ async function sendWhatsAppReply(env: Env, to: string, text: string): Promise<bo
 /** Email every verified subscriber watching this exact (event_name, ticket_name). */
 async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
   const { results } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
      JOIN subscriptions sub ON sub.subscriber_id = s.id
      WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
   )
@@ -321,6 +323,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
     const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
     if (row.whatsapp_phone) await sendWhatsAppAlert(env, row.whatsapp_phone, eventName, `${ticketName} is now available.`, link);
+    await sendTelegramAlert(env, row.telegram_chat_id, eventName, `${ticketName} is now available.`, link);
     try {
       await sendEmail(
         env,
@@ -1871,6 +1874,179 @@ async function handleWhatsAppRegisterWebhook(req: Request, env: Env): Promise<Re
   });
 }
 
+// ---------------------------------------------------------------------------
+// Telegram: subscriber opt-in (deep-link handshake), webhook, /stop, My alerts
+//
+// Same idea as the WhatsApp linking, but simpler and free: Telegram bots may
+// message anyone who has pressed Start, any time, with no templates and no 24h
+// window. The subscriber taps "Get alerts on Telegram" on My alerts, which
+// issues a one-off code and opens t.me/<bot>?start=<code>; pressing Start makes
+// Telegram send us "/start <code>" along with the chat id, which we store on
+// the subscriber who owns that code. Telegram authenticates the sender, and
+// calls our webhook with a secret header only it and we know.
+// ---------------------------------------------------------------------------
+async function logTelegram(env: Env, chatId: string, kind: string, ok: boolean, error: string | null): Promise<void> {
+  try {
+    await env.DB.prepare("INSERT INTO telegram_log (chat_id, kind, ok, error) VALUES (?, ?, ?, ?)").bind(chatId, kind, ok ? 1 : 0, error).run();
+  } catch (e) {
+    console.error("Failed to write telegram_log:", e);
+  }
+}
+
+/** Send one message to one chat. Never throws. A 403 means the person blocked
+ * the bot or deleted the chat - they can no longer be reached, so the link is
+ * cleared instead of failing on every future alert. */
+async function sendTelegramTo(env: Env, chatId: string, text: string, kind: string): Promise<boolean> {
+  if (!env.TELEGRAM_BOT_TOKEN) return false;
+  let error: string | null = null;
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3900), disable_web_page_preview: false }),
+    });
+    if (!resp.ok) {
+      const body: any = await resp.json().catch(() => ({}));
+      error = `${resp.status} ${body?.description ?? ""}`.trim().slice(0, 300);
+      if (resp.status === 403) {
+        await env.DB.prepare(
+          "UPDATE subscribers SET telegram_chat_id = NULL, telegram_linked_at = NULL, telegram_opted_out_at = datetime('now') WHERE telegram_chat_id = ?"
+        )
+          .bind(chatId)
+          .run();
+      }
+    }
+  } catch (e) {
+    error = String(e).slice(0, 300);
+  }
+  await logTelegram(env, chatId, kind, !error, error);
+  if (error) console.error("Telegram send failed:", error);
+  return !error;
+}
+
+/** One alert to one linked subscriber. The admin's own chat already gets every
+ * alert addressed to the admin through notifyAdminTelegram, so it is skipped
+ * here to avoid a duplicate. */
+async function sendTelegramAlert(env: Env, chatId: string | null | undefined, title: string, message: string, url: string): Promise<void> {
+  if (!chatId || String(chatId) === String(env.TELEGRAM_CHAT_ID || "")) return;
+  await sendTelegramTo(env, String(chatId), `🎟️ ${title}\n${message}\n${url}\n\nSend /stop to turn off Telegram alerts.`, "alert");
+}
+
+function renderTelegramCard(env: Env, s: any): string {
+  if (!s.verified || !env.TELEGRAM_BOT_USERNAME || !env.TELEGRAM_BOT_TOKEN) return "";
+  const token = escapeHtml(s.unsubscribe_token);
+  if (s.telegram_chat_id) {
+    return `<div class="card">
+      <h2>Telegram alerts</h2>
+      <p>On - you get the same alerts as by email. Send <b>/stop</b> to the bot any time, or:</p>
+      <form method="POST" action="/telegram/unlink"><input type="hidden" name="token" value="${token}"><button type="submit">Turn off Telegram alerts</button></form>
+    </div>`;
+  }
+  const expires = s.telegram_code_expires ? Date.parse(String(s.telegram_code_expires).replace(" ", "T") + "Z") : 0;
+  if (s.telegram_code && expires > Date.now()) {
+    const link = `https://t.me/${env.TELEGRAM_BOT_USERNAME}?start=${s.telegram_code}`;
+    return `<div class="card">
+      <h2>Telegram alerts</h2>
+      <p>Almost done. Open Telegram with the button below and press <b>Start</b>:</p>
+      <p><a href="${escapeHtml(link)}" target="_blank" rel="noopener"><button type="button">Open Telegram and press Start</button></a></p>
+      <p><small>The link works for 30 minutes. Once the bot confirms, <a href="/my-alerts">refresh this page</a>.</small></p>
+    </div>`;
+  }
+  return `<div class="card">
+      <h2>Telegram alerts</h2>
+      <p>Get the same alerts on Telegram as well as email - free, and instant.</p>
+      <form method="POST" action="/telegram/link"><input type="hidden" name="token" value="${token}"><button type="submit">Get alerts on Telegram</button></form>
+      <p class="consent">By linking, you agree to receive HYROX ticket alerts on Telegram for the races you watch. Send /stop to the bot any time to turn them off.</p>
+    </div>`;
+}
+
+async function handleTelegramLink(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const s = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!s || !s.verified || !env.TELEGRAM_BOT_USERNAME || !env.TELEGRAM_BOT_TOKEN) {
+    return page("Not available", `<div class="card"><p>Telegram alerts aren't available for this account. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  }
+  await env.DB.prepare("UPDATE subscribers SET telegram_code = ?, telegram_code_expires = datetime('now', '+30 minutes') WHERE id = ?")
+    .bind(newWhatsAppCode(), s.id)
+    .run();
+  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+}
+
+async function handleTelegramUnlink(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const s = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!s) return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  await env.DB.prepare(
+    "UPDATE subscribers SET telegram_chat_id = NULL, telegram_linked_at = NULL, telegram_code = NULL, telegram_code_expires = NULL, telegram_opted_out_at = datetime('now') WHERE id = ?"
+  )
+    .bind(s.id)
+    .run();
+  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+}
+
+function sameSecret(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/** Telegram calls this for every message to the bot. Only a request carrying
+ * our secret header (set when the webhook was registered) is believed. */
+async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> {
+  if (!env.TELEGRAM_WEBHOOK_SECRET) return new Response("Not configured", { status: 503 });
+  if (!sameSecret(req.headers.get("X-Telegram-Bot-Api-Secret-Token") || "", env.TELEGRAM_WEBHOOK_SECRET)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  let update: any;
+  try {
+    update = await req.json();
+  } catch {
+    return new Response("ok");
+  }
+  const msg = update?.message;
+  // Private chats only: a bot added to a group would otherwise be talked at by strangers.
+  if (!msg || msg.chat?.type !== "private" || typeof msg.text !== "string") return new Response("ok");
+  const chatId = String(msg.chat.id);
+  const text = msg.text.trim().slice(0, 100);
+  try {
+    const upper = text.toUpperCase();
+    if (/^\/(STOP|UNSUBSCRIBE)(@\w+)?$/.test(upper) || upper === "STOP") {
+      await env.DB.prepare(
+        "UPDATE subscribers SET telegram_chat_id = NULL, telegram_linked_at = NULL, telegram_opted_out_at = datetime('now') WHERE telegram_chat_id = ?"
+      )
+        .bind(chatId)
+        .run();
+      await sendTelegramTo(env, chatId, "Telegram alerts are turned off. Your email alerts continue as before. You can turn Telegram back on any time from My alerts on roxracealerts.com.", "reply");
+      return new Response("ok");
+    }
+    const code = upper.match(/^\/START(?:@\w+)?\s+([A-HJ-NP-Z2-9]{6})$/)?.[1] || upper.match(/^([A-HJ-NP-Z2-9]{6})$/)?.[1];
+    if (code) {
+      const s = await env.DB.prepare("SELECT id FROM subscribers WHERE telegram_code = ? AND telegram_code_expires > datetime('now')").bind(code).first<any>();
+      if (s) {
+        await env.DB.prepare(
+          "UPDATE subscribers SET telegram_chat_id = ?, telegram_linked_at = datetime('now'), telegram_opted_out_at = NULL, telegram_code = NULL, telegram_code_expires = NULL WHERE id = ?"
+        )
+          .bind(chatId, s.id)
+          .run();
+        await sendTelegramTo(env, chatId, "You're set! Telegram alerts from RoxRaceAlerts are on: you'll get the same HYROX ticket alerts as by email. Send /stop any time to turn them off.", "reply");
+        return new Response("ok");
+      }
+      await sendTelegramTo(env, chatId, "That link isn't valid or has expired. Open My alerts on roxracealerts.com and tap \"Get alerts on Telegram\" for a new one.", "reply");
+      return new Response("ok");
+    }
+    if (upper.startsWith("/START")) {
+      await sendTelegramTo(env, chatId, "Hi! I send HYROX ticket alerts. To turn them on, open My alerts on roxracealerts.com and tap \"Get alerts on Telegram\".", "reply");
+    }
+  } catch (e) {
+    // Telegram retries anything that isn't a 200 - a bad update must not cause a retry storm.
+    console.error("Telegram webhook handling failed:", e);
+  }
+  return new Response("ok");
+}
+
 /** All JSON API responses go through here - ticket/event status can change
  * from one check to the next, so none of it may ever be cached at the edge
  * (the same lesson as page()'s Cache-Control, applied to the JSON side). */
@@ -2322,6 +2498,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     ${rows.purchased ? `<div class="card"><h2>Purchased</h2>${rows.purchased}</div>` : ""}
     ${pastEventsSection(rows.past, saleRows.past)}
     ${renderWhatsAppCard(env, subscriber)}
+    ${renderTelegramCard(env, subscriber)}
     <div class="card">
       <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
     </div>
@@ -2540,7 +2717,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
       .run();
 
     const { results: watchers } = await env.DB.prepare(
-      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
+      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
        JOIN sale_watchers w ON w.subscriber_id = s.id
        WHERE s.verified = 1 AND w.event_url = ?`
     )
@@ -2550,6 +2727,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
     for (const watcher of watchers || []) {
       const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
       if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, row.event_title, "tickets are now on sale!", row.event_url);
+      await sendTelegramAlert(env, watcher.telegram_chat_id, row.event_title, "tickets are now on sale!", row.event_url);
       try {
         await sendEmail(
           env,
@@ -2723,7 +2901,7 @@ async function notifySaleWatchers(
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
   const { results: watchers } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
      JOIN sale_watchers w ON w.subscriber_id = s.id
      WHERE s.verified = 1 AND w.event_url = ?`
   )
@@ -2734,6 +2912,7 @@ async function notifySaleWatchers(
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
     const eventTitle = eventRow.event_title;
     if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, eventTitle, bannerText, postUrl);
+    await sendTelegramAlert(env, watcher.telegram_chat_id, eventTitle, bannerText, postUrl);
     try {
       await sendEmail(
         env,
@@ -2762,7 +2941,7 @@ async function sendCountdownReminder(
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
   const { results: watchers } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
      JOIN sale_watchers w ON w.subscriber_id = s.id
      WHERE s.verified = 1 AND w.event_url = ?`
   )
@@ -2774,6 +2953,7 @@ async function sendCountdownReminder(
   for (const watcher of watchers || []) {
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
     if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, eventTitle, `${label} (expected around ${liveAtLabel}).`, eventUrl);
+    await sendTelegramAlert(env, watcher.telegram_chat_id, eventTitle, `${label} (expected around ${liveAtLabel}).`, eventUrl);
     try {
       await sendEmail(
         env,
@@ -3656,7 +3836,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.email, s.verified, s.created_at, s.whatsapp_phone,
+    `SELECT s.id, s.email, s.verified, s.created_at, s.whatsapp_phone, (s.telegram_chat_id IS NOT NULL) AS on_telegram,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
        (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id AND purchased_at IS NOT NULL) AS bought_count
@@ -3702,7 +3882,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
         ),
       ].join("");
       // Digits only in the database; shown with a + so it reads as an international number.
-      const wa = r.whatsapp_phone ? ` <small>&middot; WhatsApp +${escapeHtml(r.whatsapp_phone)}</small>` : "";
+      const wa = (r.whatsapp_phone ? ` <small>&middot; WhatsApp +${escapeHtml(r.whatsapp_phone)}</small>` : "") + (r.on_telegram ? " <small>&middot; Telegram</small>" : "");
       return `<details class="subscriber-row">
         <summary>${escapeHtml(r.email)}${wa} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></summary>
         <ul>${items || "<li><small>Nothing watched.</small></li>"}</ul>
@@ -4144,6 +4324,9 @@ export default {
       if (url.pathname === "/whatsapp/webhook" && req.method === "GET") return handleWhatsAppWebhookVerify(req, env);
       if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
       if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
+      if (url.pathname === "/telegram/webhook" && req.method === "POST") return await handleTelegramWebhook(req, env);
+      if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
+      if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
       if (url.pathname === "/admin/whatsapp/test-alert" && req.method === "POST") return await handleWhatsAppTestAlert(req, env);
       if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
@@ -4206,6 +4389,7 @@ export default {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
       ctx.waitUntil(env.DB.prepare("DELETE FROM email_log WHERE created_at < datetime('now', '-90 days')").run());
       ctx.waitUntil(env.DB.prepare("DELETE FROM whatsapp_log WHERE created_at < datetime('now', '-90 days')").run());
+      ctx.waitUntil(env.DB.prepare("DELETE FROM telegram_log WHERE created_at < datetime('now', '-90 days')").run());
     }
   },
 

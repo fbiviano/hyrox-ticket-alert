@@ -32,7 +32,15 @@ CREATE TABLE IF NOT EXISTS subscribers (
   whatsapp_opted_out_at TEXT,
   -- When this subscriber's phone last messaged us (any message). For 23 hours after
   -- that we may send normal (non-template) messages; see sendWhatsAppAlert.
-  whatsapp_last_inbound_at TEXT
+  whatsapp_last_inbound_at TEXT,
+  -- Telegram alerts (see "Telegram: subscriber opt-in" in src/index.ts): the chat id
+  -- is stored when the subscriber presses Start on t.me/<bot>?start=<code>. The code is
+  -- the same one-off 30-minute handshake as WhatsApp's. NULL chat id = not linked.
+  telegram_chat_id TEXT,
+  telegram_linked_at TEXT,
+  telegram_code TEXT,
+  telegram_code_expires TEXT,
+  telegram_opted_out_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -294,6 +302,17 @@ CREATE TABLE IF NOT EXISTS partner_applications (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_partner_applications_status ON partner_applications(status);
+
+-- One row per Telegram message we sent (alerts and the /start, /stop replies). A 403 from
+-- Telegram means the person blocked the bot - their link is cleared automatically.
+CREATE TABLE IF NOT EXISTS telegram_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- One row per WhatsApp alert attempt (sendWhatsAppAlert in src/index.ts). ok = 1 means
 -- Meta accepted the message; message_id is the wamid later delivery/read webhooks

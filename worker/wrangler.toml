@@ -19,6 +19,7 @@ WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
 WHATSAPP_PUBLIC_NUMBER = "15556594991"
 # The Meta app id (not a secret) - used to register the webhook through the API.
 WHATSAPP_APP_ID = "1854886458861233"
+TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
@@ -28,6 +29,7 @@ WHATSAPP_APP_ID = "1854886458861233"
 #                        an event match + English summary before auto-publishing
 #   TELEGRAM_BOT_TOKEN - mirrors alerts addressed to ADMIN_EMAIL to Telegram too
 #   TELEGRAM_CHAT_ID   - (optional pair - alerts still email-only if unset)
+#   TELEGRAM_WEBHOOK_SECRET - header secret Telegram echoes on /telegram/webhook calls (set via setWebhook)
 #   WHATSAPP_TOKEN     - WhatsApp Cloud API token (alerts via WhatsApp; off if unset)
 #   ADMIN_WHATSAPP     - admin phone, digits only with country code (test alerts go here)
 #   WHATSAPP_VERIFY_TOKEN - handshake secret Meta uses when registering the webhook URL
