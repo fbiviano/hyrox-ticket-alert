@@ -1051,12 +1051,12 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
       <div class="row" style="gap:6px">
         ${
           r.has_priority
-            ? `<span class="event-badge presale" title="You're alerted before free watchers of this race">&#9889; Priority</span>`
+            ? `<span class="event-badge presale" title="You're alerted minutes before everyone else for this race">&#9889; Priority notification</span>`
             : priorityOn && entry.section !== "live" && !r.resolved
               ? `<form method="POST" action="/priority/checkout">
           <input type="hidden" name="token" value="${escapeHtml(token)}">
           <input type="hidden" name="event_url" value="${escapeHtml(r.event_url)}">
-          <button type="submit" title="Be alerted before free watchers of this race">&#9889; Priority $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}</button>
+          <button type="submit" title="Get alerted minutes before everyone else">&#9889; Priority notification ${PRIORITY_PRICE_LABEL}</button>
         </form>`
               : ""
         }
@@ -2107,22 +2107,34 @@ function priorityOpen(env: Env, s: any): boolean {
   return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
 }
 
-/** One honest sentence on what Priority is, shared by every place that offers it. */
-function priorityExplainer(env: Env): string {
+const PRIORITY_PRICE_LABEL = `$${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}`;
+
+/** How far ahead Priority holders are, in words - shared by every place that offers it. */
+function priorityHeadStart(env: Env): string {
   const m = Math.round(priorityDelayMs(env) / 60_000);
-  const head = m > 0 ? `free watchers of the race get theirs at least ${m} minute${m === 1 ? "" : "s"} later` : "(admin preview: the head start is switched off on this server)";
-  return `Get this race's alert first - ${head}. $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)} once, for this race only. WhatsApp alerts included once they launch. It doesn't reserve or guarantee a ticket.`;
+  return m > 0 ? `everyone else gets theirs at least ${m} minute${m === 1 ? "" : "s"} later` : "admin preview: the head start is switched off on this server";
+}
+
+/** One-line pitch under the race list on My alerts. */
+function priorityExplainer(env: Env): string {
+  return `Priority notification (${PRIORITY_PRICE_LABEL} per race): get alerted minutes before everyone else (${priorityHeadStart(env)}), plus a WhatsApp notification (launching soon). One-off payment, no subscription. It doesn't reserve or guarantee a ticket.`;
 }
 
 function priorityOfferCard(env: Env, token: string, eventUrl: string, eventTitle: string): string {
   return `<div class="card">
-      <h2>&#9889; Want to be alerted first?</h2>
-      <p>${escapeHtml(priorityExplainer(env))}</p>
+      <h2>&#9889; Priority notification - ${PRIORITY_PRICE_LABEL}</h2>
+      <p><b>Get alerted minutes before everyone else</b> when ${escapeHtml(eventTitle)} tickets go on sale.</p>
+      <ul>
+        <li>Your alert goes out first - ${escapeHtml(priorityHeadStart(env))}</li>
+        <li>WhatsApp notification too (launching soon)</li>
+        <li>${PRIORITY_PRICE_LABEL} once, for this race only - no subscription</li>
+      </ul>
       <form method="POST" action="/priority/checkout">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="event_url" value="${escapeHtml(eventUrl)}">
-        <button type="submit">Get Priority for ${escapeHtml(eventTitle)} - $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}</button>
+        <button type="submit">Get Priority notification - ${PRIORITY_PRICE_LABEL}</button>
       </form>
+      <p class="consent">Priority speeds up your alert; it doesn't reserve or guarantee a ticket.</p>
     </div>`;
 }
 
@@ -2201,8 +2213,8 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     "line_items[0][quantity]": "1",
     "line_items[0][price_data][currency]": PRIORITY_CURRENCY,
     "line_items[0][price_data][unit_amount]": String(PRIORITY_PRICE_CENTS),
-    "line_items[0][price_data][product_data][name]": `Priority alerts: ${race.event_title}`.slice(0, 200),
-    "line_items[0][price_data][product_data][description]": "Be alerted first when tickets for this race go on sale. One-off payment, this race only.",
+    "line_items[0][price_data][product_data][name]": `Priority notification: ${race.event_title}`.slice(0, 200),
+    "line_items[0][price_data][product_data][description]": "Get alerted minutes before everyone else when tickets for this race go on sale, plus a WhatsApp notification (launching soon). One-off payment, this race only.",
     client_reference_id: String(s.id),
     customer_email: s.email,
     "metadata[subscriber_id]": String(s.id),
@@ -2735,7 +2747,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
   }
   if (priorityOpen(env, subscriber)) {
-    saleSections.push(`<p class="consent">&#9889; <b>Priority</b>: ${escapeHtml(priorityExplainer(env))}</p>`);
+    saleSections.push(`<p class="consent">&#9889; ${escapeHtml(priorityExplainer(env))}</p>`);
   }
   const verifyBanner = subscriber.verified
     ? ""
