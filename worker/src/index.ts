@@ -718,6 +718,14 @@ const RESOLVE_SCRIPT = `<script>
       fetch('/watch-sale', { method: 'POST', body: fd }).then(function(resp) {
         if (resp.ok) {
           btn.textContent = '✓ Monitoring';
+          if (resp.headers.get('X-Priority-Offer') === '1') {
+            var a = document.createElement('a');
+            a.href = '/watching?event=' + encodeURIComponent(url);
+            a.textContent = '⚡ Get alerted first';
+            a.style.marginLeft = '8px';
+            a.style.fontSize = '0.85rem';
+            btn.parentNode.insertBefore(a, btn.nextSibling);
+          }
         } else {
           btn.disabled = false;
           btn.textContent = '+ Monitor';
@@ -2093,8 +2101,70 @@ const PRIORITY_MAX_DELAY_MINUTES = 30;
 
 function priorityOpen(env: Env, s: any): boolean {
   if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !s?.verified) return false;
-  if (env.PRIORITY_OPEN_TO_ALL === "1") return true;
+  // Selling "alerted first" with no delay configured would be selling nothing, so the
+  // public switch only works together with a real delay. The admin can always preview.
+  if (env.PRIORITY_OPEN_TO_ALL === "1" && priorityDelayMs(env) > 0) return true;
   return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+}
+
+/** One honest sentence on what Priority is, shared by every place that offers it. */
+function priorityExplainer(env: Env): string {
+  const m = Math.round(priorityDelayMs(env) / 60_000);
+  const head = m > 0 ? `free watchers of the race get theirs at least ${m} minute${m === 1 ? "" : "s"} later` : "(admin preview: the head start is switched off on this server)";
+  return `Get this race's alert first - ${head}. $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)} once, for this race only. WhatsApp alerts included once they launch. It doesn't reserve or guarantee a ticket.`;
+}
+
+function priorityOfferCard(env: Env, token: string, eventUrl: string, eventTitle: string): string {
+  return `<div class="card">
+      <h2>&#9889; Want to be alerted first?</h2>
+      <p>${escapeHtml(priorityExplainer(env))}</p>
+      <form method="POST" action="/priority/checkout">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <input type="hidden" name="event_url" value="${escapeHtml(eventUrl)}">
+        <button type="submit">Get Priority for ${escapeHtml(eventTitle)} - $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}</button>
+      </form>
+    </div>`;
+}
+
+/** The subscriber's not-yet-on-sale races they could still buy Priority for. */
+async function priorityCandidates(env: Env, subscriberId: number, eventUrl?: string): Promise<any[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT sw.event_url, sw.event_title FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
+     WHERE w.subscriber_id = ? AND sw.resolved = 0 AND (sw.event_date IS NULL OR sw.event_date >= ?)
+       AND (? IS NULL OR sw.event_url = ?)
+       AND NOT EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = w.subscriber_id AND rp.event_url = w.event_url)
+     ORDER BY sw.event_date IS NULL, sw.event_date LIMIT 3`
+  )
+    .bind(subscriberId, todayIso(), eventUrl ?? null, eventUrl ?? null)
+    .all<any>();
+  return results || [];
+}
+
+/** Shown right after a signed-in subscriber adds a race watch, when Priority is on offer
+ * for it: confirms the (free) watch first, then offers Priority. */
+async function handleWatchingPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const eventUrl = new URL(req.url).searchParams.get("event") || "";
+  if (!subscriber) return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/` } });
+  const race = await env.DB.prepare(
+    "SELECT sw.event_title FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? AND w.event_url = ?"
+  )
+    .bind(subscriber.id, eventUrl)
+    .first<any>();
+  if (!race) return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts` } });
+  const offer = priorityOpen(env, subscriber) ? (await priorityCandidates(env, subscriber.id, eventUrl))[0] : null;
+  const counts = await getWatchCounts(subscriber.id, env);
+  return page(
+    "Watching",
+    `${navBar("/my-alerts", subscriber, counts.tickets + counts.races, false, env)}
+    <div class="card">
+      <h2>&#10003; You're watching ${escapeHtml(race.event_title)}</h2>
+      <p>We'll alert you the moment tickets go on sale - free, as always.</p>
+    </div>
+    ${offer ? priorityOfferCard(env, subscriber.unsubscribe_token, offer.event_url, offer.event_title) : ""}
+    <div class="card"><p><a href="/">No thanks - back to the homepage</a> &middot; <a href="/my-alerts">My alerts</a></p></div>`,
+    offer ? { "X-Priority-Offer": "1" } : {}
+  );
 }
 
 function priorityDelayMs(env: Env): number {
@@ -2552,6 +2622,12 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
     return sendVerificationEmail(env, subscriber, verifyToken);
   }
 
+  if (priorityOpen(env, subscriber) && (await priorityCandidates(env, subscriber.id, eventUrl)).length) {
+    return new Response(null, {
+      status: 303,
+      headers: { Location: `${env.SITE_URL}/watching?event=${encodeURIComponent(eventUrl)}`, "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) },
+    });
+  }
   return redirectHome(env, subscriber.unsubscribe_token);
 }
 
@@ -2562,9 +2638,11 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
     return page("Invalid or expired link", `<div class="card"><p>This confirmation link is invalid or already used.</p></div>`);
   }
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
+  const offers = priorityOpen(env, { ...subscriber, verified: 1 }) ? await priorityCandidates(env, subscriber.id) : [];
   return page(
     "Confirmed",
-    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/my-alerts">Manage my alerts</a></p></div>`,
+    `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/my-alerts">Manage my alerts</a></p></div>
+    ${offers.map((o: any) => priorityOfferCard(env, subscriber.unsubscribe_token, o.event_url, o.event_title)).join("")}`,
     { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
@@ -2655,6 +2733,9 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
   if (saleRows.waiting || saleSections.length === 0) {
     saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
+  }
+  if (priorityOpen(env, subscriber)) {
+    saleSections.push(`<p class="consent">&#9889; <b>Priority</b>: ${escapeHtml(priorityExplainer(env))}</p>`);
   }
   const verifyBanner = subscriber.verified
     ? ""
@@ -4545,6 +4626,7 @@ export default {
       if (url.pathname === "/telegram/webhook" && req.method === "POST") return await handleTelegramWebhook(req, env);
       if (url.pathname === "/stripe/webhook" && req.method === "POST") return await handleStripeWebhook(req, env);
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
+      if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
