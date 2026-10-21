@@ -33,6 +33,7 @@ export interface Env {
   WHATSAPP_PUBLIC_NUMBER?: string; // number subscribers message to link, digits only
   WHATSAPP_VERIFY_TOKEN?: string; // webhook handshake secret
   WHATSAPP_APP_SECRET?: string; // verifies Meta's webhook signatures
+  WHATSAPP_APP_ID?: string; // the Meta app's id (not secret)
   WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
 }
 
@@ -1771,6 +1772,47 @@ async function handleWhatsAppWebhookPost(req: Request, env: Env): Promise<Respon
     }
   }
   return new Response("ok");
+}
+
+/** Registers our webhook with Meta through the Application Subscriptions API
+ * (POST /<app id>/subscriptions with an app access token), as an alternative
+ * to hunting for the Configuration screen in the dashboard. Admin-only (the
+ * admin page's token), and it only ever sends settings the Worker already
+ * holds: Meta then calls our verify handshake straight away. The app secret
+ * is used for the token and never shown or logged. */
+async function handleWhatsAppRegisterWebhook(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+
+  const missing = (["WHATSAPP_APP_ID", "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN"] as const).filter((k) => !env[k]);
+  let result: string;
+  if (missing.length) {
+    result = `Not set up yet - missing: ${missing.join(", ")}.`;
+  } else {
+    try {
+      const resp = await fetch(`${WHATSAPP_API}/${env.WHATSAPP_APP_ID}/subscriptions`, {
+        method: "POST",
+        body: new URLSearchParams({
+          object: "whatsapp_business_account",
+          callback_url: `${env.SITE_URL}/whatsapp/webhook`,
+          verify_token: String(env.WHATSAPP_VERIFY_TOKEN),
+          fields: "messages",
+          access_token: `${env.WHATSAPP_APP_ID}|${env.WHATSAPP_APP_SECRET}`,
+        }),
+      });
+      const j: any = await resp.json().catch(() => ({}));
+      result =
+        resp.ok && j.success
+          ? "Done: Meta accepted the webhook and will now send WhatsApp messages and delivery receipts to roxracealerts.com."
+          : `Meta refused it: ${String(j?.error?.message || resp.status).slice(0, 300)}`;
+    } catch (e) {
+      result = `Could not reach Meta: ${String(e).slice(0, 200)}`;
+    }
+  }
+  return page("WhatsApp webhook", `${adminNav(token, "analytics")}<div class="card"><h2>WhatsApp webhook</h2><p>${escapeHtml(result)}</p></div>`, {
+    "cache-control": "private, no-store",
+  });
 }
 
 /** All JSON API responses go through here - ticket/event status can change
@@ -3787,6 +3829,37 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
       }
     </div>`;
 
+  // WhatsApp (whatsapp_log + subscribers.whatsapp_phone): usage and setup state.
+  const [waLinked, waStats] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE whatsapp_phone IS NOT NULL").first<any>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(ok), 0) AS accepted,
+           COALESCE(SUM(delivery_status IN ('delivered', 'read')), 0) AS delivered,
+           COALESCE(SUM(delivery_status = 'failed' OR ok = 0), 0) AS failed
+         FROM whatsapp_log WHERE template = ? AND created_at >= datetime('now', '-7 days')`
+      )
+      .bind(WHATSAPP_ALERT_TEMPLATE)
+      .first<any>(),
+  ]);
+  const flag = (ok: boolean) => (ok ? "&#10003;" : "&#10007;");
+  const waCardHtml = () => `<div class="card">
+      <h2>WhatsApp</h2>
+      <p><small>Alerts go to subscribers who linked their phone on My alerts. "Accepted" means Meta took the message; "delivered" comes from Meta's delivery receipts, which need the webhook below.</small></p>
+      <div class="tiles">
+        ${tile(waLinked?.n || 0, "subscribers linked")}
+        ${tile(waStats?.total || 0, "alerts sent, last 7 days")}
+        ${tile(waStats?.accepted || 0, "accepted by Meta")}
+        ${tile(waStats?.delivered || 0, "delivered or read")}
+        ${tile(waStats?.failed || 0, "failed")}
+      </div>
+      <p><small>Setup: token ${flag(!!env.WHATSAPP_TOKEN)} &middot; app secret ${flag(!!env.WHATSAPP_APP_SECRET)} &middot; verify token ${flag(!!env.WHATSAPP_VERIFY_TOKEN)} &middot; app id ${flag(!!env.WHATSAPP_APP_ID)}</small></p>
+      <form method="POST" action="/admin/whatsapp/register-webhook">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <button type="submit">Register the webhook with Meta</button>
+      </form>
+    </div>`;
+
   const verified = counts?.verified || 0;
   const total = counts?.total || 0;
   const pct = (n: number, d: number) => (d > 0 ? `${Math.round((n / d) * 100)}%` : "0%");
@@ -3857,6 +3930,8 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
     </div>
 
     ${mailCardHtml()}
+
+    ${waCardHtml()}
 
     ${sponsorCard}
 
@@ -4007,6 +4082,7 @@ export default {
       if (url.pathname === "/whatsapp/webhook" && req.method === "GET") return handleWhatsAppWebhookVerify(req, env);
       if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
       if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
+      if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
       if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
       if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
         // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,

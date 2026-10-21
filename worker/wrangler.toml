@@ -17,6 +17,8 @@ ADMIN_EMAIL = "francescobiviano609@gmail.com"
 WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
 # The number subscribers message to link WhatsApp (digits only). Meta's test number for now.
 WHATSAPP_PUBLIC_NUMBER = "15556594991"
+# The Meta app id (not a secret) - used to register the webhook through the API.
+WHATSAPP_APP_ID = "1854886458861233"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
