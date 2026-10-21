@@ -1649,7 +1649,14 @@ function renderWhatsAppCard(env: Env, s: any): string {
       <form method="POST" action="/whatsapp/unlink"><input type="hidden" name="token" value="${token}"><button type="submit">Turn off WhatsApp alerts</button></form>
     </div>`;
   }
-  if (!whatsappLinkingOpen(env, s)) return "";
+  if (!whatsappLinkingOpen(env, s)) {
+    // Everyone else sees it is on the way; only verified subscribers, like the live channels.
+    if (!s.verified) return "";
+    return `<div class="card">
+      <h2>WhatsApp alerts <small>coming soon</small></h2>
+      <p>WhatsApp alerts are on the way. For instant alerts today, use Telegram below.</p>
+    </div>`;
+  }
 
   const number = String(env.WHATSAPP_PUBLIC_NUMBER).replace(/\D/g, "");
   const expires = s.whatsapp_code_expires ? Date.parse(String(s.whatsapp_code_expires).replace(" ", "T") + "Z") : 0;
