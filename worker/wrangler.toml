@@ -15,6 +15,8 @@ ADMIN_EMAIL = "francescobiviano609@gmail.com"
 # WhatsApp Cloud API sending number. Currently Meta's free TEST number; swap for the real
 # number's ID when one is registered. Not a secret - useless without WHATSAPP_TOKEN.
 WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
+# The number subscribers message to link WhatsApp (digits only). Meta's test number for now.
+WHATSAPP_PUBLIC_NUMBER = "15556594991"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
@@ -26,6 +28,9 @@ WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
 #   TELEGRAM_CHAT_ID   - (optional pair - alerts still email-only if unset)
 #   WHATSAPP_TOKEN     - WhatsApp Cloud API token (alerts via WhatsApp; off if unset)
 #   ADMIN_WHATSAPP     - admin phone, digits only with country code (test alerts go here)
+#   WHATSAPP_VERIFY_TOKEN - handshake secret Meta uses when registering the webhook URL
+#   WHATSAPP_APP_SECRET   - the Meta app secret; verifies the signature on every webhook
+# Optional var WHATSAPP_OPEN_TO_ALL = "1" lets every verified subscriber link WhatsApp (default: admin only).
 
 [limits]
 # Free plan hard-caps CPU time at 10ms per invocation (not configurable) -

@@ -30,6 +30,10 @@ export interface Env {
   WHATSAPP_TOKEN?: string;
   WHATSAPP_PHONE_NUMBER_ID?: string;
   ADMIN_WHATSAPP?: string;
+  WHATSAPP_PUBLIC_NUMBER?: string; // number subscribers message to link, digits only
+  WHATSAPP_VERIFY_TOKEN?: string; // webhook handshake secret
+  WHATSAPP_APP_SECRET?: string; // verifies Meta's webhook signatures
+  WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
 }
 
 interface TrackedTicket {
@@ -201,44 +205,30 @@ async function notifyAdminTelegram(env: Env, recipientEmail: string, text: strin
   }
 }
 
-/** WhatsApp alerts via Meta's Cloud API. Business-initiated messages must use
- * a pre-approved template, so every alert goes through one UTILITY template,
- * "ticket_alert": "RoxRaceAlerts update for {{1}}: {{2}} Open it here: {{3}}
- * You are getting this because you asked for HYROX ticket alerts on
- * roxracealerts.com." (footer: Reply STOP to turn off WhatsApp alerts).
- * Template variables can't contain newlines/tabs or runs of spaces, hence
- * the cleaning. Never throws - an alert must not fail because WhatsApp did -
- * and every attempt is recorded in whatsapp_log, success or not. Returns
- * whether Meta accepted it ("accepted" is not "delivered": delivery and read
- * receipts arrive later by webhook). */
+/** WhatsApp via Meta's Cloud API. Business-initiated messages (our alerts)
+ * must use a pre-approved template, so every alert goes through one UTILITY
+ * template, "ticket_alert": "RoxRaceAlerts update for {{1}}: {{2}} Open it
+ * here: {{3}} You are getting this because you asked for HYROX ticket alerts
+ * on roxracealerts.com." (footer: Reply STOP to turn off WhatsApp alerts).
+ * Replies to something a person just sent us (the START/STOP confirmations)
+ * are free-form text, allowed for 24h after their message.
+ *
+ * Everything funnels through postWhatsApp(): it never throws - an alert must
+ * not fail because WhatsApp did - and records every attempt in whatsapp_log,
+ * success or not. "Accepted" is not "delivered": delivery/read receipts
+ * arrive later by webhook and are written onto the same row. */
 const WHATSAPP_API = "https://graph.facebook.com/v25.0";
 const WHATSAPP_ALERT_TEMPLATE = "ticket_alert";
 
-async function sendWhatsAppAlert(env: Env, to: string, title: string, message: string, url: string): Promise<boolean> {
+async function postWhatsApp(env: Env, number: string, label: string, message: Record<string, unknown>): Promise<boolean> {
   if (!env.WHATSAPP_TOKEN || !env.WHATSAPP_PHONE_NUMBER_ID) return false;
-  const clean = (v: string, max: number) => v.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, max);
-  const number = to.replace(/\D/g, "");
   let error: string | null = null;
   let messageId: string | null = null;
   try {
     const resp = await fetch(`${WHATSAPP_API}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: number,
-        type: "template",
-        template: {
-          name: WHATSAPP_ALERT_TEMPLATE,
-          language: { code: "en" },
-          components: [
-            {
-              type: "body",
-              parameters: [clean(title, 60), clean(message, 200), clean(url, 300)].map((text) => ({ type: "text", text })),
-            },
-          ],
-        },
-      }),
+      body: JSON.stringify({ messaging_product: "whatsapp", to: number, ...message }),
     });
     const body: any = await resp.json().catch(() => ({}));
     if (!resp.ok) error = `${resp.status} ${body?.error?.code ?? ""} ${body?.error?.message ?? ""}`.trim().slice(0, 300);
@@ -248,7 +238,7 @@ async function sendWhatsAppAlert(env: Env, to: string, title: string, message: s
   }
   try {
     await env.DB.prepare("INSERT INTO whatsapp_log (to_number, template, ok, error, message_id) VALUES (?, ?, ?, ?, ?)")
-      .bind(number, WHATSAPP_ALERT_TEMPLATE, error ? 0 : 1, error, messageId)
+      .bind(number, label, error ? 0 : 1, error, messageId)
       .run();
   } catch (logErr) {
     console.error("Failed to write whatsapp_log:", logErr);
@@ -257,19 +247,38 @@ async function sendWhatsAppAlert(env: Env, to: string, title: string, message: s
   return !error;
 }
 
-/** Same rule as notifyAdminTelegram: for now WhatsApp alerts only go to the
- * admin's own phone (ADMIN_WHATSAPP), and only for alerts addressed to the
- * admin's own email - subscribers get WhatsApp once opt-in exists. */
-async function notifyAdminWhatsApp(env: Env, recipientEmail: string, title: string, message: string, url: string): Promise<void> {
-  if (!env.ADMIN_EMAIL || recipientEmail.toLowerCase() !== env.ADMIN_EMAIL.toLowerCase()) return;
-  if (!env.ADMIN_WHATSAPP) return;
-  await sendWhatsAppAlert(env, env.ADMIN_WHATSAPP, title, message, url);
+/** One alert to one phone. Template variables can't contain newlines, tabs or
+ * runs of spaces, hence the cleaning. */
+async function sendWhatsAppAlert(env: Env, to: string, title: string, message: string, url: string): Promise<boolean> {
+  const clean = (v: string, max: number) => v.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, max);
+  return postWhatsApp(env, to.replace(/\D/g, ""), WHATSAPP_ALERT_TEMPLATE, {
+    type: "template",
+    template: {
+      name: WHATSAPP_ALERT_TEMPLATE,
+      language: { code: "en" },
+      components: [{ type: "body", parameters: [clean(title, 60), clean(message, 200), clean(url, 300)].map((text) => ({ type: "text", text })) }],
+    },
+  });
+}
+
+/** Free-form reply to a person who just messaged us. Capped at 3 per phone
+ * per hour: anyone can message the number, and replies beyond Meta's free
+ * allowance cost money, so garbage must not be able to run up a bill. */
+async function sendWhatsAppReply(env: Env, to: string, text: string): Promise<boolean> {
+  const number = to.replace(/\D/g, "");
+  const recent = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM whatsapp_log WHERE to_number = ? AND template = 'reply' AND created_at >= datetime('now', '-1 hour')"
+  )
+    .bind(number)
+    .first<any>();
+  if ((recent?.n || 0) >= 3) return false;
+  return postWhatsApp(env, number, "reply", { type: "text", text: { body: text.slice(0, 1000), preview_url: false } });
 }
 
 /** Email every verified subscriber watching this exact (event_name, ticket_name). */
 async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
   const { results } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
      JOIN subscriptions sub ON sub.subscriber_id = s.id
      WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
   )
@@ -280,6 +289,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
   for (const row of results || []) {
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
     const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
+    if (row.whatsapp_phone) await sendWhatsAppAlert(env, row.whatsapp_phone, eventName, `${ticketName} is now available.`, link);
     try {
       await sendEmail(
         env,
@@ -289,7 +299,6 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
         `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
       );
       await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
-      await notifyAdminWhatsApp(env, row.email, eventName, `${ticketName} is now available.`, link);
       sent++;
     } catch (e) {
       console.error(`Failed to email ${row.email}:`, e);
@@ -1569,6 +1578,201 @@ async function handleSponsorOut(req: Request, env: Env, id: number): Promise<Res
   return new Response(null, { status: 302, headers: { Location: s.url, "cache-control": "no-store", "X-Robots-Tag": "noindex" } });
 }
 
+// ---------------------------------------------------------------------------
+// WhatsApp: subscriber opt-in (code handshake), webhook, STOP, My alerts card
+//
+// Linking proves phone ownership without us ever asking for a number: the
+// subscriber taps "Get alerts on WhatsApp" on My alerts, gets a one-off 6
+// character code (valid 30 minutes), and sends "START <code>" to our WhatsApp
+// number. Meta tells us (webhook) which phone the message came from - that
+// sender number is authenticated by WhatsApp, so it can't be spoofed - and we
+// store it against the subscriber who owns that code. STOP (or the button on
+// My alerts) clears it again. Until WHATSAPP_OPEN_TO_ALL=1 only the admin's own
+// subscriber record is offered the button (the sender is still Meta's test
+// number, which can reach almost nobody).
+// ---------------------------------------------------------------------------
+const WA_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I - 32 symbols, no modulo bias on a byte
+const WA_STOP_WORDS = new Set(["stop", "stopp", "stop all", "unsubscribe", "cancel", "quit", "end", "arret", "arrêt"]);
+
+function newWhatsAppCode(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => WA_CODE_ALPHABET[b % WA_CODE_ALPHABET.length]).join("");
+}
+
+/** May this subscriber be offered the "link WhatsApp" button right now? */
+function whatsappLinkingOpen(env: Env, s: any): boolean {
+  if (!env.WHATSAPP_TOKEN || !env.WHATSAPP_PUBLIC_NUMBER || !s.verified) return false;
+  if (env.WHATSAPP_OPEN_TO_ALL === "1") return true;
+  return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+}
+
+function renderWhatsAppCard(env: Env, s: any): string {
+  const token = escapeHtml(s.unsubscribe_token);
+  if (s.whatsapp_phone) {
+    const last4 = escapeHtml(String(s.whatsapp_phone).slice(-4));
+    return `<div class="card">
+      <h2>WhatsApp alerts</h2>
+      <p>On for the number ending in <b>${last4}</b> - you get the same alerts as by email. Reply <b>STOP</b> on WhatsApp any time, or:</p>
+      <form method="POST" action="/whatsapp/unlink"><input type="hidden" name="token" value="${token}"><button type="submit">Turn off WhatsApp alerts</button></form>
+    </div>`;
+  }
+  if (!whatsappLinkingOpen(env, s)) return "";
+
+  const number = String(env.WHATSAPP_PUBLIC_NUMBER).replace(/\D/g, "");
+  const expires = s.whatsapp_code_expires ? Date.parse(String(s.whatsapp_code_expires).replace(" ", "T") + "Z") : 0;
+  if (s.whatsapp_code && expires > Date.now()) {
+    const code = escapeHtml(s.whatsapp_code);
+    const link = `https://wa.me/${number}?text=${encodeURIComponent(`START ${s.whatsapp_code}`)}`;
+    return `<div class="card">
+      <h2>WhatsApp alerts</h2>
+      <p>Almost done. Send this message to our WhatsApp number <b>+${escapeHtml(number)}</b>:</p>
+      <p style="font-size:1.4rem;letter-spacing:0.05em"><b>START ${code}</b></p>
+      <p><a href="${escapeHtml(link)}" target="_blank" rel="noopener"><button type="button">Open WhatsApp with the message ready</button></a></p>
+      <p><small>The code works for 30 minutes. Once WhatsApp confirms, <a href="/my-alerts">refresh this page</a>.</small></p>
+    </div>`;
+  }
+  return `<div class="card">
+      <h2>WhatsApp alerts</h2>
+      <p>Get the same alerts on WhatsApp as well as email. We never ask for your number - you prove it's yours by sending us one message.</p>
+      <form method="POST" action="/whatsapp/link"><input type="hidden" name="token" value="${token}"><button type="submit">Get alerts on WhatsApp</button></form>
+      <p class="consent">By linking, you agree to receive HYROX ticket alerts on WhatsApp for the races you watch. Reply STOP any time to turn them off.</p>
+    </div>`;
+}
+
+async function handleWhatsAppLink(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const s = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!s || !whatsappLinkingOpen(env, s)) {
+    return page("Not available", `<div class="card"><p>WhatsApp alerts aren't available for this account yet. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  }
+  await env.DB.prepare("UPDATE subscribers SET whatsapp_code = ?, whatsapp_code_expires = datetime('now', '+30 minutes') WHERE id = ?")
+    .bind(newWhatsAppCode(), s.id)
+    .run();
+  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+}
+
+async function handleWhatsAppUnlink(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const s = await env.DB.prepare("SELECT id FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!s) return page("Not found", `<div class="card"><p>This link is invalid.</p></div>`);
+  await env.DB.prepare(
+    "UPDATE subscribers SET whatsapp_phone = NULL, whatsapp_linked_at = NULL, whatsapp_code = NULL, whatsapp_code_expires = NULL, whatsapp_opted_out_at = datetime('now') WHERE id = ?"
+  )
+    .bind(s.id)
+    .run();
+  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+}
+
+/** Meta's one-off check when the callback URL is registered. */
+function handleWhatsAppWebhookVerify(req: Request, env: Env): Response {
+  const u = new URL(req.url);
+  if (
+    u.searchParams.get("hub.mode") === "subscribe" &&
+    env.WHATSAPP_VERIFY_TOKEN &&
+    u.searchParams.get("hub.verify_token") === env.WHATSAPP_VERIFY_TOKEN
+  ) {
+    return new Response(u.searchParams.get("hub.challenge") || "", { status: 200, headers: { "content-type": "text/plain" } });
+  }
+  return new Response("Forbidden", { status: 403 });
+}
+
+/** Meta signs every webhook body with the app secret (X-Hub-Signature-256).
+ * crypto.subtle.verify compares in constant time. */
+async function whatsappSignatureOk(env: Env, raw: string, header: string | null): Promise<boolean> {
+  if (!env.WHATSAPP_APP_SECRET || !header || !/^sha256=[0-9a-f]{64}$/i.test(header)) return false;
+  const sig = Uint8Array.from(header.slice(7).match(/../g)!.map((h) => parseInt(h, 16)));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.WHATSAPP_APP_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  return crypto.subtle.verify("HMAC", key, sig, new TextEncoder().encode(raw));
+}
+
+const WA_STATUS_RANK: Record<string, number> = { sent: 1, delivered: 2, read: 3, failed: 4 };
+
+async function applyWhatsAppStatus(env: Env, st: any): Promise<void> {
+  const id = String(st?.id || "");
+  const status = String(st?.status || "").toLowerCase();
+  if (!id || !WA_STATUS_RANK[status]) return;
+  const row = await env.DB.prepare("SELECT delivery_status FROM whatsapp_log WHERE message_id = ?").bind(id).first<any>();
+  if (!row) return; // a message we didn't log (e.g. sent from the dashboard test console)
+  // Statuses can arrive out of order; never step backwards (read -> delivered).
+  if (row.delivery_status && (WA_STATUS_RANK[row.delivery_status] || 0) >= WA_STATUS_RANK[status] && status !== "failed") return;
+  const e = st?.errors?.[0];
+  const err = e ? `${e.code ?? ""} ${e.title ?? e.message ?? ""}`.trim().slice(0, 300) : null;
+  await env.DB.prepare("UPDATE whatsapp_log SET delivery_status = ?, status_at = datetime('now'), error = COALESCE(?, error) WHERE message_id = ?")
+    .bind(status, err, id)
+    .run();
+}
+
+async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
+  const from = String(m?.from || "").replace(/\D/g, "");
+  if (!from || m?.type !== "text") return;
+  // The body is only parsed, never stored or logged: it is a stranger's text.
+  const text = String(m?.text?.body || "").trim().slice(0, 200);
+  const norm = text.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
+
+  if (WA_STOP_WORDS.has(norm)) {
+    await env.DB.prepare(
+      "UPDATE subscribers SET whatsapp_phone = NULL, whatsapp_linked_at = NULL, whatsapp_opted_out_at = datetime('now') WHERE whatsapp_phone = ?"
+    )
+      .bind(from)
+      .run();
+    await sendWhatsAppReply(env, from, "WhatsApp alerts are turned off. Your email alerts continue as before. You can turn WhatsApp back on any time from My alerts on roxracealerts.com.");
+    return;
+  }
+
+  const upper = text.toUpperCase();
+  const code = upper.match(/^(?:START\s+)?([A-HJ-NP-Z2-9]{6})$/)?.[1];
+  if (code) {
+    const s = await env.DB.prepare("SELECT id FROM subscribers WHERE whatsapp_code = ? AND whatsapp_code_expires > datetime('now')")
+      .bind(code)
+      .first<any>();
+    if (s) {
+      await env.DB.prepare(
+        "UPDATE subscribers SET whatsapp_phone = ?, whatsapp_linked_at = datetime('now'), whatsapp_opted_out_at = NULL, whatsapp_code = NULL, whatsapp_code_expires = NULL WHERE id = ?"
+      )
+        .bind(from, s.id)
+        .run();
+      await sendWhatsAppReply(env, from, "You're set! WhatsApp alerts from RoxRaceAlerts are on: you'll get the same HYROX ticket alerts as by email. Reply STOP any time to turn them off.");
+      return;
+    }
+  }
+  // Only answer what looks like an attempt to link; ignore everything else.
+  if (code || upper.startsWith("START")) {
+    await sendWhatsAppReply(env, from, "That code isn't valid or has expired. Open My alerts on roxracealerts.com and tap \"Get alerts on WhatsApp\" for a new one.");
+  }
+}
+
+async function handleWhatsAppWebhookPost(req: Request, env: Env): Promise<Response> {
+  const raw = await req.text();
+  // Fail closed: without the app secret we cannot tell Meta from anyone else.
+  if (!env.WHATSAPP_APP_SECRET) {
+    console.error("WhatsApp webhook ignored: WHATSAPP_APP_SECRET is not set");
+    return new Response("Not configured", { status: 503 });
+  }
+  if (!(await whatsappSignatureOk(env, raw, req.headers.get("X-Hub-Signature-256")))) return new Response("Bad signature", { status: 401 });
+  let payload: any;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return new Response("ok");
+  }
+  for (const entry of payload?.entry || []) {
+    for (const change of entry?.changes || []) {
+      if (change?.field !== "messages") continue;
+      const v = change.value || {};
+      if (env.WHATSAPP_PHONE_NUMBER_ID && v.metadata?.phone_number_id && v.metadata.phone_number_id !== env.WHATSAPP_PHONE_NUMBER_ID) continue;
+      try {
+        for (const st of v.statuses || []) await applyWhatsAppStatus(env, st);
+        for (const m of v.messages || []) await handleWhatsAppInbound(env, m);
+      } catch (e) {
+        // Meta retries anything that isn't a 200 - a bad message must not cause a retry storm.
+        console.error("WhatsApp webhook handling failed:", e);
+      }
+    }
+  }
+  return new Response("ok");
+}
+
 /** All JSON API responses go through here - ticket/event status can change
  * from one check to the next, so none of it may ever be cached at the edge
  * (the same lesson as page()'s Cache-Control, applied to the JSON side). */
@@ -2019,6 +2223,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     </div>
     ${rows.purchased ? `<div class="card"><h2>Purchased</h2>${rows.purchased}</div>` : ""}
     ${pastEventsSection(rows.past, saleRows.past)}
+    ${renderWhatsAppCard(env, subscriber)}
     <div class="card">
       <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
     </div>
@@ -2237,7 +2442,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
       .run();
 
     const { results: watchers } = await env.DB.prepare(
-      `SELECT s.email, s.unsubscribe_token FROM subscribers s
+      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
        JOIN sale_watchers w ON w.subscriber_id = s.id
        WHERE s.verified = 1 AND w.event_url = ?`
     )
@@ -2246,6 +2451,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
 
     for (const watcher of watchers || []) {
       const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+      if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, row.event_title, "tickets are now on sale!", row.event_url);
       try {
         await sendEmail(
           env,
@@ -2255,7 +2461,6 @@ async function checkSaleWatches(env: Env): Promise<void> {
           `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
         );
         await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
-        await notifyAdminWhatsApp(env, watcher.email, row.event_title, "tickets are now on sale!", row.event_url);
       } catch (e) {
         console.error(`Failed to email ${watcher.email}:`, e);
       }
@@ -2420,7 +2625,7 @@ async function notifySaleWatchers(
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
   const { results: watchers } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
      JOIN sale_watchers w ON w.subscriber_id = s.id
      WHERE s.verified = 1 AND w.event_url = ?`
   )
@@ -2430,6 +2635,7 @@ async function notifySaleWatchers(
   for (const watcher of watchers || []) {
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
     const eventTitle = eventRow.event_title;
+    if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, eventTitle, bannerText, postUrl);
     try {
       await sendEmail(
         env,
@@ -2442,7 +2648,6 @@ async function notifySaleWatchers(
         `${eventTitle}: ${bannerText}\n${postUrl}\n\n${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `📣 ${eventTitle}: ${bannerText}\n${postUrl}`);
-      await notifyAdminWhatsApp(env, watcher.email, eventTitle, bannerText, postUrl);
     } catch (e) {
       console.error(`Failed to email ${watcher.email}:`, e);
     }
@@ -2459,7 +2664,7 @@ async function sendCountdownReminder(
   const eventRow = await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
   if (!eventRow) return;
   const { results: watchers } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone FROM subscribers s
      JOIN sale_watchers w ON w.subscriber_id = s.id
      WHERE s.verified = 1 AND w.event_url = ?`
   )
@@ -2470,6 +2675,7 @@ async function sendCountdownReminder(
   const liveAtLabel = formatInTimezone(liveAtUtc, liveAtTimezone);
   for (const watcher of watchers || []) {
     const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+    if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, eventTitle, `${label} (expected around ${liveAtLabel}).`, eventUrl);
     try {
       await sendEmail(
         env,
@@ -2479,7 +2685,6 @@ async function sendCountdownReminder(
         `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}`);
-      await notifyAdminWhatsApp(env, watcher.email, eventTitle, `${label} (expected around ${liveAtLabel}).`, eventUrl);
     } catch (e) {
       console.error(`Failed to email reminder to ${watcher.email}:`, e);
     }
@@ -3799,6 +4004,10 @@ export default {
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
       if (url.pathname === "/admin/send-nudges" && req.method === "POST") return await handleSendNudges(req, env);
       if (url.pathname === "/admin/send-ig-post-reminder" && req.method === "POST") return await handleSendIgPostReminder(req, env);
+      if (url.pathname === "/whatsapp/webhook" && req.method === "GET") return handleWhatsAppWebhookVerify(req, env);
+      if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
+      if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
+      if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
       if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
         // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,
         // template approval) can be checked on demand. Nothing goes to subscribers.

@@ -19,7 +19,17 @@ CREATE TABLE IF NOT EXISTS subscribers (
   manual_verify_email_sent_at TEXT,
   -- Set when the one "last reminder" (5 days after signup, for anyone who
   -- ignored the nudge) has gone out - see sendFinalVerificationReminders().
-  final_nudge_sent_at TEXT
+  final_nudge_sent_at TEXT,
+  -- WhatsApp alerts (see "WhatsApp: subscriber opt-in" in src/index.ts).
+  -- whatsapp_phone: digits only, set when the subscriber sends "START <code>"
+  -- from that phone; NULL = not linked. whatsapp_code(+_expires): the one-off
+  -- 30-minute handshake code shown on My alerts. whatsapp_opted_out_at: last
+  -- STOP / "turn off". Alerts only go to a non-NULL whatsapp_phone.
+  whatsapp_phone TEXT,
+  whatsapp_linked_at TEXT,
+  whatsapp_code TEXT,
+  whatsapp_code_expires TEXT,
+  whatsapp_opted_out_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -293,6 +303,10 @@ CREATE TABLE IF NOT EXISTS whatsapp_log (
   ok INTEGER NOT NULL,
   error TEXT,
   message_id TEXT,
+  -- Latest delivery receipt from Meta's webhook for this message: sent, delivered,
+  -- read or failed (ok = 1 only means Meta accepted it).
+  delivery_status TEXT,
+  status_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
