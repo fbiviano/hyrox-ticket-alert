@@ -257,16 +257,35 @@ async function postWhatsApp(env: Env, number: string, label: string, message: Re
   return !error;
 }
 
-/** One alert to one phone. Template variables can't contain newlines, tabs or
- * runs of spaces, hence the cleaning. */
+/** One alert to one phone. If that person messaged us in the last 23 hours
+ * (their 24h customer-service window is open) the alert goes as a normal
+ * message - free, and it needs no approved template. Otherwise (the usual
+ * case: alerts rarely land inside a window) it goes through the template. A
+ * normal message that Meta refuses falls back to the template, so a window we
+ * misjudged can't lose an alert. Template variables can't contain newlines,
+ * tabs or runs of spaces, hence the cleaning. */
+const WHATSAPP_ALERT_TEXT_LABEL = "ticket_alert_text"; // same alert, sent as a normal message inside an open window
+
 async function sendWhatsAppAlert(env: Env, to: string, title: string, message: string, url: string): Promise<boolean> {
   const clean = (v: string, max: number) => v.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, max);
-  return postWhatsApp(env, to.replace(/\D/g, ""), WHATSAPP_ALERT_TEMPLATE, {
+  const number = to.replace(/\D/g, "");
+  const [t, m, u] = [clean(title, 60), clean(message, 200), clean(url, 300)];
+
+  const win = await env.DB.prepare(
+    "SELECT 1 AS open FROM subscribers WHERE whatsapp_phone = ? AND whatsapp_last_inbound_at >= datetime('now', '-23 hours') LIMIT 1"
+  )
+    .bind(number)
+    .first<any>();
+  if (win) {
+    const text = `RoxRaceAlerts update for ${t}: ${m} Open it here: ${u}\n\nYou are getting this because you asked for HYROX ticket alerts on roxracealerts.com.\nReply STOP to turn off WhatsApp alerts.`;
+    if (await postWhatsApp(env, number, WHATSAPP_ALERT_TEXT_LABEL, { type: "text", text: { body: text, preview_url: false } })) return true;
+  }
+  return postWhatsApp(env, number, WHATSAPP_ALERT_TEMPLATE, {
     type: "template",
     template: {
       name: WHATSAPP_ALERT_TEMPLATE,
       language: { code: "en" },
-      components: [{ type: "body", parameters: [clean(title, 60), clean(message, 200), clean(url, 300)].map((text) => ({ type: "text", text })) }],
+      components: [{ type: "body", parameters: [t, m, u].map((text) => ({ type: "text", text })) }],
     },
   });
 }
@@ -1717,7 +1736,10 @@ async function applyWhatsAppStatus(env: Env, st: any): Promise<void> {
 
 async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
   const from = String(m?.from || "").replace(/\D/g, "");
-  if (!from || m?.type !== "text") return;
+  if (!from) return;
+  // Any message from them - even one we ignore - opens a 24h window in which we may send normal messages.
+  await env.DB.prepare("UPDATE subscribers SET whatsapp_last_inbound_at = datetime('now') WHERE whatsapp_phone = ?").bind(from).run();
+  if (m?.type !== "text") return;
   // The body is only parsed, never stored or logged: it is a stranger's text.
   const text = String(m?.text?.body || "").trim().slice(0, 200);
   const norm = text.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
@@ -1740,7 +1762,7 @@ async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
       .first<any>();
     if (s) {
       await env.DB.prepare(
-        "UPDATE subscribers SET whatsapp_phone = ?, whatsapp_linked_at = datetime('now'), whatsapp_opted_out_at = NULL, whatsapp_code = NULL, whatsapp_code_expires = NULL WHERE id = ?"
+        "UPDATE subscribers SET whatsapp_phone = ?, whatsapp_linked_at = datetime('now'), whatsapp_last_inbound_at = datetime('now'), whatsapp_opted_out_at = NULL, whatsapp_code = NULL, whatsapp_code_expires = NULL WHERE id = ?"
       )
         .bind(from, s.id)
         .run();
@@ -1783,6 +1805,29 @@ async function handleWhatsAppWebhookPost(req: Request, env: Env): Promise<Respon
     }
   }
   return new Response("ok");
+}
+
+/** Button on the admin WhatsApp card: sends one clearly-labelled test alert to
+ * ADMIN_WHATSAPP through the real sendWhatsAppAlert path (normal message if
+ * the admin's 24h window is open, template otherwise) and shows exactly what
+ * Meta answered, so "is WhatsApp working?" never needs a developer. */
+async function handleWhatsAppTestAlert(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
+  let result: string;
+  if (!env.ADMIN_WHATSAPP || !env.WHATSAPP_TOKEN) {
+    result = "Not set up: ADMIN_WHATSAPP or WHATSAPP_TOKEN is missing.";
+  } else {
+    const ok = await sendWhatsAppAlert(env, env.ADMIN_WHATSAPP, "HYROX Basel", "this is a TEST alert, not a real sale.", `${env.SITE_URL}/`);
+    const last = await env.DB.prepare("SELECT template, ok, error FROM whatsapp_log ORDER BY id DESC LIMIT 1").first<any>();
+    result = ok
+      ? `Sent - check your WhatsApp. (Sent as: ${last?.template === WHATSAPP_ALERT_TEXT_LABEL ? "a normal message, because you messaged us in the last 23 hours" : "the approved template"}.)`
+      : `Meta refused it: ${String(last?.error || "unknown error").slice(0, 400)}`;
+  }
+  return page("WhatsApp test", `${adminNav(token, "analytics")}<div class="card"><h2>WhatsApp test alert</h2><p>${escapeHtml(result)}</p></div>`, {
+    "cache-control": "private, no-store",
+  });
 }
 
 /** Registers our webhook with Meta through the Application Subscriptions API
@@ -3850,9 +3895,9 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         `SELECT COUNT(*) AS total, COALESCE(SUM(ok), 0) AS accepted,
            COALESCE(SUM(delivery_status IN ('delivered', 'read')), 0) AS delivered,
            COALESCE(SUM(delivery_status = 'failed' OR ok = 0), 0) AS failed
-         FROM whatsapp_log WHERE template = ? AND created_at >= datetime('now', '-7 days')`
+         FROM whatsapp_log WHERE template IN (?, ?) AND created_at >= datetime('now', '-7 days')`
       )
-      .bind(WHATSAPP_ALERT_TEMPLATE)
+      .bind(WHATSAPP_ALERT_TEMPLATE, WHATSAPP_ALERT_TEXT_LABEL)
       .first<any>(),
   ]);
   const flag = (ok: boolean) => (ok ? "&#10003;" : "&#10007;");
@@ -3867,7 +3912,11 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(waStats?.failed || 0, "failed")}
       </div>
       <p><small>Setup: token ${flag(!!env.WHATSAPP_TOKEN)} &middot; app secret ${flag(!!env.WHATSAPP_APP_SECRET)} &middot; verify token ${flag(!!env.WHATSAPP_VERIFY_TOKEN)} &middot; app id ${flag(!!env.WHATSAPP_APP_ID)}</small></p>
-      <form method="POST" action="/admin/whatsapp/register-webhook">
+      <form method="POST" action="/admin/whatsapp/test-alert" style="display:inline-block;margin-right:8px">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <button type="submit">Send me a test alert on WhatsApp</button>
+      </form>
+      <form method="POST" action="/admin/whatsapp/register-webhook" style="display:inline-block">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <button type="submit">Register the webhook with Meta</button>
       </form>
@@ -4096,6 +4145,7 @@ export default {
       if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
       if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
+      if (url.pathname === "/admin/whatsapp/test-alert" && req.method === "POST") return await handleWhatsAppTestAlert(req, env);
       if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
       if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
         // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,

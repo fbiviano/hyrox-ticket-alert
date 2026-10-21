@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS subscribers (
   whatsapp_linked_at TEXT,
   whatsapp_code TEXT,
   whatsapp_code_expires TEXT,
-  whatsapp_opted_out_at TEXT
+  whatsapp_opted_out_at TEXT,
+  -- When this subscriber's phone last messaged us (any message). For 23 hours after
+  -- that we may send normal (non-template) messages; see sendWhatsAppAlert.
+  whatsapp_last_inbound_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
