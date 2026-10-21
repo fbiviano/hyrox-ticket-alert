@@ -28,6 +28,10 @@ export interface Env {
   TELEGRAM_CHAT_ID?: string;
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
   TELEGRAM_WEBHOOK_SECRET?: string; // header secret Telegram echoes on every webhook call
+  STRIPE_SECRET_KEY?: string; // Stripe secret key (sk_test_... in staging); Priority is off without it
+  STRIPE_WEBHOOK_SECRET?: string; // signing secret (whsec_...) of the /stripe/webhook endpoint
+  PRIORITY_OPEN_TO_ALL?: string; // "1" = every verified subscriber sees the Priority button; unset = admin only
+  PRIORITY_FREE_DELAY_MINUTES?: string; // how long free watchers wait after Priority holders; unset/0 = nobody is delayed
   // WhatsApp Cloud API (see sendWhatsAppAlert). All optional: unset = WhatsApp off.
   WHATSAPP_TOKEN?: string;
   WHATSAPP_PHONE_NUMBER_ID?: string;
@@ -1018,9 +1022,11 @@ const TICKET_TYPE_OPTIONS = [
   "Other / not sure",
 ];
 
-async function renderSaleWatchRows(subscriberId: number, token: string, env: Env): Promise<SaleWatchSections> {
+async function renderSaleWatchRows(subscriberId: number, token: string, env: Env, priorityOn = false): Promise<SaleWatchSections> {
   const { results } = await env.DB.prepare(
-    `SELECT w.id, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone, sw.presale_is_live
+    `SELECT w.id, w.event_url, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone, sw.presale_is_live,
+       (SELECT COUNT(*) FROM sale_watchers x WHERE x.event_url = w.event_url) AS watching,
+       EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = w.subscriber_id AND rp.event_url = w.event_url) AS has_priority
      FROM sale_watchers w
      JOIN sale_watch sw ON sw.event_url = w.event_url
      WHERE w.subscriber_id = ? ORDER BY sw.event_date IS NULL, sw.event_date, sw.event_title`
@@ -1031,8 +1037,21 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
   const rowHtml = (r: any, entry: SaleWatchEntry) => `<div class="ticket-row">
       <div><span>${escapeHtml(r.event_title)}</span>
       <span class="event-badge ${entry.badgeClass}">${escapeHtml(entry.badge)}</span>
-      ${entry.subtitle ? `<div class="event-subtitle">${escapeHtml(entry.subtitle)}</div>` : ""}</div>
+      ${entry.subtitle ? `<div class="event-subtitle">${escapeHtml(entry.subtitle)}</div>` : ""}${
+        priorityOn && entry.section !== "live" && !r.resolved && r.watching > 1 ? `<div class="event-subtitle">${r.watching} people are watching this race</div>` : ""
+      }</div>
       <div class="row" style="gap:6px">
+        ${
+          r.has_priority
+            ? `<span class="event-badge presale" title="You're alerted before free watchers of this race">&#9889; Priority</span>`
+            : priorityOn && entry.section !== "live" && !r.resolved
+              ? `<form method="POST" action="/priority/checkout">
+          <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="event_url" value="${escapeHtml(r.event_url)}">
+          <button type="submit" title="Be alerted before free watchers of this race">&#9889; Priority $${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}</button>
+        </form>`
+              : ""
+        }
         ${
           entry.section === "live"
             ? `<form method="POST" action="/mark-race-purchased">
@@ -2054,6 +2073,153 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   return new Response("ok");
 }
 
+// ---------------------------------------------------------------------------
+// Priority alerts: a paid, per-race "be alerted first" pass
+//
+// Alerts stay free for everyone. A subscriber can pay once (Stripe Checkout) for
+// Priority on one race; when that race's shop is detected live they are alerted
+// at once, and free watchers of the same race are alerted PRIORITY_FREE_DELAY_MINUTES
+// later. Free watchers are only ever held back for a race where somebody holds
+// Priority - otherwise nothing changes for them. With the delay set to 0 (the
+// default) Priority is bought and recorded but nobody is delayed.
+//
+// Purchases are recorded only by the signed Stripe webhook (never by the browser
+// coming back from Checkout), so a Priority pass can't be faked by visiting a URL.
+// Until PRIORITY_OPEN_TO_ALL=1 the button is shown to the admin account only.
+// ---------------------------------------------------------------------------
+const PRIORITY_PRICE_CENTS = 300;
+const PRIORITY_CURRENCY = "usd";
+const PRIORITY_MAX_DELAY_MINUTES = 30;
+
+function priorityOpen(env: Env, s: any): boolean {
+  if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !s?.verified) return false;
+  if (env.PRIORITY_OPEN_TO_ALL === "1") return true;
+  return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+}
+
+function priorityDelayMs(env: Env): number {
+  const m = Number(env.PRIORITY_FREE_DELAY_MINUTES);
+  return Number.isFinite(m) && m > 0 ? Math.min(m, PRIORITY_MAX_DELAY_MINUTES) * 60_000 : 0;
+}
+
+/** D1's datetime('now') format, so values compare correctly against it in SQL. */
+function sqlTime(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+}
+
+async function handlePriorityCheckout(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const eventUrl = String(form.get("event_url") || "");
+  const s = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  const race = s
+    ? await env.DB.prepare(
+        `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
+         JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? AND w.event_url = ?`
+      )
+        .bind(s.id, eventUrl)
+        .first<any>()
+    : null;
+  if (!s || !priorityOpen(env, s) || !race || race.resolved) {
+    return page("Not available", `<div class="card"><p>Priority isn't available for this race. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  }
+  const already = await env.DB.prepare("SELECT 1 AS x FROM race_priority WHERE subscriber_id = ? AND event_url = ?").bind(s.id, eventUrl).first<any>();
+  if (already) return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+
+  const params = new URLSearchParams({
+    mode: "payment",
+    "line_items[0][quantity]": "1",
+    "line_items[0][price_data][currency]": PRIORITY_CURRENCY,
+    "line_items[0][price_data][unit_amount]": String(PRIORITY_PRICE_CENTS),
+    "line_items[0][price_data][product_data][name]": `Priority alerts: ${race.event_title}`.slice(0, 200),
+    "line_items[0][price_data][product_data][description]": "Be alerted first when tickets for this race go on sale. One-off payment, this race only.",
+    client_reference_id: String(s.id),
+    customer_email: s.email,
+    "metadata[subscriber_id]": String(s.id),
+    "metadata[event_url]": eventUrl,
+    "metadata[event_title]": String(race.event_title).slice(0, 400),
+    success_url: `${env.SITE_URL}/my-alerts?priority=success`,
+    cancel_url: `${env.SITE_URL}/my-alerts`,
+  });
+  let url: string | null = null;
+  try {
+    const resp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+    const body: any = await resp.json().catch(() => ({}));
+    if (resp.ok && body?.url) url = body.url;
+    else console.error("Stripe checkout session failed:", resp.status, body?.error?.message);
+  } catch (e) {
+    console.error("Stripe checkout request failed:", e);
+  }
+  if (!url) return page("Payment unavailable", `<div class="card"><p>We couldn't start the payment just now - nothing was charged. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  return new Response(null, { status: 303, headers: { Location: url } });
+}
+
+/** Stripe signs `<timestamp>.<raw body>` with the endpoint secret (HMAC-SHA256) and sends it in
+ * the Stripe-Signature header as t=...,v1=.... Requests more than 5 minutes old are refused. */
+async function stripeSignatureOk(secret: string, raw: string, header: string | null): Promise<boolean> {
+  if (!header) return false;
+  let t = "";
+  const sigs: string[] = [];
+  for (const part of header.split(",")) {
+    const i = part.indexOf("=");
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k === "t") t = v;
+    else if (k === "v1" && v) sigs.push(v);
+  }
+  const ts = Number(t);
+  if (!ts || !sigs.length || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(`${t}.${raw}`)));
+  const hex = [...mac].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return sigs.some((sig) => sameSecret(sig, hex));
+}
+
+async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
+  if (!env.STRIPE_WEBHOOK_SECRET) return new Response("Not configured", { status: 503 });
+  const raw = await req.text();
+  if (!(await stripeSignatureOk(env.STRIPE_WEBHOOK_SECRET, raw, req.headers.get("Stripe-Signature")))) {
+    return new Response("Bad signature", { status: 400 });
+  }
+  let evt: any;
+  try {
+    evt = JSON.parse(raw);
+  } catch {
+    return new Response("ok");
+  }
+  if (evt?.type !== "checkout.session.completed") return new Response("ok");
+  const session = evt.data?.object;
+  if (!session || session.payment_status !== "paid") return new Response("ok");
+
+  const subscriberId = Number(session.metadata?.subscriber_id);
+  const eventUrl = String(session.metadata?.event_url || "");
+  const sub = subscriberId ? await env.DB.prepare("SELECT id, email FROM subscribers WHERE id = ?").bind(subscriberId).first<any>() : null;
+  const race = eventUrl ? await env.DB.prepare("SELECT event_title FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>() : null;
+  if (!sub || !race) {
+    // Paid for something we can't place - surface it loudly instead of silently swallowing the money.
+    console.error("Stripe payment for an unknown subscriber/race:", session.id, subscriberId, eventUrl);
+    if (env.TELEGRAM_CHAT_ID) await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `⚠️ Stripe payment ${session.id} could not be matched to a subscriber/race - check it in Stripe.`, "reply");
+    return new Response("ok");
+  }
+  // A transient DB error must give Stripe a non-200 so it retries the event.
+  const res = await env.DB.prepare(
+    `INSERT OR IGNORE INTO race_priority (subscriber_id, event_url, event_title, stripe_session_id, amount_cents, currency, livemode)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  )
+    .bind(sub.id, eventUrl, race.event_title, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0)
+    .run();
+  if (res.meta.changes && env.TELEGRAM_CHAT_ID) {
+    await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Priority bought: ${race.event_title} by ${sub.email}${evt.livemode ? "" : " (test mode)"}`, "reply");
+  }
+  return new Response("ok");
+}
+
 /** All JSON API responses go through here - ticket/event status can change
  * from one check to the next, so none of it may ever be cached at the edge
  * (the same lesson as page()'s Cache-Control, applied to the JSON side). */
@@ -2478,8 +2644,12 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   }
 
   const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
-  const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env);
+  const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber));
   const counts = await getWatchCounts(subscriber.id, env);
+  const paidBanner =
+    url.searchParams.get("priority") === "success"
+      ? `<div class="verify-banner" style="background:#e6f4ea;border-color:#bfe0c9;color:#1e7e34"><p><b>Payment received.</b> Priority shows on the race below within a few seconds - refresh if it isn't there yet.</p></div>`
+      : "";
   const saleSections: string[] = [];
   if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
   if (saleRows.soon) saleSections.push(`<h2>Going live soon</h2>${saleRows.soon}`);
@@ -2497,6 +2667,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     "My Alerts",
     `${navBar("/my-alerts", subscriber, counts.tickets + counts.races, false, env)}
     ${verifyBanner}
+    ${paidBanner}
     <div class="card">
       <h2>Your watched tickets</h2>
       ${rows.active}
@@ -2724,30 +2895,70 @@ async function checkSaleWatches(env: Env): Promise<void> {
       .run();
 
     const { results: watchers } = await env.DB.prepare(
-      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
+      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id,
+         EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = s.id AND rp.event_url = w.event_url) AS has_priority
+       FROM subscribers s
        JOIN sale_watchers w ON w.subscriber_id = s.id
        WHERE s.verified = 1 AND w.event_url = ?`
     )
       .bind(row.event_url)
       .all<any>();
 
-    for (const watcher of watchers || []) {
-      const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
-      if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, row.event_title, "tickets are now on sale!", row.event_url);
-      await sendTelegramAlert(env, watcher.telegram_chat_id, row.event_title, "tickets are now on sale!", row.event_url);
-      try {
-        await sendEmail(
-          env,
-          watcher.email,
-          `Tickets on sale now: ${row.event_title}`,
-          `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-          `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
-        );
-        await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
-      } catch (e) {
-        console.error(`Failed to email ${watcher.email}:`, e);
-      }
+    // Priority holders go first. Free watchers are held back only when somebody holds
+    // Priority for this race (and a delay is configured) - see "Priority alerts" below.
+    const all = watchers || [];
+    const paid = all.filter((w: any) => w.has_priority);
+    const delayMs = priorityDelayMs(env);
+    const holdBack = delayMs > 0 && paid.length > 0 && paid.length < all.length;
+    if (holdBack) {
+      await env.DB.prepare("UPDATE sale_watch SET detected_at = datetime('now'), free_alert_after = ? WHERE event_url = ?")
+        .bind(sqlTime(Date.now() + delayMs), row.event_url)
+        .run();
     }
+    for (const watcher of holdBack ? paid : all) await sendSaleWatchAlert(env, row, watcher);
+  }
+}
+
+/** The "tickets are now on sale" alert to one watcher, on every channel they've set up. */
+async function sendSaleWatchAlert(env: Env, row: { event_title: string; event_url: string }, watcher: any): Promise<void> {
+  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+  if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, row.event_title, "tickets are now on sale!", row.event_url);
+  await sendTelegramAlert(env, watcher.telegram_chat_id, row.event_title, "tickets are now on sale!", row.event_url);
+  try {
+    await sendEmail(
+      env,
+      watcher.email,
+      `Tickets on sale now: ${row.event_title}`,
+      `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+      `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
+    );
+    await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
+  } catch (e) {
+    console.error(`Failed to email ${watcher.email}:`, e);
+  }
+}
+
+/** Sends the held-back free alerts once their delay is up. Only watchers who were already
+ * watching when the shop was detected get it (a later joiner can see on-sale status themselves),
+ * and the claim is atomic so two overlapping cron ticks can't both send. */
+async function sendDueFreeSaleAlerts(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    "SELECT event_url, event_title, detected_at FROM sale_watch WHERE free_alert_after IS NOT NULL AND free_alert_after <= datetime('now')"
+  ).all<any>();
+  for (const row of results || []) {
+    const claim = await env.DB.prepare("UPDATE sale_watch SET free_alert_after = NULL WHERE event_url = ? AND free_alert_after IS NOT NULL")
+      .bind(row.event_url)
+      .run();
+    if (!claim.meta.changes) continue;
+    const { results: watchers } = await env.DB.prepare(
+      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
+       JOIN sale_watchers w ON w.subscriber_id = s.id
+       WHERE s.verified = 1 AND w.event_url = ? AND w.created_at <= ?
+         AND NOT EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = s.id AND rp.event_url = w.event_url)`
+    )
+      .bind(row.event_url, row.detected_at)
+      .all<any>();
+    for (const watcher of watchers || []) await sendSaleWatchAlert(env, row, watcher);
   }
 }
 
@@ -4332,6 +4543,8 @@ export default {
       if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
       if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
       if (url.pathname === "/telegram/webhook" && req.method === "POST") return await handleTelegramWebhook(req, env);
+      if (url.pathname === "/stripe/webhook" && req.method === "POST") return await handleStripeWebhook(req, env);
+      if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
@@ -4383,7 +4596,7 @@ export default {
     // checks Instagram for new ticket-sale announcements daily.
     if (event.cron === "*/2 * * * *") {
       ctx.waitUntil(checkCommunityTickets(env));
-      ctx.waitUntil(checkSaleWatches(env));
+      ctx.waitUntil(checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
       ctx.waitUntil(checkAnnouncementReminders(env));
       ctx.waitUntil(sendManualVerificationNotices(env));

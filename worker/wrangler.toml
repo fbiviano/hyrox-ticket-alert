@@ -58,3 +58,35 @@ zone_name = "roxracealerts.com"
 [[routes]]
 pattern = "www.roxracealerts.com/*"
 zone_name = "roxracealerts.com"
+
+# ---------------------------------------------------------------------------
+# Staging: a separate Worker + separate (fake-data) D1 database for building and
+# testing before anything goes to production. Deploy with `wrangler deploy --env staging`.
+# It has NO email/Telegram/WhatsApp/Apify/Anthropic secrets on purpose, so nothing it does can
+# reach a real person; only Stripe TEST keys are set. Not routed on roxracealerts.com - it lives
+# on its workers.dev address. Variables are not inherited between environments, hence repeated.
+# ---------------------------------------------------------------------------
+[env.staging]
+name = "roxracealerts-staging"
+workers_dev = true
+routes = []
+
+[env.staging.vars]
+SEND_FROM = "RoxRaceAlerts Staging <staging@example.invalid>"
+SITE_URL = "https://roxracealerts-staging.francescobiviano609.workers.dev"
+ADMIN_EMAIL = "test@example.com"
+# Short delay so the free-vs-Priority ordering is easy to watch while testing.
+PRIORITY_FREE_DELAY_MINUTES = "1"
+TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
+
+[env.staging.limits]
+cpu_ms = 1000
+
+[env.staging.triggers]
+# Only the ticket/sale checks, so the staging watch + priority logic runs on a timer like production.
+crons = ["*/2 * * * *"]
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "roxracealerts-staging-db"
+database_id = "b58870ee-a945-492d-9f2a-b712b71acf12"

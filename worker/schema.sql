@@ -133,6 +133,12 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   presale_live_at TEXT,
   presale_timezone TEXT,
   presale_is_live INTEGER NOT NULL DEFAULT 0,
+  -- Priority alerts: when the shop is detected live and someone holds Priority for this race,
+  -- paid watchers are alerted at once and free ones after PRIORITY_FREE_DELAY_MINUTES.
+  -- detected_at = when we saw it live; free_alert_after = when the free alert is due
+  -- (NULL once sent, or when nobody was held back).
+  detected_at TEXT,
+  free_alert_after TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -141,6 +147,21 @@ CREATE TABLE IF NOT EXISTS sale_watchers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
   event_url TEXT NOT NULL REFERENCES sale_watch(event_url) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(subscriber_id, event_url)
+);
+
+-- A paid per-race Priority pass (Stripe Checkout, one-off): the subscriber is alerted before
+-- free watchers of the same race. Written only by the signed Stripe webhook.
+CREATE TABLE IF NOT EXISTS race_priority (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
+  event_url TEXT NOT NULL,
+  event_title TEXT NOT NULL,
+  stripe_session_id TEXT NOT NULL UNIQUE,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  livemode INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_url)
 );
