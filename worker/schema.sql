@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS community_tickets (
   last_status TEXT NOT NULL DEFAULT 'sold_out',
   event_date TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  -- Priority: when this ticket came back and Season Priority holders were told first,
+  -- free_alert_after is when everyone else is due (NULL once sent / nobody held back).
+  detected_at TEXT,
+  free_alert_after TEXT,
   UNIQUE(event_id, ticket_name)
 );
 
@@ -164,6 +168,21 @@ CREATE TABLE IF NOT EXISTS race_priority (
   livemode INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_url)
+);
+
+-- A paid Season Priority pass (Stripe Checkout, one-off): Priority on every race the
+-- subscriber watches, and on sold-out tickets coming back, until valid_until.
+CREATE TABLE IF NOT EXISTS season_pass (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
+  season TEXT NOT NULL,
+  valid_until TEXT NOT NULL,
+  stripe_session_id TEXT NOT NULL UNIQUE,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  livemode INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(subscriber_id, season)
 );
 
 -- Remembers the last-seen post per tracked HYROX country/region Instagram

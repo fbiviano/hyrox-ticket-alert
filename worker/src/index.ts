@@ -323,26 +323,72 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
     .all<any>();
 
   let sent = 0;
-  for (const row of results || []) {
-    const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
-    const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
-    if (row.whatsapp_phone) await sendWhatsAppAlert(env, row.whatsapp_phone, eventName, `${ticketName} is now available.`, link);
-    await sendTelegramAlert(env, row.telegram_chat_id, eventName, `${ticketName} is now available.`, link);
-    try {
-      await sendEmail(
-        env,
-        row.email,
-        `Ticket available: ${ticketName}`,
-        `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
-        `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
-      );
-      await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
-      sent++;
-    } catch (e) {
-      console.error(`Failed to email ${row.email}:`, e);
-    }
-  }
+  for (const row of results || []) if (await sendTicketAlert(env, row, eventName, ticketName, link)) sent++;
   return sent;
+}
+
+/** A sold-out ticket came back (community check): Season Priority holders are told first,
+ * everyone else after the Priority delay - see "Priority alerts". */
+async function notifyTicketReturned(env: Env, ct: any): Promise<void> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id, ${hasSeasonPassSql("s.id")} AS has_priority
+     FROM subscribers s JOIN subscriptions sub ON sub.subscriber_id = s.id
+     WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
+  )
+    .bind(ct.event_name, ct.ticket_name)
+    .all<any>();
+  const all = results || [];
+  const paid = all.filter((w: any) => w.has_priority);
+  const delayMs = priorityDelayMs(env);
+  const holdBack = delayMs > 0 && paid.length > 0 && paid.length < all.length;
+  if (holdBack) {
+    await env.DB.prepare("UPDATE community_tickets SET detected_at = datetime('now'), free_alert_after = ? WHERE id = ?")
+      .bind(sqlTime(Date.now() + delayMs), ct.id)
+      .run();
+  }
+  for (const row of holdBack ? paid : all) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url);
+}
+
+/** Sends held-back sold-out-ticket alerts once the delay is up (same rules as the race ones). */
+async function sendDueFreeTicketAlerts(env: Env): Promise<void> {
+  const { results } = await env.DB.prepare(
+    "SELECT id, event_name, ticket_name, shop_url, detected_at FROM community_tickets WHERE free_alert_after IS NOT NULL AND free_alert_after <= datetime('now')"
+  ).all<any>();
+  for (const ct of results || []) {
+    const claim = await env.DB.prepare("UPDATE community_tickets SET free_alert_after = NULL WHERE id = ? AND free_alert_after IS NOT NULL").bind(ct.id).run();
+    if (!claim.meta.changes) continue;
+    const { results: rows } = await env.DB.prepare(
+      `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id
+       FROM subscribers s JOIN subscriptions sub ON sub.subscriber_id = s.id
+       WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL
+         AND sub.created_at <= ? AND NOT ${hasSeasonPassSql("s.id")}`
+    )
+      .bind(ct.event_name, ct.ticket_name, ct.detected_at)
+      .all<any>();
+    for (const row of rows || []) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url);
+  }
+}
+
+/** The "ticket available" alert to one subscriber, on every channel they've set up. */
+async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName: string, link: string): Promise<boolean> {
+  const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
+  const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
+  if (row.whatsapp_phone) await sendWhatsAppAlert(env, row.whatsapp_phone, eventName, `${ticketName} is now available.`, link);
+  await sendTelegramAlert(env, row.telegram_chat_id, eventName, `${ticketName} is now available.`, link);
+  try {
+    await sendEmail(
+      env,
+      row.email,
+      `Ticket available: ${ticketName}`,
+      `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
+      `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
+    );
+    await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
+    return true;
+  } catch (e) {
+    console.error(`Failed to email ${row.email}:`, e);
+    return false;
+  }
 }
 
 function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false): Response {
@@ -1030,7 +1076,7 @@ const TICKET_TYPE_OPTIONS = [
   "Other / not sure",
 ];
 
-async function renderSaleWatchRows(subscriberId: number, token: string, env: Env, priorityOn = false): Promise<SaleWatchSections> {
+async function renderSaleWatchRows(subscriberId: number, token: string, env: Env, priorityOn = false, seasonActive = false): Promise<SaleWatchSections> {
   const { results } = await env.DB.prepare(
     `SELECT w.id, w.event_url, sw.event_title, sw.resolved, sw.event_date, sw.presale_note, sw.presale_live_at, sw.presale_timezone, sw.presale_is_live,
        (SELECT COUNT(*) FROM sale_watchers x WHERE x.event_url = w.event_url) AS watching,
@@ -1050,13 +1096,14 @@ async function renderSaleWatchRows(subscriberId: number, token: string, env: Env
       }</div>
       <div class="row" style="gap:6px">
         ${
-          r.has_priority
-            ? `<span class="event-badge presale" title="You're alerted minutes before everyone else for this race">&#9889; Priority notification</span>`
+          seasonActive || r.has_priority
+            ? `<span class="event-badge presale" title="You're notified before everyone else">&#9889; ${seasonActive ? "Season Priority" : "Priority"}</span>`
             : priorityOn && entry.section !== "live" && !r.resolved
               ? `<form method="POST" action="/priority/checkout">
           <input type="hidden" name="token" value="${escapeHtml(token)}">
+          <input type="hidden" name="kind" value="race">
           <input type="hidden" name="event_url" value="${escapeHtml(r.event_url)}">
-          <button type="submit" title="Get alerted minutes before everyone else">&#9889; Priority notification ${PRIORITY_PRICE_LABEL}</button>
+          <button type="submit" title="Be the first to know - notified before everyone else">&#9889; This race ${PRIORITY_PRICE_LABEL}</button>
         </form>`
               : ""
         }
@@ -2082,69 +2129,98 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
 }
 
 // ---------------------------------------------------------------------------
-// Priority alerts: a paid, per-race "be alerted first" pass
+// Priority alerts: paid "be the first to know" - one race, or the whole season
 //
 // Alerts stay free for everyone. A subscriber can pay once (Stripe Checkout) for
-// Priority on one race; when that race's shop is detected live they are alerted
-// at once, and free watchers of the same race are alerted PRIORITY_FREE_DELAY_MINUTES
-// later. Free watchers are only ever held back for a race where somebody holds
-// Priority - otherwise nothing changes for them. With the delay set to 0 (the
-// default) Priority is bought and recorded but nobody is delayed.
+// Priority on one race ($3) or a Season Priority pass ($5.50, every race they watch
+// until SEASON_VALID_UNTIL). Both are offered side by side so we can see which one
+// people pick (admin analytics counts them).
+//
+// When a watched shop is detected live - or a sold-out ticket comes back, for season
+// holders - Priority holders are alerted at once and everyone else
+// PRIORITY_FREE_DELAY_MINUTES later. Free subscribers are only ever held back when
+// somebody actually holds Priority for that alert; otherwise nothing changes. With the
+// delay at 0 (the default) passes are sold and recorded but nobody is delayed.
+// Announcement news and countdown reminders go to everyone at once: they arrive hours
+// or days ahead, so a few minutes' head start there is worth nothing.
 //
 // Purchases are recorded only by the signed Stripe webhook (never by the browser
-// coming back from Checkout), so a Priority pass can't be faked by visiting a URL.
-// Until PRIORITY_OPEN_TO_ALL=1 the button is shown to the admin account only.
+// coming back from Checkout), so a pass can't be faked by visiting a URL.
+// Until PRIORITY_OPEN_TO_ALL=1 the offers are shown to the admin account only.
 // ---------------------------------------------------------------------------
 const PRIORITY_PRICE_CENTS = 300;
+const SEASON_PRICE_CENTS = 550;
+const SEASON_LABEL = "26/27";
+const SEASON_VALID_UNTIL = "2027-07-31"; // last day the pass counts (UTC date)
 const PRIORITY_CURRENCY = "usd";
 const PRIORITY_MAX_DELAY_MINUTES = 30;
 
+function money(cents: number): string {
+  return `$${(cents / 100).toFixed(cents % 100 ? 2 : 0)}`;
+}
+const PRIORITY_PRICE_LABEL = money(PRIORITY_PRICE_CENTS);
+const SEASON_PRICE_LABEL = money(SEASON_PRICE_CENTS);
+const SEASON_END_LABEL = new Date(`${SEASON_VALID_UNTIL}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+
+/** SQL: does subscriber `subCol` hold a season pass that is still valid? */
+function hasSeasonPassSql(subCol: string): string {
+  return `EXISTS(SELECT 1 FROM season_pass sp WHERE sp.subscriber_id = ${subCol} AND sp.valid_until >= date('now'))`;
+}
+
+/** SQL: is subscriber `subCol` Priority for the race at `urlCol` (that race, or the whole season)? */
+function hasRacePrioritySql(subCol: string, urlCol: string): string {
+  return `(EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = ${subCol} AND rp.event_url = ${urlCol}) OR ${hasSeasonPassSql(subCol)})`;
+}
+
+async function hasSeasonPass(env: Env, subscriberId: number): Promise<boolean> {
+  return !!(await env.DB.prepare(`SELECT 1 AS x WHERE ${hasSeasonPassSql("?")}`).bind(subscriberId).first<any>());
+}
+
 function priorityOpen(env: Env, s: any): boolean {
   if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !s?.verified) return false;
-  // Selling "alerted first" with no delay configured would be selling nothing, so the
+  // Selling "notified first" with no delay configured would be selling nothing, so the
   // public switch only works together with a real delay. The admin can always preview.
   if (env.PRIORITY_OPEN_TO_ALL === "1" && priorityDelayMs(env) > 0) return true;
   return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
 }
 
-const PRIORITY_PRICE_LABEL = `$${(PRIORITY_PRICE_CENTS / 100).toFixed(0)}`;
-
-/** How far ahead Priority holders are, in words - shared by every place that offers it. */
-function priorityHeadStart(env: Env): string {
-  const m = Math.round(priorityDelayMs(env) / 60_000);
-  return m > 0 ? `everyone else gets theirs at least ${m} minute${m === 1 ? "" : "s"} later` : "admin preview: the head start is switched off on this server";
+/** Shown to the admin only while the head start is switched off, so a preview never looks like the real thing. */
+function priorityPreviewNote(env: Env): string {
+  return priorityDelayMs(env) > 0 ? "" : " (Admin preview: the head start is switched off on this server.)";
 }
 
 /** One-line pitch under the race list on My alerts. */
 function priorityExplainer(env: Env): string {
-  return `Priority notification (${PRIORITY_PRICE_LABEL} per race): get alerted minutes before everyone else (${priorityHeadStart(env)}), plus a WhatsApp notification (launching soon). One-off payment, no subscription. It doesn't reserve or guarantee a ticket.`;
+  return `Priority alerts: be the first to know - get notified before everyone else, plus WhatsApp alerts (launching soon). ${PRIORITY_PRICE_LABEL} for one race, or ${SEASON_PRICE_LABEL} for every race you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket.${priorityPreviewNote(env)}`;
 }
 
-function priorityOfferCard(env: Env, token: string, eventUrl: string, eventTitle: string): string {
-  return `<div class="card">
-      <h2>&#9889; Priority notification - ${PRIORITY_PRICE_LABEL}</h2>
-      <p><b>Get alerted minutes before everyone else</b> when ${escapeHtml(eventTitle)} tickets go on sale.</p>
-      <ul>
-        <li>Your alert goes out first - ${escapeHtml(priorityHeadStart(env))}</li>
-        <li>WhatsApp notification too (launching soon)</li>
-        <li>${PRIORITY_PRICE_LABEL} once, for this race only - no subscription</li>
-      </ul>
-      <form method="POST" action="/priority/checkout">
+function priorityForm(token: string, kind: "race" | "season", label: string, eventUrl = ""): string {
+  return `<form method="POST" action="/priority/checkout" style="display:inline-block;margin-right:8px">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
-        <input type="hidden" name="event_url" value="${escapeHtml(eventUrl)}">
-        <button type="submit">Get Priority notification - ${PRIORITY_PRICE_LABEL}</button>
-      </form>
-      <p class="consent">Priority speeds up your alert; it doesn't reserve or guarantee a ticket.</p>
+        <input type="hidden" name="kind" value="${kind}">
+        ${eventUrl ? `<input type="hidden" name="event_url" value="${escapeHtml(eventUrl)}">` : ""}
+        <button type="submit">${label}</button>
+      </form>`;
+}
+
+/** The two offers side by side. `race` = the race being offered; null offers the season only. */
+function priorityOfferCard(env: Env, token: string, race: { event_url: string; event_title: string } | null): string {
+  return `<div class="card">
+      <h2>&#9889; Be the first to know</h2>
+      <p><b>Get notified before everyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for every race you watch"} - plus WhatsApp alerts (launching soon).</p>
+      ${race ? priorityForm(token, "race", `This race - ${PRIORITY_PRICE_LABEL}`, race.event_url) : ""}
+      ${priorityForm(token, "season", `Whole season - ${SEASON_PRICE_LABEL}`)}
+      <p class="consent">Whole season = every race you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket.${priorityPreviewNote(env)}</p>
     </div>`;
 }
 
-/** The subscriber's not-yet-on-sale races they could still buy Priority for. */
+/** The subscriber's not-yet-on-sale races they could still buy Priority for (none for season holders). */
 async function priorityCandidates(env: Env, subscriberId: number, eventUrl?: string): Promise<any[]> {
   const { results } = await env.DB.prepare(
     `SELECT sw.event_url, sw.event_title FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
      WHERE w.subscriber_id = ? AND sw.resolved = 0 AND (sw.event_date IS NULL OR sw.event_date >= ?)
        AND (? IS NULL OR sw.event_url = ?)
-       AND NOT EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = w.subscriber_id AND rp.event_url = w.event_url)
+       AND NOT ${hasRacePrioritySql("w.subscriber_id", "w.event_url")}
      ORDER BY sw.event_date IS NULL, sw.event_date LIMIT 3`
   )
     .bind(subscriberId, todayIso(), eventUrl ?? null, eventUrl ?? null)
@@ -2173,7 +2249,7 @@ async function handleWatchingPage(req: Request, env: Env): Promise<Response> {
       <h2>&#10003; You're watching ${escapeHtml(race.event_title)}</h2>
       <p>We'll alert you the moment tickets go on sale - free, as always.</p>
     </div>
-    ${offer ? priorityOfferCard(env, subscriber.unsubscribe_token, offer.event_url, offer.event_title) : ""}
+    ${offer ? priorityOfferCard(env, subscriber.unsubscribe_token, offer) : ""}
     <div class="card"><p><a href="/">No thanks - back to the homepage</a> &middot; <a href="/my-alerts">My alerts</a></p></div>`,
     offer ? { "X-Priority-Offer": "1" } : {}
   );
@@ -2192,37 +2268,54 @@ function sqlTime(ms: number): string {
 async function handlePriorityCheckout(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const token = String(form.get("token") || "");
+  const kind = form.get("kind") === "season" ? "season" : "race";
   const eventUrl = String(form.get("event_url") || "");
   const s = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
-  const race = s
-    ? await env.DB.prepare(
-        `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
-         JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? AND w.event_url = ?`
-      )
-        .bind(s.id, eventUrl)
-        .first<any>()
-    : null;
-  if (!s || !priorityOpen(env, s) || !race || race.resolved) {
-    return page("Not available", `<div class="card"><p>Priority isn't available for this race. <a href="/my-alerts">Back to my alerts</a></p></div>`);
-  }
-  const already = await env.DB.prepare("SELECT 1 AS x FROM race_priority WHERE subscriber_id = ? AND event_url = ?").bind(s.id, eventUrl).first<any>();
-  if (already) return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+  const notAvailable = () =>
+    page("Not available", `<div class="card"><p>Priority isn't available for this right now. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  if (!s || !priorityOpen(env, s)) return notAvailable();
+  const backToMyAlerts = new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+  // A season holder already has Priority on everything - never sell them something they own.
+  if (await hasSeasonPass(env, s.id)) return backToMyAlerts;
 
   const params = new URLSearchParams({
     mode: "payment",
     "line_items[0][quantity]": "1",
     "line_items[0][price_data][currency]": PRIORITY_CURRENCY,
-    "line_items[0][price_data][unit_amount]": String(PRIORITY_PRICE_CENTS),
-    "line_items[0][price_data][product_data][name]": `Priority notification: ${race.event_title}`.slice(0, 200),
-    "line_items[0][price_data][product_data][description]": "Get alerted minutes before everyone else when tickets for this race go on sale, plus a WhatsApp notification (launching soon). One-off payment, this race only.",
     client_reference_id: String(s.id),
     customer_email: s.email,
     "metadata[subscriber_id]": String(s.id),
-    "metadata[event_url]": eventUrl,
-    "metadata[event_title]": String(race.event_title).slice(0, 400),
+    "metadata[kind]": kind,
     success_url: `${env.SITE_URL}/my-alerts?priority=success`,
     cancel_url: `${env.SITE_URL}/my-alerts`,
   });
+  if (kind === "season") {
+    params.set("line_items[0][price_data][unit_amount]", String(SEASON_PRICE_CENTS));
+    params.set("line_items[0][price_data][product_data][name]", `Season Priority ${SEASON_LABEL}`);
+    params.set(
+      "line_items[0][price_data][product_data][description]",
+      `Be the first to know for every race you watch: notified before everyone else, plus WhatsApp alerts (launching soon). One-off payment, valid until ${SEASON_END_LABEL}.`
+    );
+    params.set("metadata[season]", SEASON_LABEL);
+  } else {
+    const race = await env.DB.prepare(
+      `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
+       JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? AND w.event_url = ?`
+    )
+      .bind(s.id, eventUrl)
+      .first<any>();
+    if (!race || race.resolved) return notAvailable();
+    const already = await env.DB.prepare("SELECT 1 AS x FROM race_priority WHERE subscriber_id = ? AND event_url = ?").bind(s.id, eventUrl).first<any>();
+    if (already) return backToMyAlerts;
+    params.set("line_items[0][price_data][unit_amount]", String(PRIORITY_PRICE_CENTS));
+    params.set("line_items[0][price_data][product_data][name]", `Priority alerts: ${race.event_title}`.slice(0, 200));
+    params.set(
+      "line_items[0][price_data][product_data][description]",
+      "Be the first to know: notified before everyone else when tickets for this race go on sale, plus WhatsApp alerts (launching soon). One-off payment, this race only."
+    );
+    params.set("metadata[event_url]", eventUrl);
+    params.set("metadata[event_title]", String(race.event_title).slice(0, 400));
+  }
   let url: string | null = null;
   try {
     const resp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
@@ -2278,6 +2371,25 @@ async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
   if (evt?.type !== "checkout.session.completed") return new Response("ok");
   const session = evt.data?.object;
   if (!session || session.payment_status !== "paid") return new Response("ok");
+
+  if (session.metadata?.kind === "season") {
+    const holder = await env.DB.prepare("SELECT id, email FROM subscribers WHERE id = ?").bind(Number(session.metadata?.subscriber_id) || 0).first<any>();
+    if (!holder) {
+      console.error("Stripe season payment for an unknown subscriber:", session.id);
+      if (env.TELEGRAM_CHAT_ID) await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `⚠️ Stripe payment ${session.id} (season) could not be matched to a subscriber - check it in Stripe.`, "reply");
+      return new Response("ok");
+    }
+    const res = await env.DB.prepare(
+      `INSERT OR IGNORE INTO season_pass (subscriber_id, season, valid_until, stripe_session_id, amount_cents, currency, livemode)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(holder.id, String(session.metadata?.season || SEASON_LABEL), SEASON_VALID_UNTIL, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0)
+      .run();
+    if (res.meta.changes && env.TELEGRAM_CHAT_ID) {
+      await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Season Priority bought by ${holder.email}${evt.livemode ? "" : " (test mode)"}`, "reply");
+    }
+    return new Response("ok");
+  }
 
   const subscriberId = Number(session.metadata?.subscriber_id);
   const eventUrl = String(session.metadata?.event_url || "");
@@ -2654,7 +2766,7 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
   return page(
     "Confirmed",
     `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/my-alerts">Manage my alerts</a></p></div>
-    ${offers.map((o: any) => priorityOfferCard(env, subscriber.unsubscribe_token, o.event_url, o.event_title)).join("")}`,
+    ${offers.length ? priorityOfferCard(env, subscriber.unsubscribe_token, offers[0]) : ""}`,
     { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
@@ -2734,7 +2846,8 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   }
 
   const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
-  const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber));
+  const seasonActive = await hasSeasonPass(env, subscriber.id);
+  const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber), seasonActive);
   const counts = await getWatchCounts(subscriber.id, env);
   const paidBanner =
     url.searchParams.get("priority") === "success"
@@ -2746,8 +2859,12 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   if (saleRows.waiting || saleSections.length === 0) {
     saleSections.push(`<h2>Waiting for tickets to go on sale</h2>${saleRows.waiting || "<p>None yet.</p>"}`);
   }
-  if (priorityOpen(env, subscriber)) {
-    saleSections.push(`<p class="consent">&#9889; ${escapeHtml(priorityExplainer(env))}</p>`);
+  if (seasonActive) {
+    saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
+  } else if (priorityOpen(env, subscriber)) {
+    saleSections.push(
+      `<p class="consent">&#9889; ${escapeHtml(priorityExplainer(env))}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; Whole season - ${SEASON_PRICE_LABEL}`)}`
+    );
   }
   const verifyBanner = subscriber.verified
     ? ""
@@ -2932,7 +3049,7 @@ async function checkCommunityTickets(env: Env): Promise<void> {
     const newStatus = ticketStatus(ticket);
 
     if (row.last_status === "sold_out" && newStatus === "available") {
-      await notifySubscribers(env, row.event_name, row.ticket_name, row.shop_url);
+      await notifyTicketReturned(env, row);
     }
     if (newStatus !== row.last_status) {
       await env.DB.prepare("UPDATE community_tickets SET last_status = ? WHERE id = ?").bind(newStatus, row.id).run();
@@ -2989,7 +3106,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
 
     const { results: watchers } = await env.DB.prepare(
       `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id,
-         EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = s.id AND rp.event_url = w.event_url) AS has_priority
+         ${hasRacePrioritySql("s.id", "w.event_url")} AS has_priority
        FROM subscribers s
        JOIN sale_watchers w ON w.subscriber_id = s.id
        WHERE s.verified = 1 AND w.event_url = ?`
@@ -3047,7 +3164,7 @@ async function sendDueFreeSaleAlerts(env: Env): Promise<void> {
       `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
        JOIN sale_watchers w ON w.subscriber_id = s.id
        WHERE s.verified = 1 AND w.event_url = ? AND w.created_at <= ?
-         AND NOT EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = s.id AND rp.event_url = w.event_url)`
+         AND NOT ${hasRacePrioritySql("s.id", "w.event_url")}`
     )
       .bind(row.event_url, row.detected_at)
       .all<any>();
@@ -4426,6 +4543,24 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
       .join("");
   };
   const tile = (value: string | number, label: string) => `<div class="tile"><b>${value}</b><small>${label}</small></div>`;
+  const prio = await db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM race_priority WHERE livemode = 1) AS race_n,
+              (SELECT COALESCE(SUM(amount_cents), 0) FROM race_priority WHERE livemode = 1) AS race_c,
+              (SELECT COUNT(*) FROM season_pass WHERE livemode = 1) AS season_n,
+              (SELECT COALESCE(SUM(amount_cents), 0) FROM season_pass WHERE livemode = 1) AS season_c,
+              (SELECT COUNT(*) FROM race_priority WHERE livemode = 0) + (SELECT COUNT(*) FROM season_pass WHERE livemode = 0) AS test_n`
+    )
+    .first<any>();
+  const prioCardHtml = () => `<div class="card">
+      <h2>Priority sales</h2>
+      <p><small>Which offer people pick: one race (${PRIORITY_PRICE_LABEL}) or the whole season (${SEASON_PRICE_LABEL}). Real payments only; ${prio?.test_n || 0} test-mode purchase(s) not counted.</small></p>
+      <div class="tiles">
+        ${tile(prio?.race_n || 0, "single-race passes")}
+        ${tile(prio?.season_n || 0, "season passes")}
+        ${tile(money((prio?.race_c || 0) + (prio?.season_c || 0)), "revenue (before Stripe fees)")}
+      </div>
+    </div>`;
 
   // Collapse "HYROX PRO MEN | Friday" / "... | Saturday" into one ticket type
   // so a division isn't split across race days.
@@ -4481,6 +4616,8 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(usage?.neither || 0, "verified but watching nothing")}
       </div>
     </div>
+
+    ${prioCardHtml()}
 
     ${mailCardHtml()}
 
@@ -4689,7 +4826,7 @@ export default {
     // one checks tickets, one indexes the event directory daily, and one
     // checks Instagram for new ticket-sale announcements daily.
     if (event.cron === "*/2 * * * *") {
-      ctx.waitUntil(checkCommunityTickets(env));
+      ctx.waitUntil(checkCommunityTickets(env).then(() => sendDueFreeTicketAlerts(env)));
       ctx.waitUntil(checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
       ctx.waitUntil(checkAnnouncementReminders(env));

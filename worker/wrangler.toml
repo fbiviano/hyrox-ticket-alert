@@ -83,8 +83,9 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 cpu_ms = 1000
 
 [env.staging.triggers]
-# Only the ticket/sale checks, so the staging watch + priority logic runs on a timer like production.
-crons = ["*/2 * * * *"]
+# No schedule: hyrox.com rate-limits requests from Cloudflare (429), and staging polling it would
+# only eat into production's allowance. Staging checks are triggered by hand when testing.
+crons = []
 
 [[env.staging.d1_databases]]
 binding = "DB"
