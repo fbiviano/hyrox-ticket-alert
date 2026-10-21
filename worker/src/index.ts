@@ -3611,7 +3611,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.email, s.verified, s.created_at,
+    `SELECT s.id, s.email, s.verified, s.created_at, s.whatsapp_phone,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
        (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id AND purchased_at IS NOT NULL) AS bought_count
@@ -3656,8 +3656,10 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
           (w: any) => `<li>${escapeHtml(w.event_title)} <small>(race watch${w.resolved ? ", on sale" : ""})</small></li>`
         ),
       ].join("");
+      // Digits only in the database; shown with a + so it reads as an international number.
+      const wa = r.whatsapp_phone ? ` <small>&middot; WhatsApp +${escapeHtml(r.whatsapp_phone)}</small>` : "";
       return `<details class="subscriber-row">
-        <summary>${escapeHtml(r.email)} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></summary>
+        <summary>${escapeHtml(r.email)}${wa} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></summary>
         <ul>${items || "<li><small>Nothing watched.</small></li>"}</ul>
       </details>`;
     })
@@ -3667,7 +3669,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
     "Subscribers",
     `${adminNav(token, "subscribers")}
     <div class="card">
-      <h2>Subscribers (${rows.length})</h2>
+      <h2>Subscribers (${rows.length}${rows.some((r: any) => r.whatsapp_phone) ? `, ${rows.filter((r: any) => r.whatsapp_phone).length} on WhatsApp` : ""})</h2>
       <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall. Click a subscriber to see what they're watching.</small></p>
       ${rowsHtml || "<p>Nobody yet.</p>"}
     </div>`,
