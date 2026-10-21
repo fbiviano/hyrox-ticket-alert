@@ -232,7 +232,16 @@ async function postWhatsApp(env: Env, number: string, label: string, message: Re
       body: JSON.stringify({ messaging_product: "whatsapp", to: number, ...message }),
     });
     const body: any = await resp.json().catch(() => ({}));
-    if (!resp.ok) error = `${resp.status} ${body?.error?.code ?? ""} ${body?.error?.message ?? ""}`.trim().slice(0, 300);
+    // Meta's error object carries the details that separate look-alike failures
+    // (subcode, details text, fbtrace_id for Meta support) - keep them, they are what
+    // made "Access denied" diagnosable.
+    if (!resp.ok) {
+      const e = body?.error ?? {};
+      error = [resp.status, e.code, e.error_subcode, e.message, e.error_data?.details, e.fbtrace_id ? `trace ${e.fbtrace_id}` : ""]
+        .filter((x) => x !== undefined && x !== null && x !== "")
+        .join(" | ")
+        .slice(0, 500);
+    }
     else messageId = body?.messages?.[0]?.id ?? null;
   } catch (e) {
     error = String(e).slice(0, 300);
@@ -263,12 +272,14 @@ async function sendWhatsAppAlert(env: Env, to: string, title: string, message: s
 }
 
 /** Free-form reply to a person who just messaged us. Capped at 3 per phone
- * per hour: anyone can message the number, and replies beyond Meta's free
- * allowance cost money, so garbage must not be able to run up a bill. */
+ * per hour (only replies Meta accepted count - a failed send costs nothing and
+ * must not lock a real person out): anyone can message the number, and replies
+ * beyond Meta's free allowance cost money, so garbage must not be able to run
+ * up a bill. */
 async function sendWhatsAppReply(env: Env, to: string, text: string): Promise<boolean> {
   const number = to.replace(/\D/g, "");
   const recent = await env.DB.prepare(
-    "SELECT COUNT(*) AS n FROM whatsapp_log WHERE to_number = ? AND template = 'reply' AND created_at >= datetime('now', '-1 hour')"
+    "SELECT COUNT(*) AS n FROM whatsapp_log WHERE to_number = ? AND template = 'reply' AND ok = 1 AND created_at >= datetime('now', '-1 hour')"
   )
     .bind(number)
     .first<any>();
