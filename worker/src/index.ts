@@ -26,6 +26,10 @@ export interface Env {
   ADMIN_EMAIL: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  // WhatsApp Cloud API (see sendWhatsAppAlert). All optional: unset = WhatsApp off.
+  WHATSAPP_TOKEN?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  ADMIN_WHATSAPP?: string;
 }
 
 interface TrackedTicket {
@@ -197,6 +201,71 @@ async function notifyAdminTelegram(env: Env, recipientEmail: string, text: strin
   }
 }
 
+/** WhatsApp alerts via Meta's Cloud API. Business-initiated messages must use
+ * a pre-approved template, so every alert goes through one UTILITY template,
+ * "ticket_alert": "RoxRaceAlerts update for {{1}}: {{2}} Open it here: {{3}}
+ * You are getting this because you asked for HYROX ticket alerts on
+ * roxracealerts.com." (footer: Reply STOP to turn off WhatsApp alerts).
+ * Template variables can't contain newlines/tabs or runs of spaces, hence
+ * the cleaning. Never throws - an alert must not fail because WhatsApp did -
+ * and every attempt is recorded in whatsapp_log, success or not. Returns
+ * whether Meta accepted it ("accepted" is not "delivered": delivery and read
+ * receipts arrive later by webhook). */
+const WHATSAPP_API = "https://graph.facebook.com/v25.0";
+const WHATSAPP_ALERT_TEMPLATE = "ticket_alert";
+
+async function sendWhatsAppAlert(env: Env, to: string, title: string, message: string, url: string): Promise<boolean> {
+  if (!env.WHATSAPP_TOKEN || !env.WHATSAPP_PHONE_NUMBER_ID) return false;
+  const clean = (v: string, max: number) => v.replace(/[\r\n\t]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, max);
+  const number = to.replace(/\D/g, "");
+  let error: string | null = null;
+  let messageId: string | null = null;
+  try {
+    const resp = await fetch(`${WHATSAPP_API}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: number,
+        type: "template",
+        template: {
+          name: WHATSAPP_ALERT_TEMPLATE,
+          language: { code: "en" },
+          components: [
+            {
+              type: "body",
+              parameters: [clean(title, 60), clean(message, 200), clean(url, 300)].map((text) => ({ type: "text", text })),
+            },
+          ],
+        },
+      }),
+    });
+    const body: any = await resp.json().catch(() => ({}));
+    if (!resp.ok) error = `${resp.status} ${body?.error?.code ?? ""} ${body?.error?.message ?? ""}`.trim().slice(0, 300);
+    else messageId = body?.messages?.[0]?.id ?? null;
+  } catch (e) {
+    error = String(e).slice(0, 300);
+  }
+  try {
+    await env.DB.prepare("INSERT INTO whatsapp_log (to_number, template, ok, error, message_id) VALUES (?, ?, ?, ?, ?)")
+      .bind(number, WHATSAPP_ALERT_TEMPLATE, error ? 0 : 1, error, messageId)
+      .run();
+  } catch (logErr) {
+    console.error("Failed to write whatsapp_log:", logErr);
+  }
+  if (error) console.error("WhatsApp send failed:", error);
+  return !error;
+}
+
+/** Same rule as notifyAdminTelegram: for now WhatsApp alerts only go to the
+ * admin's own phone (ADMIN_WHATSAPP), and only for alerts addressed to the
+ * admin's own email - subscribers get WhatsApp once opt-in exists. */
+async function notifyAdminWhatsApp(env: Env, recipientEmail: string, title: string, message: string, url: string): Promise<void> {
+  if (!env.ADMIN_EMAIL || recipientEmail.toLowerCase() !== env.ADMIN_EMAIL.toLowerCase()) return;
+  if (!env.ADMIN_WHATSAPP) return;
+  await sendWhatsAppAlert(env, env.ADMIN_WHATSAPP, title, message, url);
+}
+
 /** Email every verified subscriber watching this exact (event_name, ticket_name). */
 async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
   const { results } = await env.DB.prepare(
@@ -220,6 +289,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
         `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
       );
       await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
+      await notifyAdminWhatsApp(env, row.email, eventName, `${ticketName} is now available.`, link);
       sent++;
     } catch (e) {
       console.error(`Failed to email ${row.email}:`, e);
@@ -2185,6 +2255,7 @@ async function checkSaleWatches(env: Env): Promise<void> {
           `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
         );
         await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
+        await notifyAdminWhatsApp(env, watcher.email, row.event_title, "tickets are now on sale!", row.event_url);
       } catch (e) {
         console.error(`Failed to email ${watcher.email}:`, e);
       }
@@ -2371,6 +2442,7 @@ async function notifySaleWatchers(
         `${eventTitle}: ${bannerText}\n${postUrl}\n\n${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `📣 ${eventTitle}: ${bannerText}\n${postUrl}`);
+      await notifyAdminWhatsApp(env, watcher.email, eventTitle, bannerText, postUrl);
     } catch (e) {
       console.error(`Failed to email ${watcher.email}:`, e);
     }
@@ -2407,6 +2479,7 @@ async function sendCountdownReminder(
         `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}`);
+      await notifyAdminWhatsApp(env, watcher.email, eventTitle, `${label} (expected around ${liveAtLabel}).`, eventUrl);
     } catch (e) {
       console.error(`Failed to email reminder to ${watcher.email}:`, e);
     }
@@ -3726,6 +3799,15 @@ export default {
       if (url.pathname === "/admin/refresh-sale-status" && req.method === "POST") return await handleRefreshSaleStatus(req, env);
       if (url.pathname === "/admin/send-nudges" && req.method === "POST") return await handleSendNudges(req, env);
       if (url.pathname === "/admin/send-ig-post-reminder" && req.method === "POST") return await handleSendIgPostReminder(req, env);
+      if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
+        // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,
+        // template approval) can be checked on demand. Nothing goes to subscribers.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        if (!env.ADMIN_WHATSAPP) return jsonResponse({ error: "ADMIN_WHATSAPP not set" }, 400);
+        const ok = await sendWhatsAppAlert(env, env.ADMIN_WHATSAPP, "HYROX Basel", "this is a test alert - tickets are now on sale.", `${env.SITE_URL}/`);
+        const last = await env.DB.prepare("SELECT ok, error, message_id, created_at FROM whatsapp_log ORDER BY id DESC LIMIT 1").first<any>();
+        return jsonResponse({ accepted: ok, last }, ok ? 200 : 502);
+      }
       if (url.pathname === "/admin/check-instagram" && req.method === "POST") return await handleCheckInstagram(req, env);
       if (url.pathname === "/admin/ig-posts" && req.method === "GET") return await handleIgAdminPage(req, env);
       if (url.pathname === "/admin/ig-posts/dismiss" && req.method === "POST") return await handleIgDismiss(req, env);
@@ -3775,6 +3857,7 @@ export default {
     } else {
       ctx.waitUntil(indexEvents(env).then(() => undefined));
       ctx.waitUntil(env.DB.prepare("DELETE FROM email_log WHERE created_at < datetime('now', '-90 days')").run());
+      ctx.waitUntil(env.DB.prepare("DELETE FROM whatsapp_log WHERE created_at < datetime('now', '-90 days')").run());
     }
   },
 

@@ -12,6 +12,9 @@ database_id = "8b3ea91c-590a-4bb7-9ebd-24f732c85afb"
 SEND_FROM = "RoxRaceAlerts <alerts@alerts.roxracealerts.com>"
 SITE_URL = "https://roxracealerts.com"
 ADMIN_EMAIL = "francescobiviano609@gmail.com"
+# WhatsApp Cloud API sending number. Currently Meta's free TEST number; swap for the real
+# number's ID when one is registered. Not a secret - useless without WHATSAPP_TOKEN.
+WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
@@ -21,6 +24,8 @@ ADMIN_EMAIL = "francescobiviano609@gmail.com"
 #                        an event match + English summary before auto-publishing
 #   TELEGRAM_BOT_TOKEN - mirrors alerts addressed to ADMIN_EMAIL to Telegram too
 #   TELEGRAM_CHAT_ID   - (optional pair - alerts still email-only if unset)
+#   WHATSAPP_TOKEN     - WhatsApp Cloud API token (alerts via WhatsApp; off if unset)
+#   ADMIN_WHATSAPP     - admin phone, digits only with country code (test alerts go here)
 
 [limits]
 # Free plan hard-caps CPU time at 10ms per invocation (not configurable) -

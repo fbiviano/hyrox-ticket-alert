@@ -282,6 +282,20 @@ CREATE TABLE IF NOT EXISTS partner_applications (
 );
 CREATE INDEX IF NOT EXISTS idx_partner_applications_status ON partner_applications(status);
 
+-- One row per WhatsApp alert attempt (sendWhatsAppAlert in src/index.ts). ok = 1 means
+-- Meta accepted the message; message_id is the wamid later delivery/read webhooks
+-- refer to. Failures (unapproved template, expired token, number not on the allowed
+-- list) land here with Meta's error text instead of vanishing.
+CREATE TABLE IF NOT EXISTS whatsapp_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  to_number TEXT NOT NULL,
+  template TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  error TEXT,
+  message_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- One row per outgoing email attempt (written by sendEmail() in
 -- src/index.ts), so "did this person actually get the alert?" can be
 -- answered after the fact from /admin/analytics. ok = 1 means Resend
