@@ -77,6 +77,10 @@ SITE_URL = "https://roxracealerts-staging.francescobiviano609.workers.dev"
 ADMIN_EMAIL = "test@example.com"
 # Short delay so the free-vs-Priority ordering is easy to watch while testing.
 PRIORITY_FREE_DELAY_MINUTES = "1"
+# Staging only: offer Priority to every visitor (production keeps it admin-only until launch).
+PRIORITY_OPEN_TO_ALL = "1"
+# Emails are written to email_log as "dry run" instead of being sent - staging never mails anyone.
+EMAIL_DRY_RUN = "1"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 
 [env.staging.limits]

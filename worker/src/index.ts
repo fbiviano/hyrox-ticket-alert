@@ -26,6 +26,7 @@ export interface Env {
   ADMIN_EMAIL: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
+  EMAIL_DRY_RUN?: string; // "1" on staging: emails are logged, never sent
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
   TELEGRAM_WEBHOOK_SECRET?: string; // header secret Telegram echoes on every webhook call
   STRIPE_SECRET_KEY?: string; // Stripe secret key (sk_test_... in staging); Priority is off without it
@@ -111,6 +112,11 @@ function clearSessionCookieHeader(): string {
 }
 
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
+  if (env.EMAIL_DRY_RUN === "1") {
+    // Staging: behave as if sent (so every flow runs like production) but never mail anyone.
+    await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, 1, ?)").bind(to, subject, "dry run - not sent").run();
+    return;
+  }
   let error: string | null = null;
   try {
     const resp = await fetch("https://api.resend.com/emails", {
@@ -590,6 +596,8 @@ const RESOLVE_SCRIPT = `<script>
   var browseDetails = document.getElementById('browseEvents');
   var submitBtn = document.querySelector('.submit-step');
   var signedIn = !!document.getElementById('navSignedIn');
+  var prioEl = document.getElementById('priorityOffer');
+  var priorityOn = !!prioEl;
   function updateClearX() {
     if (clearX) clearX.style.display = input.value.trim() ? 'block' : 'none';
   }
@@ -624,8 +632,16 @@ const RESOLVE_SCRIPT = `<script>
           out.innerHTML = '<p><b>' + esc(data.event_title) + '</b>: tickets aren\\'t on sale yet.</p>' +
             '<div class="row">' +
             (signedIn ? '' : '<input type="email" id="saleEmail" placeholder="you@example.com">') +
-            '<button type="button" id="saleBtn">Notify me when on sale</button>' +
-            '</div>';
+            '<button type="button" id="saleBtn">' + (priorityOn ? 'Notify me - free' : 'Notify me when on sale') + '</button>' +
+            (priorityOn ? '<button type="button" id="salePrioBtn">&#9889; Notify me first - ' + esc(prioEl.getAttribute('data-price')) + '</button>' : '') +
+            '</div>' + (priorityOn ? prioEl.getAttribute('data-pitch') : '');
+          var wantPriority = false;
+          if (priorityOn) {
+            document.getElementById('salePrioBtn').addEventListener('click', function() {
+              wantPriority = true;
+              document.getElementById('saleBtn').click();
+            });
+          }
           document.getElementById('saleBtn').addEventListener('click', async function() {
             var email = '';
             if (!signedIn) {
@@ -643,7 +659,14 @@ const RESOLVE_SCRIPT = `<script>
               fd.set('event_title', data.event_title);
               fd.set('event_date', data.event_date || '');
               if (email) fd.set('email', email);
+              if (wantPriority) fd.set('priority', '1');
               var subResp = await fetch('/watch-sale', { method: 'POST', body: fd });
+              if (wantPriority && (subResp.headers.get('content-type') || '').indexOf('application/json') >= 0) {
+                var pj = await subResp.json();
+                if (pj.checkout_url) { window.location.href = pj.checkout_url; return; }
+                out.innerHTML = '<p>' + esc(pj.error || 'Something went wrong. Try again.') + '</p>';
+                return;
+              }
               if (subResp.redirected) {
                 // Already-verified subscriber - server set the session
                 // cookie and redirected home; follow it for real so the
@@ -1187,6 +1210,12 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
     <div id="eventListSide" class="event-list"><p>Loading...</p></div>
   </div>`;
 
+  // Tells the page script whether to show the "first" buttons, and with what words.
+  const offerPriority = priorityOfferedTo(env, subscriber);
+  const priorityFlag = offerPriority
+    ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-pitch="${escapeHtml(priorityChoicePitch())}"></span>`
+    : "";
+
   if (subscriber) {
     const counts = await getWatchCounts(subscriber.id, env);
     return page(
@@ -1199,8 +1228,11 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
             <h2>Monitor race tickets</h2>
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
-              <button type="submit" class="submit-step" style="display:none">Add selected ticket(s)</button>
-            </form>
+              <div class="submit-step" style="display:none">
+                <button type="submit" name="priority" value="0">${offerPriority ? "Watch selected - free" : "Add selected ticket(s)"}</button>
+                ${offerPriority ? `<button type="submit" name="priority" value="1">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button>${priorityChoicePitch()}` : ""}
+              </div>
+            </form>${priorityFlag}
             ${browseSection}
           </div>
         </div>
@@ -1232,9 +1264,10 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                 <input type="email" name="email" required placeholder="you@example.com">
               </label>
               <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
-              <button type="submit">Subscribe</button>
+              <button type="submit" name="priority" value="0">${offerPriority ? "Subscribe - free" : "Subscribe"}</button>
+              ${offerPriority ? `<button type="submit" name="priority" value="1">&#9889; Subscribe with Priority - ${PRIORITY_PRICE_LABEL}</button>${priorityChoicePitch()}` : ""}
             </div>
-          </form>
+          </form>${priorityFlag}
           ${browseSection}
         </div>
       </div>
@@ -2261,12 +2294,28 @@ async function hasSeasonPass(env: Env, subscriberId: number): Promise<boolean> {
   return !!(await env.DB.prepare(`SELECT 1 AS x WHERE ${hasSeasonPassSql("?")}`).bind(subscriberId).first<any>());
 }
 
+/** Priority is on sale to everyone. Selling "notified first" with no delay configured would be
+ * selling nothing, so the public switch only works together with a real delay. */
+function priorityPublic(env: Env): boolean {
+  return !!env.STRIPE_SECRET_KEY && !!env.STRIPE_WEBHOOK_SECRET && env.PRIORITY_OPEN_TO_ALL === "1" && priorityDelayMs(env) > 0;
+}
+
+/** Offers on My alerts etc. (verified subscribers). The admin can always preview. */
 function priorityOpen(env: Env, s: any): boolean {
   if (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET || !s?.verified) return false;
-  // Selling "notified first" with no delay configured would be selling nothing, so the
-  // public switch only works together with a real delay. The admin can always preview.
-  if (env.PRIORITY_OPEN_TO_ALL === "1" && priorityDelayMs(env) > 0) return true;
+  if (priorityPublic(env)) return true;
   return !!env.ADMIN_EMAIL && String(s.email).toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+}
+
+/** The free-or-Priority choice when adding a watch: also shown to new, not-yet-confirmed
+ * visitors (s = null when signed out) - they pay, then confirm their email. */
+function priorityOfferedTo(env: Env, s: any | null): boolean {
+  return s?.verified ? priorityOpen(env, s) : priorityPublic(env);
+}
+
+/** One line under the free / Priority buttons where a watch is added (HTML). */
+function priorityChoicePitch(): string {
+  return `<p class="consent">&#9889; <b>Priority</b>: emailed before anyone else, plus WhatsApp notifications (launching soon). One-off ${PRIORITY_PRICE_LABEL} for this race, no subscription. <a href="/terms" target="_blank">Terms</a></p>`;
 }
 
 /** Shown to the admin only while the head start is switched off, so a preview never looks like the real thing. */
@@ -2386,6 +2435,108 @@ function sqlTime(ms: number): string {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }
 
+interface PriorityItem {
+  cents: number;
+  name: string;
+  description: string;
+  metadata: Record<string, string>;
+}
+
+function racePriorityItem(race: { event_url: string; event_title: string }): PriorityItem {
+  return {
+    cents: PRIORITY_PRICE_CENTS,
+    name: `Priority alerts: ${race.event_title}`.slice(0, 200),
+    description: `Get an email before anyone else when tickets for this race go on sale. ${WHATSAPP_INCLUDED} One-off payment, this race only.`,
+    metadata: { event_url: race.event_url, event_title: String(race.event_title).slice(0, 400) },
+  };
+}
+
+function ticketPriorityItem(eventName: string): PriorityItem {
+  return {
+    cents: PRIORITY_PRICE_CENTS,
+    name: `Priority alerts: ${eventName}`.slice(0, 200),
+    description: `Get an email before anyone else when sold-out tickets for this event come back. ${WHATSAPP_INCLUDED} One-off payment, this event only.`,
+    metadata: { event_name: String(eventName).slice(0, 480) },
+  };
+}
+
+function seasonPriorityItem(): PriorityItem {
+  return {
+    cents: SEASON_PRICE_CENTS,
+    name: `Season Priority ${SEASON_LABEL}`,
+    description: `New-ticket emails before anyone else, for every race and ticket you watch. ${WHATSAPP_INCLUDED} One-off payment, valid until ${SEASON_END_LABEL}.`,
+    metadata: { season: SEASON_LABEL },
+  };
+}
+
+/** Creates a Stripe Checkout session for one Priority item; its URL, or null if Stripe refused. */
+async function startPriorityCheckout(env: Env, s: any, kind: PriorityKind, item: PriorityItem, successPath: string): Promise<string | null> {
+  const params = new URLSearchParams({
+    mode: "payment",
+    "line_items[0][quantity]": "1",
+    "line_items[0][price_data][currency]": PRIORITY_CURRENCY,
+    "line_items[0][price_data][unit_amount]": String(item.cents),
+    "line_items[0][price_data][product_data][name]": item.name,
+    "line_items[0][price_data][product_data][description]": item.description,
+    client_reference_id: String(s.id),
+    customer_email: s.email,
+    "metadata[subscriber_id]": String(s.id),
+    "metadata[kind]": kind,
+    success_url: `${env.SITE_URL}${successPath}`,
+    cancel_url: `${env.SITE_URL}/my-alerts`,
+    // Collect WhatsApp numbers before launch (optional) - see the WhatsApp waitlist.
+    "custom_fields[0][key]": "whatsapp",
+    "custom_fields[0][label][type]": "custom",
+    "custom_fields[0][label][custom]": "WhatsApp number for alerts (optional)",
+    "custom_fields[0][type]": "text",
+    "custom_fields[0][optional]": "true",
+    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll switch WhatsApp alerts on for it when they launch - you'll get one message asking you to reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
+  });
+  for (const [k, v] of Object.entries(item.metadata)) params.set(`metadata[${k}]`, v);
+  try {
+    const resp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
+      body: params,
+    });
+    const body: any = await resp.json().catch(() => ({}));
+    if (resp.ok && body?.url) return body.url;
+    console.error("Stripe checkout session failed:", resp.status, body?.error?.message);
+  } catch (e) {
+    console.error("Stripe checkout request failed:", e);
+  }
+  return null;
+}
+
+/** Does this subscriber already hold Priority covering this race / this event's tickets? */
+async function ownsRacePriority(env: Env, subscriberId: number, eventUrl: string): Promise<boolean> {
+  return !!(await env.DB.prepare(
+    `SELECT 1 AS x WHERE EXISTS(SELECT 1 FROM race_priority WHERE subscriber_id = ?1 AND event_url = ?2) OR ${hasSeasonPassSql("?1")}`
+  )
+    .bind(subscriberId, eventUrl)
+    .first<any>());
+}
+
+async function ownsTicketPriority(env: Env, subscriberId: number, eventName: string): Promise<boolean> {
+  return !!(await env.DB.prepare(
+    `SELECT 1 AS x WHERE EXISTS(SELECT 1 FROM ticket_priority WHERE subscriber_id = ?1 AND event_name = ?2) OR ${hasSeasonPassSql("?1")}`
+  )
+    .bind(subscriberId, eventName)
+    .first<any>());
+}
+
+/** After paying, a brand-new visitor still has to confirm their email (alerts need it). */
+function handlePriorityThanks(): Response {
+  return page(
+    "Payment received",
+    `<div class="card">
+      <h2>&#10003; Payment received - one last step</h2>
+      <p>We've sent you a confirmation link by email. <b>Click it to switch your alerts on</b> - Priority starts the moment you confirm.</p>
+      <p><small>Don't see it? Check your spam or junk folder.</small></p>
+    </div>`
+  );
+}
+
 async function handlePriorityCheckout(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const token = String(form.get("token") || "");
@@ -2400,45 +2551,15 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
   // A season holder already has Priority on everything - never sell them something they own.
   if (await hasSeasonPass(env, s.id)) return backToMyAlerts;
 
-  const params = new URLSearchParams({
-    mode: "payment",
-    "line_items[0][quantity]": "1",
-    "line_items[0][price_data][currency]": PRIORITY_CURRENCY,
-    client_reference_id: String(s.id),
-    customer_email: s.email,
-    "metadata[subscriber_id]": String(s.id),
-    "metadata[kind]": kind,
-    success_url: `${env.SITE_URL}/my-alerts?priority=success`,
-    cancel_url: `${env.SITE_URL}/my-alerts`,
-    // Demand check before we pay for a WhatsApp number: ask buyers, optional, counted in admin.
-    "custom_fields[0][key]": "whatsapp",
-    "custom_fields[0][label][type]": "custom",
-    "custom_fields[0][label][custom]": "WhatsApp number for alerts (optional)",
-    "custom_fields[0][type]": "text",
-    "custom_fields[0][optional]": "true",
-    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll switch WhatsApp alerts on for it when they launch - you'll get one message asking you to reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
-  });
+  let item: PriorityItem;
   if (kind === "ticket") {
     const subId = Number(form.get("subscription_id")) || 0;
     const sub = await env.DB.prepare("SELECT event_name FROM subscriptions WHERE id = ? AND subscriber_id = ? AND purchased_at IS NULL").bind(subId, s.id).first<any>();
     if (!sub) return notAvailable();
-    const already = await env.DB.prepare("SELECT 1 AS x FROM ticket_priority WHERE subscriber_id = ? AND event_name = ?").bind(s.id, sub.event_name).first<any>();
-    if (already) return backToMyAlerts;
-    params.set("line_items[0][price_data][unit_amount]", String(PRIORITY_PRICE_CENTS));
-    params.set("line_items[0][price_data][product_data][name]", `Priority alerts: ${sub.event_name}`.slice(0, 200));
-    params.set(
-      "line_items[0][price_data][product_data][description]",
-      `Get an email before anyone else when sold-out tickets for this event come back. ${WHATSAPP_INCLUDED} One-off payment, this event only.`
-    );
-    params.set("metadata[event_name]", String(sub.event_name).slice(0, 480));
+    if (await ownsTicketPriority(env, s.id, sub.event_name)) return backToMyAlerts;
+    item = ticketPriorityItem(sub.event_name);
   } else if (kind === "season") {
-    params.set("line_items[0][price_data][unit_amount]", String(SEASON_PRICE_CENTS));
-    params.set("line_items[0][price_data][product_data][name]", `Season Priority ${SEASON_LABEL}`);
-    params.set(
-      "line_items[0][price_data][product_data][description]",
-      `New-ticket emails before anyone else, for every race and ticket you watch. ${WHATSAPP_INCLUDED} One-off payment, valid until ${SEASON_END_LABEL}.`
-    );
-    params.set("metadata[season]", SEASON_LABEL);
+    item = seasonPriorityItem();
   } else {
     const race = await env.DB.prepare(
       `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
@@ -2447,30 +2568,10 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
       .bind(s.id, eventUrl)
       .first<any>();
     if (!race || race.resolved) return notAvailable();
-    const already = await env.DB.prepare("SELECT 1 AS x FROM race_priority WHERE subscriber_id = ? AND event_url = ?").bind(s.id, eventUrl).first<any>();
-    if (already) return backToMyAlerts;
-    params.set("line_items[0][price_data][unit_amount]", String(PRIORITY_PRICE_CENTS));
-    params.set("line_items[0][price_data][product_data][name]", `Priority alerts: ${race.event_title}`.slice(0, 200));
-    params.set(
-      "line_items[0][price_data][product_data][description]",
-      `Get an email before anyone else when tickets for this race go on sale. ${WHATSAPP_INCLUDED} One-off payment, this race only.`
-    );
-    params.set("metadata[event_url]", eventUrl);
-    params.set("metadata[event_title]", String(race.event_title).slice(0, 400));
+    if (await ownsRacePriority(env, s.id, eventUrl)) return backToMyAlerts;
+    item = racePriorityItem(race);
   }
-  let url: string | null = null;
-  try {
-    const resp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: params,
-    });
-    const body: any = await resp.json().catch(() => ({}));
-    if (resp.ok && body?.url) url = body.url;
-    else console.error("Stripe checkout session failed:", resp.status, body?.error?.message);
-  } catch (e) {
-    console.error("Stripe checkout request failed:", e);
-  }
+  const url = await startPriorityCheckout(env, s, kind, item, "/my-alerts?priority=success");
   if (!url) return page("Payment unavailable", `<div class="card"><p>We couldn't start the payment just now - nothing was charged. <a href="/my-alerts">Back to my alerts</a></p></div>`);
   return new Response(null, { status: 303, headers: { Location: url } });
 }
@@ -2603,13 +2704,18 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
   // Looked up by the original marketing URL (event_directory's key), not the
   // vivenu shop URL resolveEvent() finds - carried along so a subscriber's
   // watches can later tell whether their event's date has passed.
-  const known = await env.DB.prepare("SELECT title, event_date FROM event_directory WHERE url = ?").bind(url).first<any>();
+  const known = await env.DB.prepare("SELECT title, event_date, on_sale FROM event_directory WHERE url = ?").bind(url).first<any>();
 
   let found;
   try {
     found = await resolveEvent(url);
   } catch (e) {
     if (!(e instanceof FetchBlocked)) throw e;
+    // hyrox.com is rate-limiting us. A race our directory knows isn't on sale yet can still be
+    // watched (that needs no live data) - otherwise a busy minute would block the sign-up entirely.
+    if (known && !known.on_sale) {
+      return jsonResponse({ error: "Tickets may not be on sale yet.", not_on_sale: true, event_title: known.title, event_date: known.event_date }, 404);
+    }
     return jsonResponse({ error: "HYROX's website is busy right now - please try again in a minute." }, 503);
   }
   if (!found) {
@@ -2686,7 +2792,7 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
  * right away (same unsubscribe_token session as a verified subscriber gets)
  * so it can immediately reach /my-alerts and see the "please confirm"
  * banner there too - not just on this one-time response page. */
-async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: string): Promise<Response> {
+async function sendVerificationEmailOnly(env: Env, subscriber: any, verifyToken: string): Promise<void> {
   const link = `${env.SITE_URL}/verify?token=${verifyToken}`;
   await sendEmail(
     env,
@@ -2695,6 +2801,10 @@ async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: str
     `<p>Click to confirm you want ticket-availability alerts:</p><p><a href="${link}">${link}</a></p><p>If you didn't request this, ignore this email.</p>`,
     `Confirm your subscription: ${link}\n\nIf you didn't request this, ignore this email.`
   );
+}
+
+async function sendVerificationEmail(env: Env, subscriber: any, verifyToken: string): Promise<Response> {
+  await sendVerificationEmailOnly(env, subscriber, verifyToken);
   return page(
     "Check your email",
     `<div class="card"><p>Almost done — we've sent a confirmation link to <b>${escapeHtml(
@@ -2892,6 +3002,27 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
       .run();
   }
 
+  // Chose "Watch first" - the free watch is saved above either way; Priority is paid on top.
+  const first = ticketValues.map(decodeTicket).find(Boolean);
+  if (form.get("priority") === "1" && first && priorityOfferedTo(env, subscriber) && !(await ownsTicketPriority(env, subscriber.id, first.event_name))) {
+    if (needsVerification) {
+      // Never take money from someone we can't reach to confirm their email.
+      try {
+        await sendVerificationEmailOnly(env, subscriber, verifyToken);
+      } catch {
+        return page("Try again", `<div class="card"><p>We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged. <a href="/">Back</a></p></div>`);
+      }
+    }
+    const url = await startPriorityCheckout(env, subscriber, "ticket", ticketPriorityItem(first.event_name), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+    const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
+    if (url) return new Response(null, { status: 303, headers: { Location: url, ...cookie } });
+    return page(
+      "Payment unavailable",
+      `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved${needsVerification ? " - confirm your email (we've sent a link) to switch it on" : ""}. <a href="/my-alerts">My alerts</a></p></div>`,
+      cookie
+    );
+  }
+
   if (needsVerification) {
     return sendVerificationEmail(env, subscriber, verifyToken);
   }
@@ -2918,6 +3049,30 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
     .bind(subscriber.id, eventUrl)
     .run();
+
+  // Chose "Notify me first" - the free watch is saved above either way; Priority is paid on top.
+  if (form.get("priority") === "1" && priorityOfferedTo(env, subscriber)) {
+    const race = await env.DB.prepare("SELECT event_url, event_title, resolved FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
+    if (race && !race.resolved && !(await ownsRacePriority(env, subscriber.id, eventUrl))) {
+      if (needsVerification) {
+        // Never take money from someone we can't reach to confirm their email.
+        try {
+          await sendVerificationEmailOnly(env, subscriber, verifyToken);
+        } catch {
+          return jsonResponse({ error: "We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged." }, 502);
+        }
+      }
+      const url = await startPriorityCheckout(env, subscriber, "race", racePriorityItem(race), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+      return new Response(
+        JSON.stringify(
+          url
+            ? { checkout_url: url }
+            : { error: `We couldn't start the payment just now - nothing was charged. Your free alert is saved${needsVerification ? "; confirm your email (we've sent a link) to switch it on" : ""}.` }
+        ),
+        { status: url ? 200 : 502, headers: { "content-type": "application/json", "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) } }
+      );
+    }
+  }
 
   if (needsVerification) {
     return sendVerificationEmail(env, subscriber, verifyToken);
@@ -4998,6 +5153,7 @@ export default {
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
       if (url.pathname === "/terms" && req.method === "GET") return handleTermsPage(env);
+      if (url.pathname === "/priority/thanks" && req.method === "GET") return handlePriorityThanks();
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
