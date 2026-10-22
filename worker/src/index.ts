@@ -1226,6 +1226,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const priorityFlag = offerPriority
     ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-choice="${escapeHtml(
         priorityChoiceHtml(
+          env,
           "race",
           `<button type="button" id="saleBtn">Notify me - free</button>`,
           `<button type="button" id="salePrioBtn">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`
@@ -1249,6 +1250,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                 ${
                   offerPriority
                     ? priorityChoiceHtml(
+                        env,
                         "ticket",
                         `<button type="submit" name="priority" value="0">Watch - free</button>`,
                         `<button type="submit" name="priority" value="1">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button>`
@@ -1291,6 +1293,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
               ${
                 offerPriority
                   ? priorityChoiceHtml(
+                      env,
                       "ticket",
                       `<button type="submit" name="priority" value="0">Subscribe - free</button>`,
                       `<button type="submit" name="priority" value="1">&#9889; Subscribe first - ${PRIORITY_PRICE_LABEL}</button>`
@@ -2346,7 +2349,7 @@ function priorityOfferedTo(env: Env, s: any | null): boolean {
 
 /** Free vs Priority side by side, where a watch is added, so the difference is clear before
  * anyone clicks. The buttons are passed in: fetch-driven ones for races, form submits for tickets. */
-function priorityChoiceHtml(what: "race" | "ticket", freeButton: string, priorityButton: string): string {
+function priorityChoiceHtml(env: Env, what: "race" | "ticket", freeButton: string, priorityButton: string): string {
   const when = what === "race" ? "when tickets go on sale" : "when your ticket comes back";
   return `<div class="plan-grid">
       <div class="plan">
@@ -2359,7 +2362,7 @@ function priorityChoiceHtml(what: "race" | "ticket", freeButton: string, priorit
         <h3>&#9889; Priority <span>${PRIORITY_PRICE_LABEL} once</span></h3>
         <ul>
           <li><b>Alerted the instant we spot it</b> - before everyone else</li>
-          <li><b>WhatsApp notification</b> too (launching soon)</li>
+          <li><b>WhatsApp notification</b> ${whatsappLive(env) ? "included" : "too (launching soon)"}</li>
           <li>For this ${what === "race" ? "race" : "event"} only - no subscription</li>
         </ul>
         ${priorityButton}
@@ -2373,11 +2376,19 @@ function priorityPreviewNote(env: Env): string {
   return priorityDelayMs(env) > 0 ? "" : " (Admin preview: the head start is switched off on this server.)";
 }
 
-const WHATSAPP_INCLUDED = "WhatsApp alerts coming soon - included at no extra cost.";
+/** WhatsApp is really sending for everyone - only then may an offer promise it without "launching soon". */
+function whatsappLive(env: Env): boolean {
+  return !!env.WHATSAPP_TOKEN && env.WHATSAPP_OPEN_TO_ALL === "1";
+}
+
+/** The WhatsApp sentence in Priority offers, honest about whether it's live yet. */
+function whatsappIncluded(env: Env): string {
+  return whatsappLive(env) ? "WhatsApp notifications included." : "WhatsApp alerts coming soon - included at no extra cost.";
+}
 
 /** One-line pitch under the race list on My alerts (HTML). */
 function priorityExplainer(env: Env): string {
-  return `<b>Priority alerts</b>: get new-ticket emails before anyone else. ${WHATSAPP_INCLUDED} ${PRIORITY_PRICE_LABEL} for one race or ticket watch, or ${SEASON_PRICE_LABEL} for everything you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}`;
+  return `<b>Priority alerts</b>: get new-ticket emails before anyone else. ${whatsappIncluded(env)} ${PRIORITY_PRICE_LABEL} for one race or ticket watch, or ${SEASON_PRICE_LABEL} for everything you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}`;
 }
 
 type PriorityKind = "race" | "ticket" | "season";
@@ -2396,7 +2407,7 @@ function priorityForm(token: string, kind: PriorityKind, label: string, target: 
 function priorityOfferCard(env: Env, token: string, race: { event_url: string; event_title: string } | null): string {
   return `<div class="card">
       <h2>&#9889; Priority alerts</h2>
-      <p><b>Get new-ticket emails before anyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for everything you watch"}. ${WHATSAPP_INCLUDED}</p>
+      <p><b>Get new-ticket emails before anyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for everything you watch"}. ${whatsappIncluded(env)}</p>
       ${race ? priorityForm(token, "race", `This race - ${PRIORITY_PRICE_LABEL}`, { eventUrl: race.event_url }) : ""}
       ${priorityForm(token, "season", `Whole season - ${SEASON_PRICE_LABEL}`)}
       <p class="consent">Whole season = every race and ticket you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}</p>
@@ -2432,7 +2443,7 @@ function handleTermsPage(env: Env): Response {
       <p>Race and ticket alerts by email (and Telegram) are free. We check HYROX ticket shops regularly and email you when something you watch changes. We're independent - not affiliated with HYROX or vivenu - and can't guarantee every change is caught or how fast email arrives.</p>
       <h2>Priority alerts</h2>
       <ul>
-        <li><b>What you get:</b> when we detect the change you're watching, your alert goes out first; free subscribers watching the same thing get theirs a few minutes later. ${WHATSAPP_INCLUDED}</li>
+        <li><b>What you get:</b> when we detect the change you're watching, your alert goes out first; free subscribers watching the same thing get theirs a few minutes later. ${whatsappIncluded(env)}</li>
         <li><b>Prices:</b> ${PRIORITY_PRICE_LABEL} for one race or one ticket watch (that event only), or ${SEASON_PRICE_LABEL} for everything you watch until ${SEASON_END_LABEL}. One-off payments in US dollars, charged by Stripe. No subscription, nothing renews.</li>
         <li><b>What it isn't:</b> Priority speeds up your alert. It doesn't reserve, hold or guarantee a ticket, and we never sell tickets.</li>
       </ul>
@@ -2492,29 +2503,29 @@ interface PriorityItem {
   metadata: Record<string, string>;
 }
 
-function racePriorityItem(race: { event_url: string; event_title: string }): PriorityItem {
+function racePriorityItem(env: Env, race: { event_url: string; event_title: string }): PriorityItem {
   return {
     cents: PRIORITY_PRICE_CENTS,
     name: `Priority alerts: ${race.event_title}`.slice(0, 200),
-    description: `Get an email before anyone else when tickets for this race go on sale. ${WHATSAPP_INCLUDED} One-off payment, this race only.`,
+    description: `Get an email before anyone else when tickets for this race go on sale. ${whatsappIncluded(env)} One-off payment, this race only.`,
     metadata: { event_url: race.event_url, event_title: String(race.event_title).slice(0, 400) },
   };
 }
 
-function ticketPriorityItem(eventName: string): PriorityItem {
+function ticketPriorityItem(env: Env, eventName: string): PriorityItem {
   return {
     cents: PRIORITY_PRICE_CENTS,
     name: `Priority alerts: ${eventName}`.slice(0, 200),
-    description: `Get an email before anyone else when sold-out tickets for this event come back. ${WHATSAPP_INCLUDED} One-off payment, this event only.`,
+    description: `Get an email before anyone else when sold-out tickets for this event come back. ${whatsappIncluded(env)} One-off payment, this event only.`,
     metadata: { event_name: String(eventName).slice(0, 480) },
   };
 }
 
-function seasonPriorityItem(): PriorityItem {
+function seasonPriorityItem(env: Env): PriorityItem {
   return {
     cents: SEASON_PRICE_CENTS,
     name: `Season Priority ${SEASON_LABEL}`,
-    description: `New-ticket emails before anyone else, for every race and ticket you watch. ${WHATSAPP_INCLUDED} One-off payment, valid until ${SEASON_END_LABEL}.`,
+    description: `New-ticket emails before anyone else, for every race and ticket you watch. ${whatsappIncluded(env)} One-off payment, valid until ${SEASON_END_LABEL}.`,
     metadata: { season: SEASON_LABEL },
   };
 }
@@ -2607,9 +2618,9 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     const sub = await env.DB.prepare("SELECT event_name FROM subscriptions WHERE id = ? AND subscriber_id = ? AND purchased_at IS NULL").bind(subId, s.id).first<any>();
     if (!sub) return notAvailable();
     if (await ownsTicketPriority(env, s.id, sub.event_name)) return backToMyAlerts;
-    item = ticketPriorityItem(sub.event_name);
+    item = ticketPriorityItem(env, sub.event_name);
   } else if (kind === "season") {
-    item = seasonPriorityItem();
+    item = seasonPriorityItem(env);
   } else {
     const race = await env.DB.prepare(
       `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
@@ -2619,7 +2630,7 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
       .first<any>();
     if (!race || race.resolved) return notAvailable();
     if (await ownsRacePriority(env, s.id, eventUrl)) return backToMyAlerts;
-    item = racePriorityItem(race);
+    item = racePriorityItem(env, race);
   }
   const url = await startPriorityCheckout(env, s, kind, item, "/my-alerts?priority=success");
   if (!url) return page("Payment unavailable", `<div class="card"><p>We couldn't start the payment just now - nothing was charged. <a href="/my-alerts">Back to my alerts</a></p></div>`);
@@ -3063,7 +3074,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
         return page("Try again", `<div class="card"><p>We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged. <a href="/">Back</a></p></div>`);
       }
     }
-    const url = await startPriorityCheckout(env, subscriber, "ticket", ticketPriorityItem(first.event_name), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+    const url = await startPriorityCheckout(env, subscriber, "ticket", ticketPriorityItem(env, first.event_name), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     if (url) return new Response(null, { status: 303, headers: { Location: url, ...cookie } });
     return page(
@@ -3112,7 +3123,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
           return jsonResponse({ error: "We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged." }, 502);
         }
       }
-      const url = await startPriorityCheckout(env, subscriber, "race", racePriorityItem(race), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+      const url = await startPriorityCheckout(env, subscriber, "race", racePriorityItem(env, race), needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
       return new Response(
         JSON.stringify(
           url
