@@ -1238,19 +1238,11 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const seasonHeld = subscriber ? await hasSeasonPass(env, subscriber.id) : false;
   const offerPriority = priorityOfferedTo(env, subscriber) && !seasonHeld;
   const credit = subscriber && offerPriority ? await seasonCredit(env, subscriber.id) : 0;
-  const watchedRaces = subscriber
-    ? Number(
-        (
-          await env.DB.prepare(
-            "SELECT (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = ?1) + (SELECT COUNT(DISTINCT event_name) FROM subscriptions WHERE subscriber_id = ?1 AND purchased_at IS NULL) AS n"
-          )
-            .bind(subscriber.id)
-            .first<any>()
-        )?.n
-      ) || 0
-    : 0;
+  // The season only appears once it can matter: they already watch a race, so this is at least
+  // their second. A first-time visitor just sees Free vs Priority.
+  const watchedRaces = subscriber ? await watchedRaceCount(env, subscriber.id) : 0;
   const seasonOffer = (button: string): SeasonOffer | null =>
-    seasonPriceCents(credit) === null
+    watchedRaces < 1 || seasonPriceCents(credit) === null
       ? null
       : {
           button,
@@ -2414,7 +2406,7 @@ function priorityChoiceHtml(env: Env, what: "race" | "ticket", freeButton: strin
       ${
         season
           ? `<div class="plan season">
-        <h3>&#9889; Season Priority <span>${season.price}</span>${season.highlight ? '<em class="best">Best value for you</em>' : ""}</h3>
+        <h3>&#9889; Season Priority <span>${season.price}</span>${season.highlight ? '<em class="best">Best value - you watch more than one race</em>' : ""}</h3>
         <ul>
           <li><b>Every race and ticket you watch</b> - until ${SEASON_END_LABEL}</li>
           <li><b>Alerted the instant we spot it</b> - before everyone else</li>
@@ -2445,8 +2437,8 @@ function whatsappIncluded(_env: Env): string {
 }
 
 /** One-line pitch under the race list on My alerts (HTML). */
-function priorityExplainer(env: Env): string {
-  return `<b>Priority alerts</b>: get new-ticket emails before anyone else. ${whatsappIncluded(env)} ${PRIORITY_PRICE_LABEL} for one race or ticket watch, or ${SEASON_PRICE_LABEL} for everything you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}`;
+function priorityExplainer(env: Env, multiRace = false): string {
+  return `<b>Priority alerts</b>: get new-ticket emails before anyone else. ${whatsappIncluded(env)} ${PRIORITY_PRICE_LABEL} per race${multiRace ? `, or ${SEASON_PRICE_LABEL} for every race you watch this season` : ""}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}`;
 }
 
 type PriorityKind = "race" | "ticket" | "season";
@@ -2462,13 +2454,13 @@ function priorityForm(token: string, kind: PriorityKind, label: string, target: 
 }
 
 /** The two offers side by side. `race` = the race being offered; null offers the season only. */
-function priorityOfferCard(env: Env, token: string, race: { event_url: string; event_title: string } | null, credit = 0): string {
+function priorityOfferCard(env: Env, token: string, race: { event_url: string; event_title: string } | null, credit = 0, multiRace = false): string {
   return `<div class="card">
       <h2>&#9889; Priority alerts</h2>
       <p><b>Get new-ticket emails before anyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for everything you watch"}. ${whatsappIncluded(env)}</p>
       ${race ? priorityForm(token, "race", `This race - ${PRIORITY_PRICE_LABEL}`, { eventUrl: race.event_url }) : ""}
-      ${seasonPriceCents(credit) !== null ? priorityForm(token, "season", seasonButtonLabel(credit)) : ""}
-      <p class="consent">Whole season = every race and ticket you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}</p>
+      ${multiRace && seasonPriceCents(credit) !== null ? priorityForm(token, "season", seasonButtonLabel(credit)) : ""}
+      <p class="consent">${multiRace ? `Whole season = every race and ticket you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. ` : ""}One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}</p>
     </div>`;
 }
 
@@ -2539,7 +2531,7 @@ async function handleWatchingPage(req: Request, env: Env): Promise<Response> {
       <h2>&#10003; You're watching ${escapeHtml(race.event_title)}</h2>
       <p>We'll alert you the moment tickets go on sale - free, as always.</p>
     </div>
-    ${offer ? priorityOfferCard(env, subscriber.unsubscribe_token, offer, await seasonCredit(env, subscriber.id)) : ""}
+    ${offer ? priorityOfferCard(env, subscriber.unsubscribe_token, offer, await seasonCredit(env, subscriber.id), (await watchedRaceCount(env, subscriber.id)) >= 2) : ""}
     <div class="card"><p><a href="/">No thanks - back to the homepage</a> &middot; <a href="/my-alerts">My alerts</a></p></div>`,
     offer ? { "X-Priority-Offer": "1" } : {}
   );
@@ -2578,6 +2570,17 @@ function ticketPriorityItem(env: Env, eventName: string): PriorityItem {
     description: `Get an email before anyone else when sold-out tickets for this event come back. ${whatsappIncluded(env)} One-off payment, this event only.`,
     metadata: { event_name: String(eventName).slice(0, 480) },
   };
+}
+
+/** How many different races someone watches: race watches plus races they watch tickets at
+ * (several tickets at one race count once - a single Priority already covers them). */
+async function watchedRaceCount(env: Env, subscriberId: number): Promise<number> {
+  const r = await env.DB.prepare(
+    "SELECT (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = ?1) + (SELECT COUNT(DISTINCT event_name) FROM subscriptions WHERE subscriber_id = ?1 AND purchased_at IS NULL) AS n"
+  )
+    .bind(subscriberId)
+    .first<any>();
+  return Number(r?.n) || 0;
 }
 
 /** What a subscriber has already paid for single-race/ticket passes - credited against the season. */
@@ -3260,7 +3263,7 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
   return page(
     "Confirmed",
     `<div class="card"><p>You're confirmed! You'll get an email the moment your selected ticket(s) become available.</p><p><a href="/my-alerts">Manage my alerts</a></p></div>
-    ${offers.length ? priorityOfferCard(env, subscriber.unsubscribe_token, offers[0], await seasonCredit(env, subscriber.id)) : ""}`,
+    ${offers.length ? priorityOfferCard(env, subscriber.unsubscribe_token, offers[0], await seasonCredit(env, subscriber.id), (await watchedRaceCount(env, subscriber.id)) >= 2) : ""}`,
     { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
   );
 }
@@ -3341,6 +3344,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
 
   const seasonActive = await hasSeasonPass(env, subscriber.id);
   const credit = seasonActive ? 0 : await seasonCredit(env, subscriber.id);
+  const multiRace = (await watchedRaceCount(env, subscriber.id)) >= 2;
   const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber), seasonActive);
   const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber), seasonActive);
   const counts = await getWatchCounts(subscriber.id, env);
@@ -3358,7 +3362,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
   } else if (priorityOpen(env, subscriber)) {
     saleSections.push(
-      `<p class="consent">&#9889; ${priorityExplainer(env)}</p>${seasonPriceCents(credit) !== null ? priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${seasonButtonLabel(credit)}`) : ""}`
+      `<p class="consent">&#9889; ${priorityExplainer(env, multiRace)}</p>${multiRace && seasonPriceCents(credit) !== null ? priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${seasonButtonLabel(credit)}`) : ""}`
     );
   }
   const verifyBanner = subscriber.verified
