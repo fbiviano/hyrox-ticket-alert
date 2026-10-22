@@ -114,7 +114,7 @@ function clearSessionCookieHeader(): string {
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
   if (env.EMAIL_DRY_RUN === "1") {
     // Staging: behave as if sent (so every flow runs like production) but never mail anyone.
-    await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, 1, ?)").bind(to, subject, "dry run - not sent").run();
+    await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, 1, ?)").bind(to, subject, `dry run - not sent | ${text.slice(0, 1500)}`).run();
     return;
   }
   let error: string | null = null;
@@ -321,7 +321,8 @@ async function sendWhatsAppReply(env: Env, to: string, text: string): Promise<bo
 /** Email every verified subscriber watching this exact (event_name, ticket_name). */
 async function notifySubscribers(env: Env, eventName: string, ticketName: string, link: string): Promise<number> {
   const { results } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id FROM subscribers s
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id, ${hasTicketPrioritySql("s.id", "sub.event_name")} AS has_priority
+     FROM subscribers s
      JOIN subscriptions sub ON sub.subscriber_id = s.id
      WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
   )
@@ -329,7 +330,7 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
     .all<any>();
 
   let sent = 0;
-  for (const row of results || []) if (await sendTicketAlert(env, row, eventName, ticketName, link)) sent++;
+  for (const row of results || []) if (await sendTicketAlert(env, row, eventName, ticketName, link, row.has_priority ? null : 0)) sent++;
   return sent;
 }
 
@@ -352,7 +353,7 @@ async function notifyTicketReturned(env: Env, ct: any): Promise<void> {
       .bind(sqlTime(Date.now() + delayMs), ct.id)
       .run();
   }
-  for (const row of holdBack ? paid : all) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url);
+  for (const row of holdBack ? paid : all) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url, row.has_priority ? null : 0);
 }
 
 /** Sends held-back sold-out-ticket alerts once the delay is up (same rules as the race ones). */
@@ -371,13 +372,15 @@ async function sendDueFreeTicketAlerts(env: Env): Promise<void> {
     )
       .bind(ct.event_name, ct.ticket_name, ct.detected_at)
       .all<any>();
-    for (const row of rows || []) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url);
+    const behind = minutesSince(ct.detected_at);
+    for (const row of rows || []) await sendTicketAlert(env, row, ct.event_name, ct.ticket_name, ct.shop_url, behind);
   }
 }
 
 /** The "ticket available" alert to one subscriber, on every channel they've set up. */
-async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName: string, link: string): Promise<boolean> {
+async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName: string, link: string, upsellMinutes: number | null = null): Promise<boolean> {
   const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${row.unsubscribe_token}`;
+  const up = upsellMinutes === null ? { html: "", text: "" } : priorityUpsell(env, row.unsubscribe_token, upsellMinutes);
   const unsubLink = `${env.SITE_URL}/unsubscribe?token=${row.unsubscribe_token}`;
   if (row.whatsapp_phone) await sendWhatsAppAlert(env, row.whatsapp_phone, eventName, `${ticketName} is now available.`, link);
   await sendTelegramAlert(env, row.telegram_chat_id, eventName, `${ticketName} is now available.`, link);
@@ -386,8 +389,8 @@ async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName
       env,
       row.email,
       `Ticket available: ${ticketName}`,
-      `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
-      `${eventName}\n${ticketName} is now available.\n${link}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
+      `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p>${up.html}<p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
+      `${eventName}\n${ticketName} is now available.\n${link}${up.text}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
     );
     await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
     return true;
@@ -1024,7 +1027,7 @@ async function renderTicketRows(
   const { results } = await env.DB.prepare(
     `SELECT id, event_name, ticket_name, event_date, purchased_at,
        (SELECT last_status FROM community_tickets ct WHERE ct.event_name = subscriptions.event_name AND ct.ticket_name = subscriptions.ticket_name LIMIT 1) AS last_status,
-       EXISTS(SELECT 1 FROM ticket_priority tp WHERE tp.subscriber_id = subscriptions.subscriber_id AND tp.event_name = subscriptions.event_name) AS has_priority
+       ${hasTicketPrioritySql("subscriptions.subscriber_id", "subscriptions.event_name")} AS has_priority
      FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name`
   )
     .bind(subscriberId)
@@ -2337,7 +2340,11 @@ function hasSeasonPassSql(subCol: string): string {
 
 /** SQL: is subscriber `subCol` Priority for sold-out tickets of event `nameCol` (that event, or the whole season)? */
 function hasTicketPrioritySql(subCol: string, nameCol: string): string {
-  return `(EXISTS(SELECT 1 FROM ticket_priority tp WHERE tp.subscriber_id = ${subCol} AND tp.event_name = ${nameCol}) OR ${hasSeasonPassSql(subCol)})`;
+  // race_priority.event_name is filled in when that race's shop is detected live (checkSaleWatches),
+  // so a "This race" pass keeps covering the race's sold-out tickets afterwards.
+  return `(EXISTS(SELECT 1 FROM ticket_priority tp WHERE tp.subscriber_id = ${subCol} AND tp.event_name = ${nameCol})
+    OR EXISTS(SELECT 1 FROM race_priority rpn WHERE rpn.subscriber_id = ${subCol} AND rpn.event_name = ${nameCol})
+    OR ${hasSeasonPassSql(subCol)})`;
 }
 
 /** SQL: is subscriber `subCol` Priority for the race at `urlCol` (that race, or the whole season)? */
@@ -2625,7 +2632,7 @@ async function ownsRacePriority(env: Env, subscriberId: number, eventUrl: string
 
 async function ownsTicketPriority(env: Env, subscriberId: number, eventName: string): Promise<boolean> {
   return !!(await env.DB.prepare(
-    `SELECT 1 AS x WHERE EXISTS(SELECT 1 FROM ticket_priority WHERE subscriber_id = ?1 AND event_name = ?2) OR ${hasSeasonPassSql("?1")}`
+    `SELECT 1 AS x WHERE ${hasTicketPrioritySql("?1", "?2")}`
   )
     .bind(subscriberId, eventName)
     .first<any>());
@@ -3577,6 +3584,9 @@ async function checkSaleWatches(env: Env): Promise<void> {
     )
       .bind(row.event_url)
       .run();
+    // Now we know the shop's own event name (what ticket watches are keyed by), link any
+    // "This race" Priority to it so it also covers this race's sold-out tickets.
+    await env.DB.prepare("UPDATE race_priority SET event_name = ? WHERE event_url = ? AND event_name IS NULL").bind(found.event.name, row.event_url).run();
 
     const { results: watchers } = await env.DB.prepare(
       `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id,
@@ -3599,13 +3609,35 @@ async function checkSaleWatches(env: Env): Promise<void> {
         .bind(sqlTime(Date.now() + delayMs), row.event_url)
         .run();
     }
-    for (const watcher of holdBack ? paid : all) await sendSaleWatchAlert(env, row, watcher);
+    for (const watcher of holdBack ? paid : all) await sendSaleWatchAlert(env, row, watcher, watcher.has_priority ? null : 0);
   }
 }
 
-/** The "tickets are now on sale" alert to one watcher, on every channel they've set up. */
-async function sendSaleWatchAlert(env: Env, row: { event_title: string; event_url: string }, watcher: any): Promise<void> {
+/** Box added to a free subscriber's alert email, once Priority is on sale: how much earlier Priority
+ * members were told (only when they really were - minutesBehind 0 means nobody was ahead) and the
+ * way to get it. */
+function priorityUpsell(env: Env, token: string, minutesBehind: number): { html: string; text: string } {
+  if (!priorityPublic(env)) return { html: "", text: "" };
+  const link = `${env.SITE_URL}/my-alerts?token=${token}`;
+  const lead =
+    minutesBehind > 0 ? `Priority members got this alert ${minutesBehind} minute${minutesBehind === 1 ? "" : "s"} before you.` : "Want to be first next time?";
+  const pitch = `Priority alerts reach you the instant we spot a change - before everyone else - plus WhatsApp notifications. ${PRIORITY_PRICE_LABEL} per race.`;
+  return {
+    html: `<p style="background:#fff6e0;border:1px solid #f0c36d;border-radius:8px;padding:10px 12px">&#9889; <b>${lead}</b> ${pitch} <a href="${link}">Get Priority</a></p>`,
+    text: `\n\n⚡ ${lead} ${pitch} Get Priority: ${link}`,
+  };
+}
+
+/** Whole minutes since a D1 datetime('now') timestamp, at least 1. */
+function minutesSince(sqlTs: string): number {
+  return Math.max(1, Math.round((Date.now() - Date.parse(String(sqlTs).replace(" ", "T") + "Z")) / 60_000));
+}
+
+/** The "tickets are now on sale" alert to one watcher, on every channel they've set up.
+ * upsellMinutes: null for Priority holders (no upsell), else how far behind Priority they were. */
+async function sendSaleWatchAlert(env: Env, row: { event_title: string; event_url: string }, watcher: any, upsellMinutes: number | null = null): Promise<void> {
   const myAlertsLink = `${env.SITE_URL}/my-alerts?token=${watcher.unsubscribe_token}`;
+  const up = upsellMinutes === null ? { html: "", text: "" } : priorityUpsell(env, watcher.unsubscribe_token, upsellMinutes);
   if (watcher.whatsapp_phone) await sendWhatsAppAlert(env, watcher.whatsapp_phone, row.event_title, "tickets are now on sale!", row.event_url);
   await sendTelegramAlert(env, watcher.telegram_chat_id, row.event_title, "tickets are now on sale!", row.event_url);
   try {
@@ -3613,8 +3645,8 @@ async function sendSaleWatchAlert(env: Env, row: { event_title: string; event_ur
       env,
       watcher.email,
       `Tickets on sale now: ${row.event_title}`,
-      `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-      `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.\n\nManage my alerts: ${myAlertsLink}`
+      `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p>${up.html}<p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+      `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.${up.text}\n\nManage my alerts: ${myAlertsLink}`
     );
     await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
   } catch (e) {
@@ -3642,7 +3674,8 @@ async function sendDueFreeSaleAlerts(env: Env): Promise<void> {
     )
       .bind(row.event_url, row.detected_at)
       .all<any>();
-    for (const watcher of watchers || []) await sendSaleWatchAlert(env, row, watcher);
+    const behind = minutesSince(row.detected_at);
+    for (const watcher of watchers || []) await sendSaleWatchAlert(env, row, watcher, behind);
   }
 }
 
@@ -5282,6 +5315,16 @@ export default {
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
       if (url.pathname === "/admin/whatsapp/test-alert" && req.method === "POST") return await handleWhatsAppTestAlert(req, env);
       if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
+      if (url.pathname === "/admin/run-checks" && req.method === "POST") {
+        // Runs one round of the sale + ticket checks now (incl. due free alerts). Staging has no
+        // schedule, so this is how its alert ordering gets tested. Admin only.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        await checkSaleWatches(env);
+        await sendDueFreeSaleAlerts(env);
+        await checkCommunityTickets(env);
+        await sendDueFreeTicketAlerts(env);
+        return jsonResponse({ ok: true });
+      }
       if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
         // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,
         // template approval) can be checked on demand. Nothing goes to subscribers.

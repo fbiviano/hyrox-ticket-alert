@@ -177,6 +177,9 @@ CREATE TABLE IF NOT EXISTS race_priority (
   livemode INTEGER NOT NULL DEFAULT 0,
   -- Answer to the optional "Want WhatsApp alerts when they launch?" question at checkout.
   wants_whatsapp INTEGER NOT NULL DEFAULT 0,
+  -- The shop's own event name, filled in when the race goes on sale, so this pass also covers
+  -- the race's sold-out ticket watches (which are keyed by that name).
+  event_name TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_url)
 );
