@@ -40,7 +40,14 @@ CREATE TABLE IF NOT EXISTS subscribers (
   telegram_linked_at TEXT,
   telegram_code TEXT,
   telegram_code_expires TEXT,
-  telegram_opted_out_at TEXT
+  telegram_opted_out_at TEXT,
+  -- WhatsApp waitlist (before launch): number left on My alerts or at Priority checkout, digits
+  -- with country code, unverified. At launch each gets one template asking them to reply START,
+  -- which proves the number and moves it to whatsapp_phone. whatsapp_marketing_ok = the separate,
+  -- unticked-by-default "occasional news" consent.
+  whatsapp_waitlist_phone TEXT,
+  whatsapp_waitlist_at TEXT,
+  whatsapp_marketing_ok INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (

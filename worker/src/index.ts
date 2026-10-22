@@ -1742,11 +1742,26 @@ function renderWhatsAppCard(env: Env, s: any): string {
     </div>`;
   }
   if (!whatsappLinkingOpen(env, s)) {
-    // Everyone else sees it is on the way; only verified subscribers, like the live channels.
+    // Before launch: collect numbers (website opt-in) so nobody has to be asked again.
+    // At launch each gets one message asking them to reply START, which also proves the number is theirs.
     if (!s.verified) return "";
+    if (s.whatsapp_waitlist_phone) {
+      return `<div class="card">
+      <h2>WhatsApp alerts <small>coming soon</small></h2>
+      <p>You're on the list. When WhatsApp alerts launch we'll message <b>${escapeHtml(maskPhone(s.whatsapp_waitlist_phone))}</b> once - reply <b>START</b> to switch them on.</p>
+      <form method="POST" action="/whatsapp/waitlist"><input type="hidden" name="token" value="${token}"><input type="hidden" name="action" value="remove"><button type="submit">Remove my number</button></form>
+    </div>`;
+    }
     return `<div class="card">
       <h2>WhatsApp alerts <small>coming soon</small></h2>
-      <p>WhatsApp alerts are on the way. For instant alerts today, use Telegram below.</p>
+      <p>Get your alerts on WhatsApp too - included with Priority. Leave your number and we'll switch them on when they launch.</p>
+      <form method="POST" action="/whatsapp/waitlist">
+        <input type="hidden" name="token" value="${token}">
+        <input type="tel" name="phone" placeholder="+41 79 123 45 67" autocomplete="tel" required>
+        <label><input type="checkbox" name="marketing" value="1"> Also send me occasional RoxRaceAlerts news on WhatsApp</label>
+        <button type="submit">Save my WhatsApp number</button>
+      </form>
+      <p class="consent">Include your country code. We'll send one WhatsApp message to this number when WhatsApp alerts launch, asking you to reply START. Your number is only used by RoxRaceAlerts and never shared. For instant alerts today, use Telegram below.</p>
     </div>`;
   }
 
@@ -1769,6 +1784,53 @@ function renderWhatsAppCard(env: Env, s: any): string {
       <form method="POST" action="/whatsapp/link"><input type="hidden" name="token" value="${token}"><button type="submit">Get alerts on WhatsApp</button></form>
       <p class="consent">By linking, you agree to receive HYROX ticket alerts on WhatsApp for the races you watch. Reply STOP any time to turn them off.</p>
     </div>`;
+}
+
+/** "+41 79 123 45 67" / "0041791234567" -> "41791234567"; null without a country code or if implausible. */
+function normalizePhone(raw: string): string | null {
+  let t = String(raw || "").trim().replace(/[\s().\/-]/g, "");
+  if (t.startsWith("00")) t = "+" + t.slice(2);
+  if (!t.startsWith("+")) return null;
+  const digits = t.slice(1);
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : null;
+}
+
+function maskPhone(digits: string): string {
+  const d = String(digits);
+  return `+${d.slice(0, 2)} … ${d.slice(-4)}`;
+}
+
+/** Waitlist number from a Stripe checkout: only fills an empty slot, never overwrites one the person typed on My alerts. */
+async function saveWaitlistPhone(env: Env, subscriberId: number, digits: string): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE subscribers SET whatsapp_waitlist_phone = ?, whatsapp_waitlist_at = datetime('now') WHERE id = ? AND whatsapp_waitlist_phone IS NULL AND whatsapp_phone IS NULL"
+  )
+    .bind(digits, subscriberId)
+    .run();
+}
+
+async function handleWhatsAppWaitlist(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") || "");
+  const s = await env.DB.prepare("SELECT id, verified FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  if (!s || !s.verified) return page("Not available", `<div class="card"><p>This link is invalid. <a href="/my-alerts">Back to my alerts</a></p></div>`);
+  if (form.get("action") === "remove") {
+    await env.DB.prepare("UPDATE subscribers SET whatsapp_waitlist_phone = NULL, whatsapp_waitlist_at = NULL, whatsapp_marketing_ok = 0 WHERE id = ?").bind(s.id).run();
+  } else {
+    const digits = normalizePhone(String(form.get("phone") || ""));
+    if (!digits) {
+      return page(
+        "Check the number",
+        `<div class="card"><p>Please enter your WhatsApp number with its country code, e.g. <b>+41 79 123 45 67</b>. <a href="/my-alerts">Back to my alerts</a></p></div>`
+      );
+    }
+    await env.DB.prepare(
+      "UPDATE subscribers SET whatsapp_waitlist_phone = ?, whatsapp_waitlist_at = datetime('now'), whatsapp_marketing_ok = ? WHERE id = ?"
+    )
+      .bind(digits, form.get("marketing") === "1" ? 1 : 0, s.id)
+      .run();
+  }
+  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
 }
 
 async function handleWhatsAppLink(req: Request, env: Env): Promise<Response> {
@@ -2351,14 +2413,10 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     // Demand check before we pay for a WhatsApp number: ask buyers, optional, counted in admin.
     "custom_fields[0][key]": "whatsapp",
     "custom_fields[0][label][type]": "custom",
-    "custom_fields[0][label][custom]": "Want WhatsApp alerts when they launch?",
-    "custom_fields[0][type]": "dropdown",
+    "custom_fields[0][label][custom]": "WhatsApp number for alerts (optional)",
+    "custom_fields[0][type]": "text",
     "custom_fields[0][optional]": "true",
-    "custom_fields[0][dropdown][options][0][label]": "Yes, I want WhatsApp alerts",
-    "custom_fields[0][dropdown][options][0][value]": "yes",
-    "custom_fields[0][dropdown][options][1][label]": "No thanks",
-    "custom_fields[0][dropdown][options][1][value]": "no",
-    "custom_text[submit][message]": `One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
+    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll switch WhatsApp alerts on for it when they launch - you'll get one message asking you to reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
   });
   if (kind === "ticket") {
     const subId = Number(form.get("subscription_id")) || 0;
@@ -2455,7 +2513,15 @@ async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
   if (evt?.type !== "checkout.session.completed") return new Response("ok");
   const session = evt.data?.object;
   if (!session || session.payment_status !== "paid") return new Response("ok");
-  const wantsWhatsApp = (session.custom_fields || []).some((f: any) => f?.key === "whatsapp" && f?.dropdown?.value === "yes") ? 1 : 0;
+  const waField = (session.custom_fields || []).find((f: any) => f?.key === "whatsapp");
+  const waRaw = String(waField?.text?.value || "").trim();
+  const waPhone = normalizePhone(waRaw);
+  const wantsWhatsApp = waRaw || waField?.dropdown?.value === "yes" ? 1 : 0;
+  if (waPhone) await saveWaitlistPhone(env, Number(session.metadata?.subscriber_id) || 0, waPhone);
+  else if (waRaw && env.TELEGRAM_CHAT_ID) {
+    // Typed something we can't use (usually a missing country code) - the admin can fix it by hand.
+    await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `⚠️ Priority buyer ${session.customer_email || session.metadata?.subscriber_id} gave an unusable WhatsApp number: "${waRaw.slice(0, 40)}"`, "reply");
+  }
 
   if (session.metadata?.kind === "ticket") {
     const holder = await env.DB.prepare("SELECT id, email FROM subscribers WHERE id = ?").bind(Number(session.metadata?.subscriber_id) || 0).first<any>();
@@ -4403,7 +4469,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
   if (token !== env.WEBHOOK_SECRET) return new Response("Unauthorized", { status: 401 });
 
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.email, s.verified, s.created_at, s.whatsapp_phone, (s.telegram_chat_id IS NOT NULL) AS on_telegram,
+    `SELECT s.id, s.email, s.verified, s.created_at, s.whatsapp_phone, s.whatsapp_waitlist_phone, s.whatsapp_marketing_ok, (s.telegram_chat_id IS NOT NULL) AS on_telegram,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id) AS ticket_count,
        (SELECT COUNT(*) FROM sale_watchers WHERE subscriber_id = s.id) AS watch_count,
        (SELECT COUNT(*) FROM subscriptions WHERE subscriber_id = s.id AND purchased_at IS NOT NULL) AS bought_count
@@ -4449,7 +4515,12 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
         ),
       ].join("");
       // Digits only in the database; shown with a + so it reads as an international number.
-      const wa = (r.whatsapp_phone ? ` <small>&middot; WhatsApp +${escapeHtml(r.whatsapp_phone)}</small>` : "") + (r.on_telegram ? " <small>&middot; Telegram</small>" : "");
+      const wa =
+        (r.whatsapp_phone
+          ? ` <small>&middot; WhatsApp +${escapeHtml(r.whatsapp_phone)}</small>`
+          : r.whatsapp_waitlist_phone
+            ? ` <small>&middot; WhatsApp waitlist +${escapeHtml(r.whatsapp_waitlist_phone)}${r.whatsapp_marketing_ok ? " (news OK)" : ""}</small>`
+            : "") + (r.on_telegram ? " <small>&middot; Telegram</small>" : "");
       return `<details class="subscriber-row">
         <summary>${escapeHtml(r.email)}${wa} ${r.verified ? "" : '<small>(unverified)</small>'} &mdash; ${r.ticket_count} ticket(s), ${r.watch_count} race(s), ${r.bought_count} bought &middot; <small>${escapeHtml(r.created_at)}</small></summary>
         <ul>${items || "<li><small>Nothing watched.</small></li>"}</ul>
@@ -4461,7 +4532,7 @@ async function handleSubscribersAdminPage(req: Request, env: Env): Promise<Respo
     "Subscribers",
     `${adminNav(token, "subscribers")}
     <div class="card">
-      <h2>Subscribers (${rows.length}${rows.some((r: any) => r.whatsapp_phone) ? `, ${rows.filter((r: any) => r.whatsapp_phone).length} on WhatsApp` : ""})</h2>
+      <h2>Subscribers (${rows.length}${rows.some((r: any) => r.whatsapp_phone) ? `, ${rows.filter((r: any) => r.whatsapp_phone).length} on WhatsApp` : ""}${rows.some((r: any) => r.whatsapp_waitlist_phone) ? `, ${rows.filter((r: any) => r.whatsapp_waitlist_phone).length} on the WhatsApp waitlist` : ""})</h2>
       <p><small>${totalBought} of ${totalTickets} watched ticket(s) marked as bought overall. Click a subscriber to see what they're watching.</small></p>
       ${rowsHtml || "<p>Nobody yet.</p>"}
     </div>`,
@@ -4693,6 +4764,7 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
               (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM race_priority WHERE livemode = 1)
                 + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM ticket_priority WHERE livemode = 1)
                 + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM season_pass WHERE livemode = 1) AS wa_yes,
+              (SELECT COUNT(*) FROM subscribers WHERE whatsapp_waitlist_phone IS NOT NULL) AS wa_list,
               (SELECT COUNT(*) FROM race_priority WHERE livemode = 0) + (SELECT COUNT(*) FROM season_pass WHERE livemode = 0)
                 + (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 0) AS test_n`
     )
@@ -4706,6 +4778,7 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(prio?.season_n || 0, "season passes")}
         ${tile(money((prio?.race_c || 0) + (prio?.ticket_c || 0) + (prio?.season_c || 0)), "revenue (before Stripe fees)")}
         ${tile(prio?.wa_yes || 0, "buyers who want WhatsApp")}
+        ${tile(prio?.wa_list || 0, "numbers on the WhatsApp waitlist")}
       </div>
     </div>`;
 
@@ -4919,6 +4992,7 @@ export default {
       if (url.pathname === "/whatsapp/webhook" && req.method === "GET") return handleWhatsAppWebhookVerify(req, env);
       if (url.pathname === "/whatsapp/webhook" && req.method === "POST") return await handleWhatsAppWebhookPost(req, env);
       if (url.pathname === "/whatsapp/link" && req.method === "POST") return await handleWhatsAppLink(req, env);
+      if (url.pathname === "/whatsapp/waitlist" && req.method === "POST") return await handleWhatsAppWaitlist(req, env);
       if (url.pathname === "/telegram/webhook" && req.method === "POST") return await handleTelegramWebhook(req, env);
       if (url.pathname === "/stripe/webhook" && req.method === "POST") return await handleStripeWebhook(req, env);
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
