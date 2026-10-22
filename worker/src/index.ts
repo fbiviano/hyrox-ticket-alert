@@ -2362,7 +2362,7 @@ function priorityChoiceHtml(env: Env, what: "race" | "ticket", freeButton: strin
         <h3>&#9889; Priority <span>${PRIORITY_PRICE_LABEL} once</span></h3>
         <ul>
           <li><b>Alerted the instant we spot it</b> - before everyone else</li>
-          <li><b>WhatsApp notification</b> ${whatsappLive(env) ? "included" : "too - add your number and we'll switch it on"}</li>
+          <li><b>WhatsApp notification</b> too</li>
           <li>For this ${what === "race" ? "race" : "event"} only - no subscription</li>
         </ul>
         ${priorityButton}
@@ -2381,9 +2381,10 @@ function whatsappLive(env: Env): boolean {
   return !!env.WHATSAPP_TOKEN && env.WHATSAPP_OPEN_TO_ALL === "1";
 }
 
-/** The WhatsApp sentence in Priority offers, honest about whether it's live yet. */
-function whatsappIncluded(env: Env): string {
-  return whatsappLive(env) ? "WhatsApp notifications included." : "WhatsApp notifications included - add your number and we'll message you to switch them on.";
+/** The WhatsApp sentence in Priority offers. How it gets switched on (one WhatsApp message, reply START)
+ * is said at checkout and, until whatsappLive(), on the terms page. */
+function whatsappIncluded(_env: Env): string {
+  return "WhatsApp notifications included.";
 }
 
 /** One-line pitch under the race list on My alerts (HTML). */
