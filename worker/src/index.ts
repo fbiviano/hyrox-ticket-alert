@@ -1,4 +1,4 @@
-import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS } from "./resolve";
+import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS, FetchBlocked } from "./resolve";
 import PostalMime from "postal-mime";
 
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
@@ -2434,7 +2434,13 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
   // watches can later tell whether their event's date has passed.
   const known = await env.DB.prepare("SELECT title, event_date FROM event_directory WHERE url = ?").bind(url).first<any>();
 
-  const found = await resolveEvent(url);
+  let found;
+  try {
+    found = await resolveEvent(url);
+  } catch (e) {
+    if (!(e instanceof FetchBlocked)) throw e;
+    return jsonResponse({ error: "HYROX's website is busy right now - please try again in a minute." }, 503);
+  }
   if (!found) {
     // Page loaded fine, just no vivenu shop live yet - most likely tickets
     // simply haven't gone on sale, not a broken URL.
@@ -3042,7 +3048,14 @@ async function checkCommunityTickets(env: Env): Promise<void> {
     .bind(todayIso())
     .all<any>();
   for (const row of results || []) {
-    const event = await getEventData(row.event_id, row.shop_url);
+    let event;
+    try {
+      event = await getEventData(row.event_id, row.shop_url);
+    } catch (e) {
+      if (!(e instanceof FetchBlocked)) throw e;
+      console.warn("Ticket shop rate-limited us; stopping ticket checks this round:", e.message);
+      break;
+    }
     if (!event) continue;
     const ticket = event.tickets.find((t) => t.name === row.ticket_name);
     if (!ticket) continue;
@@ -3074,7 +3087,9 @@ async function checkSaleWatches(env: Env): Promise<void> {
        AND EXISTS (
          SELECT 1 FROM sale_watchers w JOIN subscribers s ON s.id = w.subscriber_id
          WHERE s.verified = 1 AND w.event_url = sw.event_url
-       )`
+       )
+     -- Longest-unchecked first, so a round cut short by rate limiting never starves the same races.
+     ORDER BY sw.last_checked_at IS NOT NULL, sw.last_checked_at`
   )
     .bind(todayIso())
     .all<any>();
@@ -3090,7 +3105,17 @@ async function checkSaleWatches(env: Env): Promise<void> {
     // reminders below are already counting down to.
     if (row.announced_live_at && Date.now() < Date.parse(row.announced_live_at)) continue;
 
-    const found = await resolveEvent(row.event_url);
+    let found;
+    try {
+      found = await resolveEvent(row.event_url);
+    } catch (e) {
+      if (!(e instanceof FetchBlocked)) throw e;
+      // Further requests this round would only be refused too (and keep the limit tripped).
+      // last_checked_at stays as it was, so this race is first in line next round.
+      console.warn("hyrox.com rate-limited us; stopping sale checks this round:", e.message);
+      break;
+    }
+    await env.DB.prepare("UPDATE sale_watch SET last_checked_at = datetime('now') WHERE event_url = ?").bind(row.event_url).run();
     if (!found) continue; // still not on sale
 
     // Clear any Instagram-derived presale info too - the real shop is live
@@ -3205,8 +3230,17 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // transient fetch hiccup against hyrox.com/vivenu - retry once before
     // concluding "not on sale", since a false negative here persists until
     // this event's next rotation (~16 min) rather than self-correcting.
-    let found = await resolveEvent(row.url);
-    if (!found) found = await resolveEvent(row.url);
+    // A rate-limit refusal is not a "no": stop this round without touching the row, so an
+    // on-sale race is never flipped back to "not on sale" just because hyrox.com was busy.
+    let found;
+    try {
+      found = await resolveEvent(row.url);
+      if (!found) found = await resolveEvent(row.url);
+    } catch (e) {
+      if (!(e instanceof FetchBlocked)) throw e;
+      console.warn("hyrox.com rate-limited us; stopping directory checks this round:", e.message);
+      break;
+    }
     // Only stamp on_sale_since when this row was genuinely being counted
     // down (a known presale_live_at, or an active pre-sale) right before
     // confirmation - i.e. it's transitioning out of the sidebar's "Going

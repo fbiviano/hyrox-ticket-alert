@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS sale_watch (
   -- (NULL once sent, or when nobody was held back).
   detected_at TEXT,
   free_alert_after TEXT,
+  -- When checkSaleWatches last got an answer for this race; it checks longest-unchecked first.
+  last_checked_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -43,15 +43,35 @@ export function isFetchableUrl(url: string): boolean {
   }
 }
 
+/** The site told us to slow down (429, or 503 while overloaded). That says nothing about
+ * whether tickets are on sale, so callers must treat it as "couldn't check - try again
+ * next round", never as "not on sale". hyrox.com rate-limits requests from Cloudflare's
+ * network, so this happens in production; seen 2026-10-21. */
+export class FetchBlocked extends Error {}
+
 async function fetchHtml(url: string): Promise<string | null> {
   if (!isFetchableUrl(url)) return null;
+  let resp: Response;
   try {
-    const resp = await fetch(url, { headers: HEADERS });
-    if (resp.ok) return await resp.text();
+    resp = await fetch(url, { headers: HEADERS });
   } catch {
-    // network error, timeout, etc. - treat as "couldn't fetch"
+    return null; // network error, timeout, etc. - treat as "couldn't fetch"
   }
-  return null;
+  if (resp.status === 429 || resp.status === 503) throw new FetchBlocked(`${resp.status} from ${new URL(url).host}`);
+  if (!resp.ok) return null;
+  try {
+    return await resp.text();
+  } catch {
+    return null;
+  }
+}
+
+/** hyrox.com's own pages (other than the one being resolved) and the merch shop never hold
+ * a ticket shop - following them only spends requests against hyrox.com's rate limit. */
+function isDeadEndCandidate(u: URL): boolean {
+  const host = u.hostname.toLowerCase();
+  if (host.endsWith("hyrox-shop.com")) return true;
+  return (host === "hyrox.com" || host === "www.hyrox.com") && !u.pathname.toLowerCase().includes("/checkout");
 }
 
 function extractNextDataEvent(html: string | null): ResolvedEvent | null {
@@ -85,12 +105,17 @@ async function findCandidateLinks(html: string, baseUrl: string, limit = 15): Pr
     });
   await rewriter.transform(new Response(html)).text();
 
-  const seen = new Set<string>();
+  const page = new URL(baseUrl);
+  page.hash = "";
+  const seen = new Set<string>([page.toString()]); // links back to this same page ("#top", "#info") aren't candidates
   const scored: [number, string][] = [];
   for (const href of hrefs) {
     let abs: string;
     try {
-      abs = new URL(href, baseUrl).toString();
+      const u = new URL(href, baseUrl);
+      u.hash = "";
+      if (isDeadEndCandidate(u)) continue;
+      abs = u.toString();
     } catch {
       continue;
     }
