@@ -1814,21 +1814,21 @@ function renderWhatsAppCard(env: Env, s: any): string {
     if (!s.verified) return "";
     if (s.whatsapp_waitlist_phone) {
       return `<div class="card">
-      <h2>WhatsApp alerts <small>coming soon</small></h2>
-      <p>You're on the list. When WhatsApp alerts launch we'll message <b>${escapeHtml(maskPhone(s.whatsapp_waitlist_phone))}</b> once - reply <b>START</b> to switch them on.</p>
+      <h2>WhatsApp alerts</h2>
+      <p>Number saved. We'll message <b>${escapeHtml(maskPhone(s.whatsapp_waitlist_phone))}</b> once on WhatsApp - reply <b>START</b> to switch your alerts on.</p>
       <form method="POST" action="/whatsapp/waitlist"><input type="hidden" name="token" value="${token}"><input type="hidden" name="action" value="remove"><button type="submit">Remove my number</button></form>
     </div>`;
     }
     return `<div class="card">
-      <h2>WhatsApp alerts <small>coming soon</small></h2>
-      <p>Get your alerts on WhatsApp too - included with Priority. Leave your number and we'll switch them on when they launch.</p>
+      <h2>WhatsApp alerts</h2>
+      <p>Get your alerts on WhatsApp too - included with Priority. Leave your number and we'll message you to switch them on.</p>
       <form method="POST" action="/whatsapp/waitlist">
         <input type="hidden" name="token" value="${token}">
         <input type="tel" name="phone" placeholder="+41 79 123 45 67" autocomplete="tel" required>
         <label><input type="checkbox" name="marketing" value="1"> Also send me occasional RoxRaceAlerts news on WhatsApp</label>
         <button type="submit">Save my WhatsApp number</button>
       </form>
-      <p class="consent">Include your country code. We'll send one WhatsApp message to this number when WhatsApp alerts launch, asking you to reply START. Your number is only used by RoxRaceAlerts and never shared. For instant alerts today, use Telegram below.</p>
+      <p class="consent">Include your country code. We'll send one WhatsApp message to this number asking you to reply START. Your number is only used by RoxRaceAlerts and never shared. For instant alerts today, use Telegram below.</p>
     </div>`;
   }
 
@@ -2362,7 +2362,7 @@ function priorityChoiceHtml(env: Env, what: "race" | "ticket", freeButton: strin
         <h3>&#9889; Priority <span>${PRIORITY_PRICE_LABEL} once</span></h3>
         <ul>
           <li><b>Alerted the instant we spot it</b> - before everyone else</li>
-          <li><b>WhatsApp notification</b> ${whatsappLive(env) ? "included" : "too (launching soon)"}</li>
+          <li><b>WhatsApp notification</b> ${whatsappLive(env) ? "included" : "too - add your number and we'll switch it on"}</li>
           <li>For this ${what === "race" ? "race" : "event"} only - no subscription</li>
         </ul>
         ${priorityButton}
@@ -2376,14 +2376,14 @@ function priorityPreviewNote(env: Env): string {
   return priorityDelayMs(env) > 0 ? "" : " (Admin preview: the head start is switched off on this server.)";
 }
 
-/** WhatsApp is really sending for everyone - only then may an offer promise it without "launching soon". */
+/** WhatsApp is really sending for everyone. Until then offers say how it gets switched on (add your number, we message you) instead of implying it already sends. */
 function whatsappLive(env: Env): boolean {
   return !!env.WHATSAPP_TOKEN && env.WHATSAPP_OPEN_TO_ALL === "1";
 }
 
 /** The WhatsApp sentence in Priority offers, honest about whether it's live yet. */
 function whatsappIncluded(env: Env): string {
-  return whatsappLive(env) ? "WhatsApp notifications included." : "WhatsApp alerts coming soon - included at no extra cost.";
+  return whatsappLive(env) ? "WhatsApp notifications included." : "WhatsApp notifications included - add your number and we'll message you to switch them on.";
 }
 
 /** One-line pitch under the race list on My alerts (HTML). */
@@ -2444,6 +2444,7 @@ function handleTermsPage(env: Env): Response {
       <h2>Priority alerts</h2>
       <ul>
         <li><b>What you get:</b> when we detect the change you're watching, your alert goes out first; free subscribers watching the same thing get theirs a few minutes later. ${whatsappIncluded(env)}</li>
+        ${whatsappLive(env) ? "" : "<li><b>WhatsApp:</b> add your number at checkout or on My alerts and we'll send you one WhatsApp message to switch it on (reply START). Until it's on for your number, your Priority alerts come by email.</li>"}
         <li><b>Prices:</b> ${PRIORITY_PRICE_LABEL} for one race or one ticket watch (that event only), or ${SEASON_PRICE_LABEL} for everything you watch until ${SEASON_END_LABEL}. One-off payments in US dollars, charged by Stripe. No subscription, nothing renews.</li>
         <li><b>What it isn't:</b> Priority speeds up your alert. It doesn't reserve, hold or guarantee a ticket, and we never sell tickets.</li>
       </ul>
@@ -2551,7 +2552,7 @@ async function startPriorityCheckout(env: Env, s: any, kind: PriorityKind, item:
     "custom_fields[0][label][custom]": "WhatsApp number for alerts (optional)",
     "custom_fields[0][type]": "text",
     "custom_fields[0][optional]": "true",
-    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll switch WhatsApp alerts on for it when they launch - you'll get one message asking you to reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
+    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll message you on WhatsApp to switch your alerts on - reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
   });
   for (const [k, v] of Object.entries(item.metadata)) params.set(`metadata[${k}]`, v);
   try {
