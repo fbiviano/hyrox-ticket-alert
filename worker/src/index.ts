@@ -2362,7 +2362,7 @@ function priorityChoiceHtml(env: Env, what: "race" | "ticket", freeButton: strin
         <h3>&#9889; Priority <span>${PRIORITY_PRICE_LABEL} once</span></h3>
         <ul>
           <li><b>Alerted the instant we spot it</b> - before everyone else</li>
-          <li><b>WhatsApp notification</b> too</li>
+          <li><b>WhatsApp notification</b></li>
           <li>For this ${what === "race" ? "race" : "event"} only - no subscription</li>
         </ul>
         ${priorityButton}
