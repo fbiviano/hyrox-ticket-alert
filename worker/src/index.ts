@@ -327,11 +327,11 @@ async function notifySubscribers(env: Env, eventName: string, ticketName: string
   return sent;
 }
 
-/** A sold-out ticket came back (community check): Season Priority holders are told first,
+/** A sold-out ticket came back (community check): Priority holders (that event, or the season) are told first,
  * everyone else after the Priority delay - see "Priority alerts". */
 async function notifyTicketReturned(env: Env, ct: any): Promise<void> {
   const { results } = await env.DB.prepare(
-    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id, ${hasSeasonPassSql("s.id")} AS has_priority
+    `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id, ${hasTicketPrioritySql("s.id", "sub.event_name")} AS has_priority
      FROM subscribers s JOIN subscriptions sub ON sub.subscriber_id = s.id
      WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL`
   )
@@ -361,7 +361,7 @@ async function sendDueFreeTicketAlerts(env: Env): Promise<void> {
       `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id
        FROM subscribers s JOIN subscriptions sub ON sub.subscriber_id = s.id
        WHERE s.verified = 1 AND sub.event_name = ? AND sub.ticket_name = ? AND sub.purchased_at IS NULL
-         AND sub.created_at <= ? AND NOT ${hasSeasonPassSql("s.id")}`
+         AND sub.created_at <= ? AND NOT ${hasTicketPrioritySql("s.id", "sub.event_name")}`
     )
       .bind(ct.event_name, ct.ticket_name, ct.detected_at)
       .all<any>();
@@ -501,7 +501,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a> &middot; <a href="/partners">Partner with us</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -971,9 +971,18 @@ function pastEventsSection(pastTickets: string, pastSales: string): string {
   </div>`;
 }
 
-async function renderTicketRows(subscriberId: number, token: string, env: Env): Promise<ActivePast & { purchased: string }> {
+async function renderTicketRows(
+  subscriberId: number,
+  token: string,
+  env: Env,
+  priorityOn = false,
+  seasonActive = false
+): Promise<ActivePast & { purchased: string }> {
   const { results } = await env.DB.prepare(
-    "SELECT id, event_name, ticket_name, event_date, purchased_at FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name"
+    `SELECT id, event_name, ticket_name, event_date, purchased_at,
+       (SELECT last_status FROM community_tickets ct WHERE ct.event_name = subscriptions.event_name AND ct.ticket_name = subscriptions.ticket_name LIMIT 1) AS last_status,
+       EXISTS(SELECT 1 FROM ticket_priority tp WHERE tp.subscriber_id = subscriptions.subscriber_id AND tp.event_name = subscriptions.event_name) AS has_priority
+     FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name`
   )
     .bind(subscriberId)
     .all<any>();
@@ -986,6 +995,15 @@ async function renderTicketRows(subscriberId: number, token: string, env: Env): 
         (r: any) => `<div class="ticket-row">
       <span>${escapeHtml(r.event_name)} &mdash; ${escapeHtml(r.ticket_name)}</span>
       <div class="row" style="gap:6px">
+        ${
+          !showBuyButton
+            ? ""
+            : seasonActive || r.has_priority
+              ? `<span class="event-badge presale" title="You're emailed before anyone else when this sells out and comes back">&#9889; ${seasonActive ? "Season Priority" : "Priority"}</span>`
+              : priorityOn && r.last_status === "sold_out"
+                ? priorityForm(token, "ticket", `&#9889; Priority ${PRIORITY_PRICE_LABEL}`, { subscriptionId: r.id })
+                : ""
+        }
         ${
           showBuyButton
             ? `<form method="POST" action="/mark-purchased">
@@ -2167,6 +2185,11 @@ function hasSeasonPassSql(subCol: string): string {
   return `EXISTS(SELECT 1 FROM season_pass sp WHERE sp.subscriber_id = ${subCol} AND sp.valid_until >= date('now'))`;
 }
 
+/** SQL: is subscriber `subCol` Priority for sold-out tickets of event `nameCol` (that event, or the whole season)? */
+function hasTicketPrioritySql(subCol: string, nameCol: string): string {
+  return `(EXISTS(SELECT 1 FROM ticket_priority tp WHERE tp.subscriber_id = ${subCol} AND tp.event_name = ${nameCol}) OR ${hasSeasonPassSql(subCol)})`;
+}
+
 /** SQL: is subscriber `subCol` Priority for the race at `urlCol` (that race, or the whole season)? */
 function hasRacePrioritySql(subCol: string, urlCol: string): string {
   return `(EXISTS(SELECT 1 FROM race_priority rp WHERE rp.subscriber_id = ${subCol} AND rp.event_url = ${urlCol}) OR ${hasSeasonPassSql(subCol)})`;
@@ -2189,16 +2212,21 @@ function priorityPreviewNote(env: Env): string {
   return priorityDelayMs(env) > 0 ? "" : " (Admin preview: the head start is switched off on this server.)";
 }
 
-/** One-line pitch under the race list on My alerts. */
+const WHATSAPP_INCLUDED = "WhatsApp alerts coming soon - included at no extra cost.";
+
+/** One-line pitch under the race list on My alerts (HTML). */
 function priorityExplainer(env: Env): string {
-  return `Priority alerts: be the first to know - get notified before everyone else, plus WhatsApp alerts (launching soon). ${PRIORITY_PRICE_LABEL} for one race, or ${SEASON_PRICE_LABEL} for every race you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket.${priorityPreviewNote(env)}`;
+  return `<b>Priority alerts</b>: get new-ticket emails before anyone else. ${WHATSAPP_INCLUDED} ${PRIORITY_PRICE_LABEL} for one race or ticket watch, or ${SEASON_PRICE_LABEL} for everything you watch this season. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}`;
 }
 
-function priorityForm(token: string, kind: "race" | "season", label: string, eventUrl = ""): string {
+type PriorityKind = "race" | "ticket" | "season";
+
+function priorityForm(token: string, kind: PriorityKind, label: string, target: { eventUrl?: string; subscriptionId?: number } = {}): string {
   return `<form method="POST" action="/priority/checkout" style="display:inline-block;margin-right:8px">
         <input type="hidden" name="token" value="${escapeHtml(token)}">
         <input type="hidden" name="kind" value="${kind}">
-        ${eventUrl ? `<input type="hidden" name="event_url" value="${escapeHtml(eventUrl)}">` : ""}
+        ${target.eventUrl ? `<input type="hidden" name="event_url" value="${escapeHtml(target.eventUrl)}">` : ""}
+        ${target.subscriptionId ? `<input type="hidden" name="subscription_id" value="${target.subscriptionId}">` : ""}
         <button type="submit">${label}</button>
       </form>`;
 }
@@ -2206,11 +2234,11 @@ function priorityForm(token: string, kind: "race" | "season", label: string, eve
 /** The two offers side by side. `race` = the race being offered; null offers the season only. */
 function priorityOfferCard(env: Env, token: string, race: { event_url: string; event_title: string } | null): string {
   return `<div class="card">
-      <h2>&#9889; Be the first to know</h2>
-      <p><b>Get notified before everyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for every race you watch"} - plus WhatsApp alerts (launching soon).</p>
-      ${race ? priorityForm(token, "race", `This race - ${PRIORITY_PRICE_LABEL}`, race.event_url) : ""}
+      <h2>&#9889; Priority alerts</h2>
+      <p><b>Get new-ticket emails before anyone else</b>${race ? ` when ${escapeHtml(race.event_title)} tickets go on sale` : " for everything you watch"}. ${WHATSAPP_INCLUDED}</p>
+      ${race ? priorityForm(token, "race", `This race - ${PRIORITY_PRICE_LABEL}`, { eventUrl: race.event_url }) : ""}
       ${priorityForm(token, "season", `Whole season - ${SEASON_PRICE_LABEL}`)}
-      <p class="consent">Whole season = every race you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket.${priorityPreviewNote(env)}</p>
+      <p class="consent">Whole season = every race and ticket you watch, including sold-out tickets coming back, until ${SEASON_END_LABEL}. One-off payment, no subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}</p>
     </div>`;
 }
 
@@ -2226,6 +2254,37 @@ async function priorityCandidates(env: Env, subscriberId: number, eventUrl?: str
     .bind(subscriberId, todayIso(), eventUrl ?? null, eventUrl ?? null)
     .all<any>();
   return results || [];
+}
+
+// Who sells Priority and how to reach them - shown on /terms, which Stripe checks before
+// enabling live payments. TODO before launch: confirm both with the business owner.
+const SELLER_NAME = "MetaOne AG, Switzerland";
+const SUPPORT_EMAIL = "support@roxracealerts.com";
+
+function handleTermsPage(env: Env): Response {
+  return page(
+    "Terms & refunds",
+    `<div class="card">
+      <h1>Terms &amp; refunds</h1>
+      <p>RoxRaceAlerts is run by ${escapeHtml(SELLER_NAME)}. Questions or refunds: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
+      <h2>Free alerts</h2>
+      <p>Race and ticket alerts by email (and Telegram) are free. We check HYROX ticket shops regularly and email you when something you watch changes. We're independent - not affiliated with HYROX or vivenu - and can't guarantee every change is caught or how fast email arrives.</p>
+      <h2>Priority alerts</h2>
+      <ul>
+        <li><b>What you get:</b> when we detect the change you're watching, your alert goes out first; free subscribers watching the same thing get theirs a few minutes later. ${WHATSAPP_INCLUDED}</li>
+        <li><b>Prices:</b> ${PRIORITY_PRICE_LABEL} for one race or one ticket watch (that event only), or ${SEASON_PRICE_LABEL} for everything you watch until ${SEASON_END_LABEL}. One-off payments in US dollars, charged by Stripe. No subscription, nothing renews.</li>
+        <li><b>What it isn't:</b> Priority speeds up your alert. It doesn't reserve, hold or guarantee a ticket, and we never sell tickets.</li>
+      </ul>
+      <h2>Refunds</h2>
+      <ul>
+        <li>Changed your mind? Full refund on request until your first Priority alert has been sent.</li>
+        <li>If the race is cancelled or never goes on sale while you hold Priority for it, full refund on request.</li>
+        <li>If we fail to alert you before free subscribers, full refund on request.</li>
+      </ul>
+      <p>Email <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> from the address you signed up with; refunds go back to the original payment method.</p>
+      <p><a href="/">Back to RoxRaceAlerts</a></p>
+    </div>`
+  );
 }
 
 /** Shown right after a signed-in subscriber adds a race watch, when Priority is on offer
@@ -2268,7 +2327,8 @@ function sqlTime(ms: number): string {
 async function handlePriorityCheckout(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const token = String(form.get("token") || "");
-  const kind = form.get("kind") === "season" ? "season" : "race";
+  const kindRaw = String(form.get("kind") || "");
+  const kind: PriorityKind = kindRaw === "season" || kindRaw === "ticket" ? kindRaw : "race";
   const eventUrl = String(form.get("event_url") || "");
   const s = await env.DB.prepare("SELECT * FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
   const notAvailable = () =>
@@ -2288,13 +2348,37 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     "metadata[kind]": kind,
     success_url: `${env.SITE_URL}/my-alerts?priority=success`,
     cancel_url: `${env.SITE_URL}/my-alerts`,
+    // Demand check before we pay for a WhatsApp number: ask buyers, optional, counted in admin.
+    "custom_fields[0][key]": "whatsapp",
+    "custom_fields[0][label][type]": "custom",
+    "custom_fields[0][label][custom]": "Want WhatsApp alerts when they launch?",
+    "custom_fields[0][type]": "dropdown",
+    "custom_fields[0][optional]": "true",
+    "custom_fields[0][dropdown][options][0][label]": "Yes, I want WhatsApp alerts",
+    "custom_fields[0][dropdown][options][0][value]": "yes",
+    "custom_fields[0][dropdown][options][1][label]": "No thanks",
+    "custom_fields[0][dropdown][options][1][value]": "no",
+    "custom_text[submit][message]": `One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
   });
-  if (kind === "season") {
+  if (kind === "ticket") {
+    const subId = Number(form.get("subscription_id")) || 0;
+    const sub = await env.DB.prepare("SELECT event_name FROM subscriptions WHERE id = ? AND subscriber_id = ? AND purchased_at IS NULL").bind(subId, s.id).first<any>();
+    if (!sub) return notAvailable();
+    const already = await env.DB.prepare("SELECT 1 AS x FROM ticket_priority WHERE subscriber_id = ? AND event_name = ?").bind(s.id, sub.event_name).first<any>();
+    if (already) return backToMyAlerts;
+    params.set("line_items[0][price_data][unit_amount]", String(PRIORITY_PRICE_CENTS));
+    params.set("line_items[0][price_data][product_data][name]", `Priority alerts: ${sub.event_name}`.slice(0, 200));
+    params.set(
+      "line_items[0][price_data][product_data][description]",
+      `Get an email before anyone else when sold-out tickets for this event come back. ${WHATSAPP_INCLUDED} One-off payment, this event only.`
+    );
+    params.set("metadata[event_name]", String(sub.event_name).slice(0, 480));
+  } else if (kind === "season") {
     params.set("line_items[0][price_data][unit_amount]", String(SEASON_PRICE_CENTS));
     params.set("line_items[0][price_data][product_data][name]", `Season Priority ${SEASON_LABEL}`);
     params.set(
       "line_items[0][price_data][product_data][description]",
-      `Be the first to know for every race you watch: notified before everyone else, plus WhatsApp alerts (launching soon). One-off payment, valid until ${SEASON_END_LABEL}.`
+      `New-ticket emails before anyone else, for every race and ticket you watch. ${WHATSAPP_INCLUDED} One-off payment, valid until ${SEASON_END_LABEL}.`
     );
     params.set("metadata[season]", SEASON_LABEL);
   } else {
@@ -2311,7 +2395,7 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     params.set("line_items[0][price_data][product_data][name]", `Priority alerts: ${race.event_title}`.slice(0, 200));
     params.set(
       "line_items[0][price_data][product_data][description]",
-      "Be the first to know: notified before everyone else when tickets for this race go on sale, plus WhatsApp alerts (launching soon). One-off payment, this race only."
+      `Get an email before anyone else when tickets for this race go on sale. ${WHATSAPP_INCLUDED} One-off payment, this race only.`
     );
     params.set("metadata[event_url]", eventUrl);
     params.set("metadata[event_title]", String(race.event_title).slice(0, 400));
@@ -2371,6 +2455,27 @@ async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
   if (evt?.type !== "checkout.session.completed") return new Response("ok");
   const session = evt.data?.object;
   if (!session || session.payment_status !== "paid") return new Response("ok");
+  const wantsWhatsApp = (session.custom_fields || []).some((f: any) => f?.key === "whatsapp" && f?.dropdown?.value === "yes") ? 1 : 0;
+
+  if (session.metadata?.kind === "ticket") {
+    const holder = await env.DB.prepare("SELECT id, email FROM subscribers WHERE id = ?").bind(Number(session.metadata?.subscriber_id) || 0).first<any>();
+    const eventName = String(session.metadata?.event_name || "");
+    if (!holder || !eventName) {
+      console.error("Stripe ticket payment for an unknown subscriber/event:", session.id);
+      if (env.TELEGRAM_CHAT_ID) await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `⚠️ Stripe payment ${session.id} (ticket) could not be matched to a subscriber - check it in Stripe.`, "reply");
+      return new Response("ok");
+    }
+    const res = await env.DB.prepare(
+      `INSERT OR IGNORE INTO ticket_priority (subscriber_id, event_name, stripe_session_id, amount_cents, currency, livemode, wants_whatsapp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(holder.id, eventName, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0, wantsWhatsApp)
+      .run();
+    if (res.meta.changes && env.TELEGRAM_CHAT_ID) {
+      await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Ticket Priority bought: ${eventName} by ${holder.email}${wantsWhatsApp ? " · wants WhatsApp" : ""}${evt.livemode ? "" : " (test mode)"}`, "reply");
+    }
+    return new Response("ok");
+  }
 
   if (session.metadata?.kind === "season") {
     const holder = await env.DB.prepare("SELECT id, email FROM subscribers WHERE id = ?").bind(Number(session.metadata?.subscriber_id) || 0).first<any>();
@@ -2380,13 +2485,13 @@ async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
       return new Response("ok");
     }
     const res = await env.DB.prepare(
-      `INSERT OR IGNORE INTO season_pass (subscriber_id, season, valid_until, stripe_session_id, amount_cents, currency, livemode)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT OR IGNORE INTO season_pass (subscriber_id, season, valid_until, stripe_session_id, amount_cents, currency, livemode, wants_whatsapp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-      .bind(holder.id, String(session.metadata?.season || SEASON_LABEL), SEASON_VALID_UNTIL, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0)
+      .bind(holder.id, String(session.metadata?.season || SEASON_LABEL), SEASON_VALID_UNTIL, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0, wantsWhatsApp)
       .run();
     if (res.meta.changes && env.TELEGRAM_CHAT_ID) {
-      await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Season Priority bought by ${holder.email}${evt.livemode ? "" : " (test mode)"}`, "reply");
+      await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Season Priority bought by ${holder.email}${wantsWhatsApp ? " · wants WhatsApp" : ""}${evt.livemode ? "" : " (test mode)"}`, "reply");
     }
     return new Response("ok");
   }
@@ -2403,13 +2508,13 @@ async function handleStripeWebhook(req: Request, env: Env): Promise<Response> {
   }
   // A transient DB error must give Stripe a non-200 so it retries the event.
   const res = await env.DB.prepare(
-    `INSERT OR IGNORE INTO race_priority (subscriber_id, event_url, event_title, stripe_session_id, amount_cents, currency, livemode)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT OR IGNORE INTO race_priority (subscriber_id, event_url, event_title, stripe_session_id, amount_cents, currency, livemode, wants_whatsapp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   )
-    .bind(sub.id, eventUrl, race.event_title, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0)
+    .bind(sub.id, eventUrl, race.event_title, String(session.id), Number(session.amount_total) || 0, String(session.currency || ""), evt.livemode ? 1 : 0, wantsWhatsApp)
     .run();
   if (res.meta.changes && env.TELEGRAM_CHAT_ID) {
-    await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Priority bought: ${race.event_title} by ${sub.email}${evt.livemode ? "" : " (test mode)"}`, "reply");
+    await sendTelegramTo(env, env.TELEGRAM_CHAT_ID, `💰 Race Priority bought: ${race.event_title} by ${sub.email}${wantsWhatsApp ? " · wants WhatsApp" : ""}${evt.livemode ? "" : " (test mode)"}`, "reply");
   }
   return new Response("ok");
 }
@@ -2851,13 +2956,13 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     );
   }
 
-  const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env);
   const seasonActive = await hasSeasonPass(env, subscriber.id);
+  const rows = await renderTicketRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber), seasonActive);
   const saleRows = await renderSaleWatchRows(subscriber.id, subscriber.unsubscribe_token, env, priorityOpen(env, subscriber), seasonActive);
   const counts = await getWatchCounts(subscriber.id, env);
   const paidBanner =
     url.searchParams.get("priority") === "success"
-      ? `<div class="verify-banner" style="background:#e6f4ea;border-color:#bfe0c9;color:#1e7e34"><p><b>Payment received.</b> Priority shows on the race below within a few seconds - refresh if it isn't there yet.</p></div>`
+      ? `<div class="verify-banner" style="background:#e6f4ea;border-color:#bfe0c9;color:#1e7e34"><p><b>Payment received.</b> Priority shows on your alerts below within a few seconds - refresh if it isn't there yet.</p></div>`
       : "";
   const saleSections: string[] = [];
   if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);
@@ -2869,7 +2974,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
   } else if (priorityOpen(env, subscriber)) {
     saleSections.push(
-      `<p class="consent">&#9889; ${escapeHtml(priorityExplainer(env))}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; Whole season - ${SEASON_PRICE_LABEL}`)}`
+      `<p class="consent">&#9889; ${priorityExplainer(env)}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; Whole season - ${SEASON_PRICE_LABEL}`)}`
     );
   }
   const verifyBanner = subscriber.verified
@@ -4583,16 +4688,24 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
               (SELECT COALESCE(SUM(amount_cents), 0) FROM race_priority WHERE livemode = 1) AS race_c,
               (SELECT COUNT(*) FROM season_pass WHERE livemode = 1) AS season_n,
               (SELECT COALESCE(SUM(amount_cents), 0) FROM season_pass WHERE livemode = 1) AS season_c,
-              (SELECT COUNT(*) FROM race_priority WHERE livemode = 0) + (SELECT COUNT(*) FROM season_pass WHERE livemode = 0) AS test_n`
+              (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 1) AS ticket_n,
+              (SELECT COALESCE(SUM(amount_cents), 0) FROM ticket_priority WHERE livemode = 1) AS ticket_c,
+              (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM race_priority WHERE livemode = 1)
+                + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM ticket_priority WHERE livemode = 1)
+                + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM season_pass WHERE livemode = 1) AS wa_yes,
+              (SELECT COUNT(*) FROM race_priority WHERE livemode = 0) + (SELECT COUNT(*) FROM season_pass WHERE livemode = 0)
+                + (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 0) AS test_n`
     )
     .first<any>();
   const prioCardHtml = () => `<div class="card">
       <h2>Priority sales</h2>
-      <p><small>Which offer people pick: one race (${PRIORITY_PRICE_LABEL}) or the whole season (${SEASON_PRICE_LABEL}). Real payments only; ${prio?.test_n || 0} test-mode purchase(s) not counted.</small></p>
+      <p><small>Which offer people pick: one race or ticket watch (${PRIORITY_PRICE_LABEL}) or the whole season (${SEASON_PRICE_LABEL}), and how many want WhatsApp. Real payments only; ${prio?.test_n || 0} test-mode purchase(s) not counted.</small></p>
       <div class="tiles">
-        ${tile(prio?.race_n || 0, "single-race passes")}
+        ${tile(prio?.race_n || 0, "race passes")}
+        ${tile(prio?.ticket_n || 0, "ticket passes")}
         ${tile(prio?.season_n || 0, "season passes")}
-        ${tile(money((prio?.race_c || 0) + (prio?.season_c || 0)), "revenue (before Stripe fees)")}
+        ${tile(money((prio?.race_c || 0) + (prio?.ticket_c || 0) + (prio?.season_c || 0)), "revenue (before Stripe fees)")}
+        ${tile(prio?.wa_yes || 0, "buyers who want WhatsApp")}
       </div>
     </div>`;
 
@@ -4810,6 +4923,7 @@ export default {
       if (url.pathname === "/stripe/webhook" && req.method === "POST") return await handleStripeWebhook(req, env);
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
+      if (url.pathname === "/terms" && req.method === "GET") return handleTermsPage(env);
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);

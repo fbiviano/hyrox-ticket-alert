@@ -168,8 +168,25 @@ CREATE TABLE IF NOT EXISTS race_priority (
   amount_cents INTEGER NOT NULL,
   currency TEXT NOT NULL,
   livemode INTEGER NOT NULL DEFAULT 0,
+  -- Answer to the optional "Want WhatsApp alerts when they launch?" question at checkout.
+  wants_whatsapp INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, event_url)
+);
+
+-- A paid per-event Priority pass for ticket watches: emailed first when sold-out tickets of
+-- that event come back. Keyed by subscriptions.event_name. Written only by the Stripe webhook.
+CREATE TABLE IF NOT EXISTS ticket_priority (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
+  event_name TEXT NOT NULL,
+  stripe_session_id TEXT NOT NULL UNIQUE,
+  amount_cents INTEGER NOT NULL,
+  currency TEXT NOT NULL,
+  livemode INTEGER NOT NULL DEFAULT 0,
+  wants_whatsapp INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(subscriber_id, event_name)
 );
 
 -- A paid Season Priority pass (Stripe Checkout, one-off): Priority on every race the
@@ -183,6 +200,7 @@ CREATE TABLE IF NOT EXISTS season_pass (
   amount_cents INTEGER NOT NULL,
   currency TEXT NOT NULL,
   livemode INTEGER NOT NULL DEFAULT 0,
+  wants_whatsapp INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(subscriber_id, season)
 );
