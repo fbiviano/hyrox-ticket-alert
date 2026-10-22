@@ -418,6 +418,16 @@ button:hover{background:#333}
 small{color:#666}
 a{color:#111}
 .consent{font-size:0.85rem;color:#555;margin-top:14px}
+.plan-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+@media(max-width:560px){.plan-grid{grid-template-columns:1fr}}
+.plan{border:1px solid #e2e2e2;border-radius:10px;padding:14px;background:#fff;display:flex;flex-direction:column}
+.plan.prio{border-color:#f0c36d;background:#fffaf0}
+.plan h3{margin:0 0 8px;font-size:1rem}
+.plan h3 span{font-weight:normal;color:#9a6700;font-size:0.9rem;margin-left:6px}
+.plan ul{margin:0 0 8px;padding-left:18px;font-size:0.9rem}
+.plan li{margin:3px 0}
+.plan button{margin-top:auto;width:100%}
+.plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
 .urlWrap{position:relative;flex:1}
@@ -630,11 +640,12 @@ const RESOLVE_SCRIPT = `<script>
           // main <form>, and HTML forms can't nest. Submitted via fetch()
           // instead, from the click handler wired up right below.
           out.innerHTML = '<p><b>' + esc(data.event_title) + '</b>: tickets aren\\'t on sale yet.</p>' +
-            '<div class="row">' +
-            (signedIn ? '' : '<input type="email" id="saleEmail" placeholder="you@example.com">') +
-            '<button type="button" id="saleBtn">' + (priorityOn ? 'Notify me - free' : 'Notify me when on sale') + '</button>' +
-            (priorityOn ? '<button type="button" id="salePrioBtn">&#9889; Notify me first - ' + esc(prioEl.getAttribute('data-price')) + '</button>' : '') +
-            '</div>' + (priorityOn ? prioEl.getAttribute('data-pitch') : '');
+            (priorityOn
+              ? (signedIn ? '' : '<input type="email" id="saleEmail" placeholder="you@example.com">') + prioEl.getAttribute('data-choice')
+              : '<div class="row">' +
+                (signedIn ? '' : '<input type="email" id="saleEmail" placeholder="you@example.com">') +
+                '<button type="button" id="saleBtn">Notify me when on sale</button>' +
+                '</div>');
           var wantPriority = false;
           if (priorityOn) {
             document.getElementById('salePrioBtn').addEventListener('click', function() {
@@ -1213,7 +1224,13 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // Tells the page script whether to show the "first" buttons, and with what words.
   const offerPriority = priorityOfferedTo(env, subscriber);
   const priorityFlag = offerPriority
-    ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-pitch="${escapeHtml(priorityChoicePitch())}"></span>`
+    ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-choice="${escapeHtml(
+        priorityChoiceHtml(
+          "race",
+          `<button type="button" id="saleBtn">Notify me - free</button>`,
+          `<button type="button" id="salePrioBtn">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`
+        )
+      )}"></span>`
     : "";
 
   if (subscriber) {
@@ -1229,8 +1246,15 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
               <div class="submit-step" style="display:none">
-                <button type="submit" name="priority" value="0">${offerPriority ? "Watch selected - free" : "Add selected ticket(s)"}</button>
-                ${offerPriority ? `<button type="submit" name="priority" value="1">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button>${priorityChoicePitch()}` : ""}
+                ${
+                  offerPriority
+                    ? priorityChoiceHtml(
+                        "ticket",
+                        `<button type="submit" name="priority" value="0">Watch - free</button>`,
+                        `<button type="submit" name="priority" value="1">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button>`
+                      )
+                    : `<button type="submit" name="priority" value="0">Add selected ticket(s)</button>`
+                }
               </div>
             </form>${priorityFlag}
             ${browseSection}
@@ -1264,8 +1288,15 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                 <input type="email" name="email" required placeholder="you@example.com">
               </label>
               <p class="consent">By subscribing you agree to receive ticket-availability emails for the event(s) selected above. You can unsubscribe at any time, or manage exactly what you're watching, via the links in every email. We don't share your email with anyone.</p>
-              <button type="submit" name="priority" value="0">${offerPriority ? "Subscribe - free" : "Subscribe"}</button>
-              ${offerPriority ? `<button type="submit" name="priority" value="1">&#9889; Subscribe with Priority - ${PRIORITY_PRICE_LABEL}</button>${priorityChoicePitch()}` : ""}
+              ${
+                offerPriority
+                  ? priorityChoiceHtml(
+                      "ticket",
+                      `<button type="submit" name="priority" value="0">Subscribe - free</button>`,
+                      `<button type="submit" name="priority" value="1">&#9889; Subscribe first - ${PRIORITY_PRICE_LABEL}</button>`
+                    )
+                  : `<button type="submit" name="priority" value="0">Subscribe</button>`
+              }
             </div>
           </form>${priorityFlag}
           ${browseSection}
@@ -2313,9 +2344,28 @@ function priorityOfferedTo(env: Env, s: any | null): boolean {
   return s?.verified ? priorityOpen(env, s) : priorityPublic(env);
 }
 
-/** One line under the free / Priority buttons where a watch is added (HTML). */
-function priorityChoicePitch(): string {
-  return `<p class="consent">&#9889; <b>Priority</b>: emailed before anyone else, plus WhatsApp notifications (launching soon). One-off ${PRIORITY_PRICE_LABEL} for this race, no subscription. <a href="/terms" target="_blank">Terms</a></p>`;
+/** Free vs Priority side by side, where a watch is added, so the difference is clear before
+ * anyone clicks. The buttons are passed in: fetch-driven ones for races, form submits for tickets. */
+function priorityChoiceHtml(what: "race" | "ticket", freeButton: string, priorityButton: string): string {
+  const when = what === "race" ? "when tickets go on sale" : "when your ticket comes back";
+  return `<div class="plan-grid">
+      <div class="plan">
+        <h3>Free</h3>
+        <ul><li>Email alert ${when}</li><li>Free, always</li></ul>
+        <p class="plan-note">Priority members are alerted first.</p>
+        ${freeButton}
+      </div>
+      <div class="plan prio">
+        <h3>&#9889; Priority <span>${PRIORITY_PRICE_LABEL} once</span></h3>
+        <ul>
+          <li><b>Alerted the instant we spot it</b> - before everyone else</li>
+          <li><b>WhatsApp notification</b> too (launching soon)</li>
+          <li>For this ${what === "race" ? "race" : "event"} only - no subscription</li>
+        </ul>
+        ${priorityButton}
+        <p class="plan-note">Speeds up your alert; doesn't reserve a ticket. <a href="/terms" target="_blank">Terms</a></p>
+      </div>
+    </div>`;
 }
 
 /** Shown to the admin only while the head start is switched off, so a preview never looks like the real thing. */
