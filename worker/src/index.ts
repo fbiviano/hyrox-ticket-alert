@@ -403,7 +403,7 @@ h1{font-size:1.5rem}
 h2{font-size:1.1rem;margin-top:0}
 .card{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:24px;margin-top:16px}
 label{display:block;margin:10px 0;font-size:0.95rem}
-input[type=email],input[type=text]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
+input[type=email],input[type=text],input[type=tel]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
 button{background:#111;color:#fff;border:0;border-radius:6px;padding:12px 20px;font-size:1rem;cursor:pointer;margin-top:16px}
 button:hover{background:#333}
 .row{display:flex;gap:8px;align-items:flex-start}
