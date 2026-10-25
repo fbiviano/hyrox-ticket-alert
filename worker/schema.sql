@@ -451,3 +451,10 @@ CREATE TABLE IF NOT EXISTS ig_post_queue (
   posted_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Small key/value store for operational facts, e.g. cron_last_run:<cron expr> = when that
+-- schedule last fired (written on every run, see scheduled() in src/index.ts).
+CREATE TABLE IF NOT EXISTS kv_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);

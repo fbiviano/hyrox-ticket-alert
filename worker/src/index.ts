@@ -5437,6 +5437,13 @@ export default {
     // Three schedules share this Worker (see wrangler.toml): the frequent
     // one checks tickets, one indexes the event directory daily, and one
     // checks Instagram for new ticket-sale announcements daily.
+    // Heartbeat: proves the schedule fired even when every check inside is refused upstream.
+    ctx.waitUntil(
+      env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, datetime('now'))")
+        .bind(`cron_last_run:${event.cron}`)
+        .run()
+        .catch((e) => console.error("heartbeat failed:", e))
+    );
     if (event.cron === "*/2 * * * *") {
       ctx.waitUntil(checkCommunityTickets(env).then(() => sendDueFreeTicketAlerts(env)));
       ctx.waitUntil(checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)));
