@@ -446,17 +446,22 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
-.tchip{background:#fff;color:#333;border:1px solid #ccc;border-radius:16px;padding:5px 12px;font-size:0.85rem;margin:0;cursor:pointer}
-.tchip:hover{background:#f3f3f3}
-.tchip.on{background:#111;color:#fff;border-color:#111}
-.tcat{margin-top:12px}
-.tcathead{margin:0 0 2px;font-size:0.85rem;font-weight:600;color:#333;border-bottom:1px solid #eee;padding-bottom:3px}
-.tcathead span{color:#999;font-weight:normal;font-size:0.8rem}
-.tline{display:block;margin:6px 0;font-size:0.9rem}
-.tline .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
-.tline.sold .tstat{background:#fdecec;color:#b00}
-.tline.avail .tstat{background:#e6f4ea;color:#1e7e34}
+.tpick{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:10px 0}
+.tfield{display:flex;flex-direction:column;gap:4px;font-size:0.8rem;font-weight:600;color:#555;margin:0}
+.tfield select{padding:8px;font-size:0.95rem;border:1px solid #ccc;border-radius:6px;background:#fff;font-weight:normal;color:#111}
+.tmatches{margin:6px 0}
+.tline{display:block;margin:6px 0;font-size:0.95rem}
+.tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:2px}
+.tstat.sold{background:#fdecec;color:#b00}
+.tstat.avail{background:#e6f4ea;color:#1e7e34}
+.tvariant{display:block;margin:6px 0;font-size:0.88rem;color:#444}
+.tempty{color:#888;font-size:0.9rem}
+.tquick{margin:4px 0;font-size:0.85rem}
+.tsel{margin:10px 0}
+.tselhead{margin:0 0 4px;font-size:0.85rem;font-weight:600;color:#333}
+.tselitem{display:inline-block;background:#f4f4f4;border-radius:14px;padding:3px 10px;margin:3px 4px 3px 0;font-size:0.82rem}
+.tselitem a{text-decoration:none;margin-left:4px;color:#888}
+.tall-list{border-top:1px solid #eee;margin-top:6px;padding-top:6px}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -654,36 +659,102 @@ const RESOLVE_SCRIPT = `<script>
     });
   }
 
-  // --- Ticket picker: big races list 100+ ticket types (category x day x charity x partner slot).
-  // Everything stays visible, grouped by category; two rows of buttons narrow it down by
-  // category and by day. ---
+  // --- Ticket picker: big races list 100+ ticket types (race x category x level x day, plus
+  // charity places, partner slots and spectator extras). Instead of one long list we ask what a
+  // racer has in mind - race, category, level, day - and show only the tickets that match.
+  // Charity places and partner slots are one tick-box each; the full list is one link away. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  var CATS = ['Men', 'Women', 'Pro', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
+  var DIV_ORDER = ['Single', 'Doubles', 'Relay', 'Adaptive'];
+  var DIV_LABEL = { Single: 'Single (on your own)', Doubles: 'Doubles', Relay: 'Relay', Adaptive: 'Adaptive' };
+  var GEN_ORDER = ['Men', 'Women', 'Mixed'];
+  var tp = null; // picker state: { parsed, selected: { encoded: ticket } }
   function parseTicket(t) {
+    var u = t.name.toUpperCase();
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
     var day = null;
     for (var d = 0; d < DAY_NAMES.length; d++) { if (last === DAY_NAMES[d].toLowerCase()) day = DAY_NAMES[d]; }
-    var u = t.name.toUpperCase();
-    var cat;
-    if (u.indexOf('SPECTATOR') >= 0 || u.indexOf('PHOTO') >= 0 || u.indexOf('CHILD') >= 0 || u.indexOf('HYROX') < 0) cat = 'Spectators & extras';
-    else if (u.indexOf('CHARITY') >= 0 || u.indexOf('MACMILLAN') >= 0) cat = 'Charity';
-    else if (u.indexOf('RELAY') >= 0) cat = 'Relay';
-    else if (u.indexOf('DOUBLES') >= 0) cat = 'Doubles';
-    else if (u.indexOf('ADAPTIVE') >= 0) cat = 'Adaptive';
-    else if (/\\bPRO\\b/.test(u)) cat = 'Pro';
-    else if (u.indexOf('WOMEN') >= 0) cat = 'Women';
-    else if (u.indexOf('MEN') >= 0) cat = 'Men';
-    else cat = 'Spectators & extras';
-    return { t: t, day: day, cat: cat, sold: t.status === 'sold_out' };
+    return {
+      t: t,
+      day: day,
+      div: u.indexOf('RELAY') >= 0 ? 'Relay' : u.indexOf('DOUBLES') >= 0 ? 'Doubles' : u.indexOf('ADAPTIVE') >= 0 ? 'Adaptive' : 'Single',
+      gender: u.indexOf('MIXED') >= 0 ? 'Mixed' : u.indexOf('WOMEN') >= 0 ? 'Women' : u.indexOf('MEN') >= 0 ? 'Men' : '',
+      level: /\\bPRO\\b/.test(u) ? 'Pro' : 'Open',
+      charity: u.indexOf('CHARITY') >= 0 || u.indexOf('MACMILLAN') >= 0,
+      partner: u.indexOf('ATHLETE 2') >= 0 || u.indexOf('TEAM MEMBER') >= 0,
+      extra: u.indexOf('SPECTATOR') >= 0 || u.indexOf('PHOTO') >= 0 || u.indexOf('CHILD') >= 0 || u.indexOf('HYROX') < 0,
+      sold: t.status === 'sold_out'
+    };
   }
-  function lineHtml(p) {
-    return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '" data-cat="' + esc(p.cat) + '" data-day="' + esc(p.day || '') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+  function statusTag(p) { return '<span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span>'; }
+  function tickLine(p) {
+    var on = tp.selected[p.t.encoded] ? ' checked' : '';
+    return '<label class="tline"><input type="checkbox" class="tpk" data-enc="' + esc(p.t.encoded) + '"' + on + '> ' + statusTag(p) + ' ' + esc(p.t.name) + '</label>';
   }
-  function chip(kind, value, label, active) {
-    return '<button type="button" class="tchip' + (active ? ' on' : '') + '" data-kind="' + kind + '" data-value="' + esc(value) + '">' + esc(label) + '</button>';
+  function uniq(list) { return list.filter(function(v, i) { return list.indexOf(v) === i; }); }
+  function ordered(values, order) { return values.slice().sort(function(a, b) { return order.indexOf(a) - order.indexOf(b); }); }
+  function fieldVal(f) { var el = out.querySelector('select[data-f="' + f + '"]'); return el ? el.value : ''; }
+  function fillSelect(f, values, labels, placeholder) {
+    var el = out.querySelector('select[data-f="' + f + '"]');
+    var keep = el.value;
+    el.innerHTML = (placeholder ? '<option value="">' + esc(placeholder) + '</option>' : '') +
+      values.map(function(v) { return '<option value="' + esc(v) + '">' + esc((labels && labels[v]) || v) + '</option>'; }).join('');
+    if (values.indexOf(keep) >= 0 || (keep === '' && placeholder)) el.value = keep;
+    else el.value = values.length === 1 ? values[0] : (placeholder ? '' : values[0] || '');
+    el.closest('.tfield').style.display = values.length ? '' : 'none';
+    return el.value;
+  }
+  function refreshPicker() {
+    var mains = tp.parsed.filter(function(p) { return !p.charity && !p.partner && !p.extra; });
+    var div = fillSelect('div', ordered(uniq(mains.map(function(p) { return p.div; })), DIV_ORDER), DIV_LABEL, 'Choose your race');
+    var byDiv = mains.filter(function(p) { return p.div === div; });
+    var gender = fillSelect('gender', div ? ordered(uniq(byDiv.map(function(p) { return p.gender; }).filter(Boolean)), GEN_ORDER) : [], null, null);
+    var byGen = byDiv.filter(function(p) { return !gender || p.gender === gender; });
+    var levels = ordered(uniq(byGen.map(function(p) { return p.level; })), ['Open', 'Pro']);
+    var level = fillSelect('level', div && levels.length > 1 ? levels : [], null, null) || (levels[0] || '');
+    var byLevel = byGen.filter(function(p) { return p.level === level; });
+    var days = ordered(uniq(byLevel.map(function(p) { return p.day; }).filter(Boolean)), DAY_NAMES);
+    var dayEl = out.querySelector('select[data-f="day"]');
+    var keepDay = dayEl.value;
+    dayEl.innerHTML = '<option value="">Any day</option>' + days.map(function(d) { return '<option value="' + d + '">' + d + '</option>'; }).join('');
+    dayEl.value = days.indexOf(keepDay) >= 0 ? keepDay : '';
+    dayEl.closest('.tfield').style.display = div && days.length > 1 ? '' : 'none';
+    var day = dayEl.value;
+    var box = out.querySelector('.tmatches');
+    if (!div) { box.innerHTML = '<p class="tempty">Choose your race above to see its tickets.</p>'; renderSelection(); return; }
+    var sameSlot = function(p) {
+      return p.div === div && (!gender || p.gender === gender) && p.level === level && (!day || p.day === day);
+    };
+    var matches = byLevel.filter(function(p) { return !day || p.day === day; })
+      .sort(function(a, b) { return DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day); });
+    var charity = tp.parsed.filter(function(p) { return p.charity && !p.partner && !p.extra && sameSlot(p); });
+    var partner = tp.parsed.filter(function(p) { return p.partner && !p.charity && !p.extra && sameSlot(p); });
+    var html = matches.length ? matches.map(tickLine).join('') : '<p class="tempty">No tickets for this combination.</p>';
+    if (matches.length > 1) html += '<p class="tquick"><a href="#" class="tpick-all">Tick all ' + matches.length + '</a></p>';
+    var allOn = function(list) { return list.length && list.every(function(p) { return tp.selected[p.t.encoded]; }); };
+    if (partner.length) html += '<label class="tvariant"><input type="checkbox" class="tvar" data-set="partner"' + (allOn(partner) ? ' checked' : '') + '> Also watch the partner slot ("Athlete 2" / team member, ' + partner.length + ')</label>';
+    if (charity.length) html += '<label class="tvariant"><input type="checkbox" class="tvar" data-set="charity"' + (allOn(charity) ? ' checked' : '') + '> Also watch charity places (' + charity.length + ')</label>';
+    box.innerHTML = html;
+    tp.variants = { charity: charity, partner: partner, matches: matches };
+    renderSelection();
+  }
+  function renderSelection() {
+    var keys = Object.keys(tp.selected);
+    out.querySelector('.tinputs').innerHTML = keys.map(function(k) { return '<input type="hidden" name="ticket" value="' + esc(k) + '">'; }).join('');
+    var sel = out.querySelector('.tsel');
+    sel.innerHTML = keys.length
+      ? '<p class="tselhead">Watching (' + keys.length + ')</p>' + keys.map(function(k) {
+          var p = tp.selected[k];
+          return '<span class="tselitem">' + statusTag(p) + ' ' + esc(p.t.name) + ' <a href="#" class="tunsel" data-enc="' + esc(k) + '" title="Remove">&times;</a></span>';
+        }).join('')
+      : '';
+    out.querySelectorAll('.tpk').forEach(function(cb) { cb.checked = !!tp.selected[cb.getAttribute('data-enc')]; });
+  }
+  function setSelected(list, on) {
+    list.forEach(function(p) { if (on) tp.selected[p.t.encoded] = p; else delete tp.selected[p.t.encoded]; });
   }
   function renderTicketPicker(data) {
+    tp = null;
     if (!document.getElementById('ticketGridOn')) {
       // Plain list (production until the new picker is confirmed).
       var plain = '<p><b>' + esc(data.event_name) + '</b></p>';
@@ -695,46 +766,66 @@ const RESOLVE_SCRIPT = `<script>
     }
     var parsed = data.tickets.map(parseTicket);
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-    // A partner slot ("... ATHLETE 2 | Friday") sorts right after its main entry, not before it.
-    var nameKey = function(p) { return p.t.name.replace(' ATHLETE 2', '') + (p.t.name.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
-    var bySoldThenDay = function(a, b) {
-      return (a.sold ? 0 : 1) - (b.sold ? 0 : 1) || DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day) || (nameKey(a) < nameKey(b) ? -1 : 1);
-    };
     if (parsed.length < 8) {
-      return html + parsed.slice().sort(bySoldThenDay).map(lineHtml).join('');
+      return html + parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(function(p) {
+        return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + statusTag(p) + ' ' + esc(p.t.name) + '</label>';
+      }).join('');
     }
-    var cats = CATS.filter(function(c) { return parsed.some(function(p) { return p.cat === c; }); });
-    var days = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
-    html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Use the buttons to narrow the list.</p>';
-    html += '<div class="tchips">' + chip('cat', '', 'All (' + parsed.length + ')', true) + cats.map(function(c) {
-      return chip('cat', c, c + ' (' + parsed.filter(function(p) { return p.cat === c; }).length + ')', false);
-    }).join('') + '</div>';
-    if (days.length >= 2) {
-      html += '<div class="tchips">' + chip('day', '', 'All days', true) + days.map(function(d) { return chip('day', d, d.slice(0, 3), false); }).join('') + '</div>';
-    }
-    cats.forEach(function(c) {
-      var rows = parsed.filter(function(p) { return p.cat === c; }).sort(bySoldThenDay);
-      html += '<div class="tcat" data-cat="' + esc(c) + '"><p class="tcathead">' + esc(c) + ' <span>' + rows.length + '</span></p>' + rows.map(lineHtml).join('') + '</div>';
-    });
+    tp = { parsed: parsed, selected: {} };
+    html += '<p class="hint">Which race do you want? <span class="tsold">Sold out</span> = we alert you the moment a place comes back.</p>';
+    html += '<div class="tpick">' +
+      '<label class="tfield">Race<select data-f="div"></select></label>' +
+      '<label class="tfield">Category<select data-f="gender"></select></label>' +
+      '<label class="tfield">Level<select data-f="level"></select></label>' +
+      '<label class="tfield">Day<select data-f="day"></select></label>' +
+      '</div>';
+    html += '<div class="tmatches"></div><div class="tsel"></div><div class="tinputs"></div>';
+    html += '<p class="tquick"><a href="#" class="tshowall">See all ' + parsed.length + ' ticket types instead</a></p><div class="tall-list" style="display:none"></div>';
     return html;
   }
+  function afterPickerRender() {
+    if (!tp) return;
+    refreshPicker();
+  }
+  out.addEventListener('change', function(e) {
+    if (!tp) return;
+    var el = e.target;
+    if (el.matches && el.matches('select[data-f]')) { refreshPicker(); return; }
+    if (el.classList.contains('tpk')) {
+      var enc = el.getAttribute('data-enc');
+      var p = tp.parsed.filter(function(x) { return x.t.encoded === enc; })[0];
+      if (p) setSelected([p], el.checked);
+      renderSelection();
+      return;
+    }
+    if (el.classList.contains('tvar')) {
+      setSelected(tp.variants[el.getAttribute('data-set')] || [], el.checked);
+      renderSelection();
+    }
+  });
   out.addEventListener('click', function(e) {
-    var b = e.target.closest ? e.target.closest('.tchip') : null;
-    if (!b) return;
-    e.preventDefault();
-    b.parentNode.querySelectorAll('.tchip').forEach(function(x) { x.classList.toggle('on', x === b); });
-    var cat = (out.querySelector('.tchip.on[data-kind="cat"]') || {}).getAttribute ? out.querySelector('.tchip.on[data-kind="cat"]').getAttribute('data-value') : '';
-    var dayChip = out.querySelector('.tchip.on[data-kind="day"]');
-    var day = dayChip ? dayChip.getAttribute('data-value') : '';
-    out.querySelectorAll('.tcat').forEach(function(section) {
-      var shown = 0;
-      section.querySelectorAll('.tline').forEach(function(line) {
-        var ok = (!cat || line.getAttribute('data-cat') === cat) && (!day || line.getAttribute('data-day') === day);
-        line.style.display = ok ? '' : 'none';
-        if (ok) shown++;
-      });
-      section.style.display = shown ? '' : 'none';
-    });
+    if (!tp) return;
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    if (a.classList.contains('tpick-all')) {
+      e.preventDefault();
+      setSelected(tp.variants.matches, true);
+      renderSelection();
+    } else if (a.classList.contains('tunsel')) {
+      e.preventDefault();
+      delete tp.selected[a.getAttribute('data-enc')];
+      renderSelection();
+      refreshPicker();
+    } else if (a.classList.contains('tshowall')) {
+      e.preventDefault();
+      var list = out.querySelector('.tall-list');
+      var open = list.style.display === 'none';
+      list.style.display = open ? '' : 'none';
+      a.textContent = open ? 'Hide the full list' : 'See all ' + tp.parsed.length + ' ticket types instead';
+      if (open) {
+        list.innerHTML = tp.parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(tickLine).join('');
+      }
+    }
   });
 
   async function doFind(url) {
@@ -820,6 +911,7 @@ const RESOLVE_SCRIPT = `<script>
         return;
       }
       out.innerHTML = renderTicketPicker(data);
+      afterPickerRender();
       if (submitBtn) submitBtn.style.display = 'block';
     } catch (e) {
       out.innerHTML = '<p>Something went wrong. Try again.</p>';
