@@ -656,7 +656,7 @@ const RESOLVE_SCRIPT = `<script>
   // Top level = race days; inside each day the tickets are grouped by category. Small categories
   // are open straight away, big ones (e.g. Charity) are closed but visible with their count. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  var CATS = ['Men', 'Women', 'Pro', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
+  var CATS = ['Singles', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
   var OPEN_UP_TO = 6; // categories with more entries than this start closed
   function parseTicket(t) {
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
@@ -671,11 +671,9 @@ const RESOLVE_SCRIPT = `<script>
     else if (u.indexOf('RELAY') >= 0) cat = 'Relay';
     else if (u.indexOf('DOUBLES') >= 0) cat = 'Doubles';
     else if (u.indexOf('ADAPTIVE') >= 0) cat = 'Adaptive';
-    else if (/\\bPRO\\b/.test(u)) cat = 'Pro';
-    else if (u.indexOf('WOMEN') >= 0) cat = 'Women';
-    else if (u.indexOf('MEN') >= 0) cat = 'Men';
+    else if (u.indexOf('MEN') >= 0) cat = 'Singles'; // Men, Women, Pro Men, Pro Women
     else cat = 'Spectators & extras';
-    return { t: t, day: day, base: base, cat: cat, sold: t.status === 'sold_out' };
+    return { t: t, day: day, base: base, cat: cat, pro: /\\bPRO\\b/.test(u), sold: t.status === 'sold_out' };
   }
   function ticketLine(p) {
     return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
@@ -693,7 +691,8 @@ const RESOLVE_SCRIPT = `<script>
     var parsed = data.tickets.map(parseTicket);
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
     // Partner slots ("... ATHLETE 2") sort right after their main ticket.
-    var nameKey = function(p) { return p.base.replace(' ATHLETE 2', '') + (p.base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
+    // Open before Pro; partner slots ("... ATHLETE 2") right after their main ticket.
+    var nameKey = function(p) { return (p.pro ? '1' : '0') + p.base.replace(' ATHLETE 2', '') + (p.base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
     var byName = function(a, b) { return nameKey(a) < nameKey(b) ? -1 : 1; };
     if (parsed.length < 8) {
       return html + parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(function(p) {
