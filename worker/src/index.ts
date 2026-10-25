@@ -2541,6 +2541,12 @@ function priorityDelayMs(env: Env): number {
   return Number.isFinite(m) && m > 0 ? Math.min(m, PRIORITY_MAX_DELAY_MINUTES) * 60_000 : 0;
 }
 
+/** Wall-clock pause (not CPU time). hyrox.com refuses bursts from Cloudflare's network with 429s;
+ * spacing our requests out gets far more of them through. */
+const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const HYROX_REQUEST_GAP_MS = 1500;
+const MAX_BLOCKED_PER_ROUND = 3;
+
 /** D1's datetime('now') format, so values compare correctly against it in SQL. */
 function sqlTime(ms: number): string {
   return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
@@ -3594,6 +3600,8 @@ async function checkSaleWatches(env: Env): Promise<void> {
   )
     .bind(todayIso())
     .all<any>();
+  let blocked = 0;
+  let first = true;
   for (const row of results || []) {
     // Some ticket shops are provisioned with real, buyable inventory well
     // before the organizer's own site publicly reveals/links to it (seen
@@ -3606,15 +3614,21 @@ async function checkSaleWatches(env: Env): Promise<void> {
     // reminders below are already counting down to.
     if (row.announced_live_at && Date.now() < Date.parse(row.announced_live_at)) continue;
 
+    if (!first) await pause(HYROX_REQUEST_GAP_MS);
+    first = false;
     let found;
     try {
       found = await resolveEvent(row.event_url);
     } catch (e) {
       if (!(e instanceof FetchBlocked)) throw e;
-      // Further requests this round would only be refused too (and keep the limit tripped).
-      // last_checked_at stays as it was, so this race is first in line next round.
-      console.warn("hyrox.com rate-limited us; stopping sale checks this round:", e.message);
-      break;
+      // Refused: leave last_checked_at alone so this race is first in line next round, and try
+      // the next race (a later request often gets through). A round that keeps getting refused
+      // stops, so we don't keep the limit tripped.
+      if (++blocked >= MAX_BLOCKED_PER_ROUND) {
+        console.warn("hyrox.com rate-limited us repeatedly; stopping sale checks this round:", e.message);
+        break;
+      }
+      continue;
     }
     await env.DB.prepare("UPDATE sale_watch SET last_checked_at = datetime('now') WHERE event_url = ?").bind(row.event_url).run();
     if (!found) continue; // still not on sale
@@ -3752,7 +3766,11 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     .bind(today, nowIso, SALE_STATUS_BATCH_SIZE)
     .all<any>();
 
+  let blocked = 0;
+  let first = true;
   for (const row of results || []) {
+    if (!first) await pause(HYROX_REQUEST_GAP_MS);
+    first = false;
     // resolveEvent() failing can mean "genuinely no shop live yet" or just a
     // transient fetch hiccup against hyrox.com/vivenu - retry once before
     // concluding "not on sale", since a false negative here persists until
@@ -3765,8 +3783,12 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
       if (!found) found = await resolveEvent(row.url);
     } catch (e) {
       if (!(e instanceof FetchBlocked)) throw e;
-      console.warn("hyrox.com rate-limited us; stopping directory checks this round:", e.message);
-      break;
+      // Refused is not "not on sale": row untouched, so it stays at the front of the queue.
+      if (++blocked >= MAX_BLOCKED_PER_ROUND) {
+        console.warn("hyrox.com rate-limited us repeatedly; stopping directory checks this round:", e.message);
+        break;
+      }
+      continue;
     }
     // Only stamp on_sale_since when this row was genuinely being counted
     // down (a known presale_live_at, or an active pre-sale) right before
