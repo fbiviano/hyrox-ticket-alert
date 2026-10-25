@@ -446,22 +446,17 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tpick{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:10px 0}
-.tfield{display:flex;flex-direction:column;gap:4px;font-size:0.8rem;font-weight:600;color:#555;margin:0}
-.tfield select{padding:8px;font-size:0.95rem;border:1px solid #ccc;border-radius:6px;background:#fff;font-weight:normal;color:#111}
-.tmatches{margin:6px 0}
-.tline{display:block;margin:6px 0;font-size:0.95rem}
-.tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:2px}
-.tstat.sold{background:#fdecec;color:#b00}
-.tstat.avail{background:#e6f4ea;color:#1e7e34}
-.tvariant{display:block;margin:6px 0;font-size:0.88rem;color:#444}
-.tempty{color:#888;font-size:0.9rem}
-.tquick{margin:4px 0;font-size:0.85rem}
-.tsel{margin:10px 0}
-.tselhead{margin:0 0 4px;font-size:0.85rem;font-weight:600;color:#333}
-.tselitem{display:inline-block;background:#f4f4f4;border-radius:14px;padding:3px 10px;margin:3px 4px 3px 0;font-size:0.82rem}
-.tselitem a{text-decoration:none;margin-left:4px;color:#888}
-.tall-list{border-top:1px solid #eee;margin-top:6px;padding-top:6px}
+.tcat{margin-top:14px}
+.tcathead{margin:0 0 4px;font-size:0.9rem;font-weight:700;color:#222;border-bottom:1px solid #e5e5e5;padding-bottom:3px}
+.trow{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:5px 0;border-bottom:1px solid #f4f4f4}
+.tname{flex:1 1 220px;font-size:0.9rem}
+.tdays{display:flex;flex-wrap:wrap;gap:4px}
+.tdaybox{display:inline-flex;align-items:center;justify-content:center;gap:3px;min-width:52px;box-sizing:border-box;margin:0;padding:2px 7px;border-radius:10px;font-size:0.78rem;cursor:pointer;white-space:nowrap}
+.tdaybox input{margin:0}
+.tdaybox.sold{background:#fdecec;color:#b00}
+.tdaybox.avail{background:#e6f4ea;color:#1e7e34}
+.tdaybox.legend{cursor:default;padding:0 6px;min-width:0}
+.tdaybox.empty{background:transparent;cursor:default}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -659,102 +654,34 @@ const RESOLVE_SCRIPT = `<script>
     });
   }
 
-  // --- Ticket picker: big races list 100+ ticket types (race x category x level x day, plus
-  // charity places, partner slots and spectator extras). Instead of one long list we ask what a
-  // racer has in mind - race, category, level, day - and show only the tickets that match.
-  // Charity places and partner slots are one tick-box each; the full list is one link away. ---
+  // --- Ticket picker: big races list 100+ ticket types because every ticket exists once per day.
+  // Everything is shown immediately, grouped by category; each ticket type is ONE line with its
+  // days as small tick-boxes (red = sold out, green = available). ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  var DIV_ORDER = ['Single', 'Doubles', 'Relay', 'Adaptive'];
-  var DIV_LABEL = { Single: 'Single (on your own)', Doubles: 'Doubles', Relay: 'Relay', Adaptive: 'Adaptive' };
-  var GEN_ORDER = ['Men', 'Women', 'Mixed'];
-  var tp = null; // picker state: { parsed, selected: { encoded: ticket } }
+  var CATS = ['Men', 'Women', 'Pro', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
   function parseTicket(t) {
-    var u = t.name.toUpperCase();
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
     var day = null;
     for (var d = 0; d < DAY_NAMES.length; d++) { if (last === DAY_NAMES[d].toLowerCase()) day = DAY_NAMES[d]; }
-    return {
-      t: t,
-      day: day,
-      div: u.indexOf('RELAY') >= 0 ? 'Relay' : u.indexOf('DOUBLES') >= 0 ? 'Doubles' : u.indexOf('ADAPTIVE') >= 0 ? 'Adaptive' : 'Single',
-      gender: u.indexOf('MIXED') >= 0 ? 'Mixed' : u.indexOf('WOMEN') >= 0 ? 'Women' : u.indexOf('MEN') >= 0 ? 'Men' : '',
-      level: /\\bPRO\\b/.test(u) ? 'Pro' : 'Open',
-      charity: u.indexOf('CHARITY') >= 0 || u.indexOf('MACMILLAN') >= 0,
-      partner: u.indexOf('ATHLETE 2') >= 0 || u.indexOf('TEAM MEMBER') >= 0,
-      extra: u.indexOf('SPECTATOR') >= 0 || u.indexOf('PHOTO') >= 0 || u.indexOf('CHILD') >= 0 || u.indexOf('HYROX') < 0,
-      sold: t.status === 'sold_out'
-    };
+    var base = (day ? segs.slice(0, -1) : segs).join(' | ');
+    var u = t.name.toUpperCase();
+    var cat;
+    if (u.indexOf('SPECTATOR') >= 0 || u.indexOf('PHOTO') >= 0 || u.indexOf('CHILD') >= 0 || u.indexOf('HYROX') < 0) cat = 'Spectators & extras';
+    else if (u.indexOf('CHARITY') >= 0 || u.indexOf('MACMILLAN') >= 0) cat = 'Charity';
+    else if (u.indexOf('RELAY') >= 0) cat = 'Relay';
+    else if (u.indexOf('DOUBLES') >= 0) cat = 'Doubles';
+    else if (u.indexOf('ADAPTIVE') >= 0) cat = 'Adaptive';
+    else if (/\\bPRO\\b/.test(u)) cat = 'Pro';
+    else if (u.indexOf('WOMEN') >= 0) cat = 'Women';
+    else if (u.indexOf('MEN') >= 0) cat = 'Men';
+    else cat = 'Spectators & extras';
+    return { t: t, day: day, base: base, cat: cat, sold: t.status === 'sold_out' };
   }
-  function statusTag(p) { return '<span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span>'; }
-  function tickLine(p) {
-    var on = tp.selected[p.t.encoded] ? ' checked' : '';
-    return '<label class="tline"><input type="checkbox" class="tpk" data-enc="' + esc(p.t.encoded) + '"' + on + '> ' + statusTag(p) + ' ' + esc(p.t.name) + '</label>';
-  }
-  function uniq(list) { return list.filter(function(v, i) { return list.indexOf(v) === i; }); }
-  function ordered(values, order) { return values.slice().sort(function(a, b) { return order.indexOf(a) - order.indexOf(b); }); }
-  function fieldVal(f) { var el = out.querySelector('select[data-f="' + f + '"]'); return el ? el.value : ''; }
-  function fillSelect(f, values, labels, placeholder) {
-    var el = out.querySelector('select[data-f="' + f + '"]');
-    var keep = el.value;
-    el.innerHTML = (placeholder ? '<option value="">' + esc(placeholder) + '</option>' : '') +
-      values.map(function(v) { return '<option value="' + esc(v) + '">' + esc((labels && labels[v]) || v) + '</option>'; }).join('');
-    if (values.indexOf(keep) >= 0 || (keep === '' && placeholder)) el.value = keep;
-    else el.value = values.length === 1 ? values[0] : (placeholder ? '' : values[0] || '');
-    el.closest('.tfield').style.display = values.length ? '' : 'none';
-    return el.value;
-  }
-  function refreshPicker() {
-    var mains = tp.parsed.filter(function(p) { return !p.charity && !p.partner && !p.extra; });
-    var div = fillSelect('div', ordered(uniq(mains.map(function(p) { return p.div; })), DIV_ORDER), DIV_LABEL, 'Choose your race');
-    var byDiv = mains.filter(function(p) { return p.div === div; });
-    var gender = fillSelect('gender', div ? ordered(uniq(byDiv.map(function(p) { return p.gender; }).filter(Boolean)), GEN_ORDER) : [], null, null);
-    var byGen = byDiv.filter(function(p) { return !gender || p.gender === gender; });
-    var levels = ordered(uniq(byGen.map(function(p) { return p.level; })), ['Open', 'Pro']);
-    var level = fillSelect('level', div && levels.length > 1 ? levels : [], null, null) || (levels[0] || '');
-    var byLevel = byGen.filter(function(p) { return p.level === level; });
-    var days = ordered(uniq(byLevel.map(function(p) { return p.day; }).filter(Boolean)), DAY_NAMES);
-    var dayEl = out.querySelector('select[data-f="day"]');
-    var keepDay = dayEl.value;
-    dayEl.innerHTML = '<option value="">Any day</option>' + days.map(function(d) { return '<option value="' + d + '">' + d + '</option>'; }).join('');
-    dayEl.value = days.indexOf(keepDay) >= 0 ? keepDay : '';
-    dayEl.closest('.tfield').style.display = div && days.length > 1 ? '' : 'none';
-    var day = dayEl.value;
-    var box = out.querySelector('.tmatches');
-    if (!div) { box.innerHTML = '<p class="tempty">Choose your race above to see its tickets.</p>'; renderSelection(); return; }
-    var sameSlot = function(p) {
-      return p.div === div && (!gender || p.gender === gender) && p.level === level && (!day || p.day === day);
-    };
-    var matches = byLevel.filter(function(p) { return !day || p.day === day; })
-      .sort(function(a, b) { return DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day); });
-    var charity = tp.parsed.filter(function(p) { return p.charity && !p.partner && !p.extra && sameSlot(p); });
-    var partner = tp.parsed.filter(function(p) { return p.partner && !p.charity && !p.extra && sameSlot(p); });
-    var html = matches.length ? matches.map(tickLine).join('') : '<p class="tempty">No tickets for this combination.</p>';
-    if (matches.length > 1) html += '<p class="tquick"><a href="#" class="tpick-all">Tick all ' + matches.length + '</a></p>';
-    var allOn = function(list) { return list.length && list.every(function(p) { return tp.selected[p.t.encoded]; }); };
-    if (partner.length) html += '<label class="tvariant"><input type="checkbox" class="tvar" data-set="partner"' + (allOn(partner) ? ' checked' : '') + '> Also watch the partner slot ("Athlete 2" / team member, ' + partner.length + ')</label>';
-    if (charity.length) html += '<label class="tvariant"><input type="checkbox" class="tvar" data-set="charity"' + (allOn(charity) ? ' checked' : '') + '> Also watch charity places (' + charity.length + ')</label>';
-    box.innerHTML = html;
-    tp.variants = { charity: charity, partner: partner, matches: matches };
-    renderSelection();
-  }
-  function renderSelection() {
-    var keys = Object.keys(tp.selected);
-    out.querySelector('.tinputs').innerHTML = keys.map(function(k) { return '<input type="hidden" name="ticket" value="' + esc(k) + '">'; }).join('');
-    var sel = out.querySelector('.tsel');
-    sel.innerHTML = keys.length
-      ? '<p class="tselhead">Watching (' + keys.length + ')</p>' + keys.map(function(k) {
-          var p = tp.selected[k];
-          return '<span class="tselitem">' + statusTag(p) + ' ' + esc(p.t.name) + ' <a href="#" class="tunsel" data-enc="' + esc(k) + '" title="Remove">&times;</a></span>';
-        }).join('')
-      : '';
-    out.querySelectorAll('.tpk').forEach(function(cb) { cb.checked = !!tp.selected[cb.getAttribute('data-enc')]; });
-  }
-  function setSelected(list, on) {
-    list.forEach(function(p) { if (on) tp.selected[p.t.encoded] = p; else delete tp.selected[p.t.encoded]; });
+  function dayBox(p) {
+    return '<label class="tdaybox ' + (p.sold ? 'sold' : 'avail') + '" title="' + esc(p.t.name) + (p.sold ? ' - sold out' : ' - available') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + (p.day ? p.day.slice(0, 3) : 'Any') + '</label>';
   }
   function renderTicketPicker(data) {
-    tp = null;
     if (!document.getElementById('ticketGridOn')) {
       // Plain list (production until the new picker is confirmed).
       var plain = '<p><b>' + esc(data.event_name) + '</b></p>';
@@ -765,68 +692,33 @@ const RESOLVE_SCRIPT = `<script>
       return plain;
     }
     var parsed = data.tickets.map(parseTicket);
+    // Same day columns on every line, so Friday is always in the same place.
+    var raceDays = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-    if (parsed.length < 8) {
-      return html + parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(function(p) {
-        return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + statusTag(p) + ' ' + esc(p.t.name) + '</label>';
-      }).join('');
-    }
-    tp = { parsed: parsed, selected: {} };
-    html += '<p class="hint">Which race do you want? <span class="tsold">Sold out</span> = we alert you the moment a place comes back.</p>';
-    html += '<div class="tpick">' +
-      '<label class="tfield">Race<select data-f="div"></select></label>' +
-      '<label class="tfield">Category<select data-f="gender"></select></label>' +
-      '<label class="tfield">Level<select data-f="level"></select></label>' +
-      '<label class="tfield">Day<select data-f="day"></select></label>' +
-      '</div>';
-    html += '<div class="tmatches"></div><div class="tsel"></div><div class="tinputs"></div>';
-    html += '<p class="tquick"><a href="#" class="tshowall">See all ' + parsed.length + ' ticket types instead</a></p><div class="tall-list" style="display:none"></div>';
+    html += '<p class="hint">Tick the days you want to watch. <span class="tdaybox sold legend">Red</span> = sold out, we alert you the moment a place comes back. <span class="tdaybox avail legend">Green</span> = on sale now.</p>';
+    // Partner slots ("... ATHLETE 2") sort right after their main ticket.
+    var rowKey = function(base) { return base.replace(' ATHLETE 2', '') + (base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
+    CATS.forEach(function(c) {
+      var inCat = parsed.filter(function(p) { return p.cat === c; });
+      if (!inCat.length) return;
+      var bases = [];
+      inCat.forEach(function(p) { if (bases.indexOf(p.base) < 0) bases.push(p.base); });
+      bases.sort(function(a, b) { return rowKey(a) < rowKey(b) ? -1 : 1; });
+      html += '<div class="tcat"><p class="tcathead">' + esc(c) + '</p>';
+      bases.forEach(function(base) {
+        var days = inCat.filter(function(p) { return p.base === base; }).sort(function(a, b) { return DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day); });
+        var cells = raceDays.map(function(d) {
+          var p = days.filter(function(x) { return x.day === d; })[0];
+          return p ? dayBox(p) : '<span class="tdaybox empty"></span>';
+        });
+        days.filter(function(x) { return !x.day; }).forEach(function(p) { cells.push(dayBox(p)); });
+        html += '<div class="trow"><span class="tname">' + esc(base) + '</span><span class="tdays">' + cells.join('') + '</span></div>';
+      });
+      html += '</div>';
+    });
     return html;
   }
-  function afterPickerRender() {
-    if (!tp) return;
-    refreshPicker();
-  }
-  out.addEventListener('change', function(e) {
-    if (!tp) return;
-    var el = e.target;
-    if (el.matches && el.matches('select[data-f]')) { refreshPicker(); return; }
-    if (el.classList.contains('tpk')) {
-      var enc = el.getAttribute('data-enc');
-      var p = tp.parsed.filter(function(x) { return x.t.encoded === enc; })[0];
-      if (p) setSelected([p], el.checked);
-      renderSelection();
-      return;
-    }
-    if (el.classList.contains('tvar')) {
-      setSelected(tp.variants[el.getAttribute('data-set')] || [], el.checked);
-      renderSelection();
-    }
-  });
-  out.addEventListener('click', function(e) {
-    if (!tp) return;
-    var a = e.target.closest ? e.target.closest('a') : null;
-    if (!a) return;
-    if (a.classList.contains('tpick-all')) {
-      e.preventDefault();
-      setSelected(tp.variants.matches, true);
-      renderSelection();
-    } else if (a.classList.contains('tunsel')) {
-      e.preventDefault();
-      delete tp.selected[a.getAttribute('data-enc')];
-      renderSelection();
-      refreshPicker();
-    } else if (a.classList.contains('tshowall')) {
-      e.preventDefault();
-      var list = out.querySelector('.tall-list');
-      var open = list.style.display === 'none';
-      list.style.display = open ? '' : 'none';
-      a.textContent = open ? 'Hide the full list' : 'See all ' + tp.parsed.length + ' ticket types instead';
-      if (open) {
-        list.innerHTML = tp.parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(tickLine).join('');
-      }
-    }
-  });
+  function afterPickerRender() {}
 
   async function doFind(url) {
     url = url.trim();
