@@ -3238,6 +3238,26 @@ async function handleUnsubscribe(req: Request, env: Env): Promise<Response> {
   if (!subscriber) {
     return page("Not found", `<div class="card"><p>This unsubscribe link is invalid.</p></div>`);
   }
+  // Deleting the subscriber also deletes their paid Priority passes (ON DELETE CASCADE). Free users
+  // keep one-click unsubscribe; someone who paid gets one confirmation, with the way to a refund.
+  const paid = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM race_priority WHERE subscriber_id = ?1) + (SELECT COUNT(*) FROM ticket_priority WHERE subscriber_id = ?1)
+       + (SELECT COUNT(*) FROM season_pass WHERE subscriber_id = ?1 AND valid_until >= date('now')) AS n`
+  )
+    .bind(subscriber.id)
+    .first<any>();
+  if ((Number(paid?.n) || 0) > 0 && new URL(req.url).searchParams.get("confirm") !== "1") {
+    return page(
+      "Unsubscribe?",
+      `<div class="card">
+        <h2>Unsubscribe from everything?</h2>
+        <p>You have <b>Priority</b> on your alerts. Unsubscribing deletes your account, all your alerts and your Priority - it can't be undone. Nothing renews either way: your payment was one-off.</p>
+        <p>Want your money back instead? Write to <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> - see our <a href="/terms">refund policy</a>.</p>
+        <p><a href="/unsubscribe?token=${encodeURIComponent(token)}&confirm=1"><button type="button">Yes, unsubscribe and delete everything</button></a></p>
+        <p><a href="/my-alerts?token=${encodeURIComponent(token)}">No, keep my alerts</a></p>
+      </div>`
+    );
+  }
   await env.DB.prepare("DELETE FROM subscribers WHERE id = ?").bind(subscriber.id).run();
   return page(
     "Unsubscribed",
