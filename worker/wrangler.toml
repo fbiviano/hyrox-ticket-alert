@@ -20,6 +20,10 @@ WHATSAPP_PUBLIC_NUMBER = "15556594991"
 # The Meta app id (not a secret) - used to register the webhook through the API.
 WHATSAPP_APP_ID = "1854886458861233"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
+# Priority: free watchers get an alert this many minutes after Priority holders (only for alerts
+# where someone holds Priority). PRIORITY_OPEN_TO_ALL = "1" shows the offers to everyone; until
+# then only ADMIN_EMAIL sees them.
+PRIORITY_FREE_DELAY_MINUTES = "3"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
@@ -34,6 +38,8 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 #   ADMIN_WHATSAPP     - admin phone, digits only with country code (test alerts go here)
 #   WHATSAPP_VERIFY_TOKEN - handshake secret Meta uses when registering the webhook URL
 #   WHATSAPP_APP_SECRET   - the Meta app secret; verifies the signature on every webhook
+#   STRIPE_SECRET_KEY     - Stripe restricted key (live) for Priority checkout
+#   STRIPE_WEBHOOK_SECRET - signing secret of the /stripe/webhook endpoint in Stripe
 # Optional var WHATSAPP_OPEN_TO_ALL = "1" lets every verified subscriber link WhatsApp (default: admin only).
 
 [limits]
