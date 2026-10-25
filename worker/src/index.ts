@@ -5444,22 +5444,25 @@ export default {
         .run()
         .catch((e) => console.error("heartbeat failed:", e))
     );
-    if (event.cron === "*/2 * * * *") {
+    // The two daily jobs are matched by their exact expression; anything else is the frequent
+    // check, so the frequent trigger can be re-registered under a different expression (e.g.
+    // "1-59/2 * * * *") without touching this code.
+    if (event.cron === "0 8 * * *") {
+      ctx.waitUntil(checkInstagramAnnouncements(env));
+      ctx.waitUntil(sendVerificationNudges(env));
+      ctx.waitUntil(sendFinalVerificationReminders(env));
+      ctx.waitUntil(sendDailyIgPostReminder(env));
+    } else if (event.cron === "0 3 * * *") {
+      ctx.waitUntil(indexEvents(env).then(() => undefined));
+      ctx.waitUntil(env.DB.prepare("DELETE FROM email_log WHERE created_at < datetime('now', '-90 days')").run());
+      ctx.waitUntil(env.DB.prepare("DELETE FROM whatsapp_log WHERE created_at < datetime('now', '-90 days')").run());
+      ctx.waitUntil(env.DB.prepare("DELETE FROM telegram_log WHERE created_at < datetime('now', '-90 days')").run());
+    } else {
       ctx.waitUntil(checkCommunityTickets(env).then(() => sendDueFreeTicketAlerts(env)));
       ctx.waitUntil(checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)));
       ctx.waitUntil(refreshEventDirectorySaleStatus(env));
       ctx.waitUntil(checkAnnouncementReminders(env));
       ctx.waitUntil(sendManualVerificationNotices(env));
-    } else if (event.cron === "0 8 * * *") {
-      ctx.waitUntil(checkInstagramAnnouncements(env));
-      ctx.waitUntil(sendVerificationNudges(env));
-      ctx.waitUntil(sendFinalVerificationReminders(env));
-      ctx.waitUntil(sendDailyIgPostReminder(env));
-    } else {
-      ctx.waitUntil(indexEvents(env).then(() => undefined));
-      ctx.waitUntil(env.DB.prepare("DELETE FROM email_log WHERE created_at < datetime('now', '-90 days')").run());
-      ctx.waitUntil(env.DB.prepare("DELETE FROM whatsapp_log WHERE created_at < datetime('now', '-90 days')").run());
-      ctx.waitUntil(env.DB.prepare("DELETE FROM telegram_log WHERE created_at < datetime('now', '-90 days')").run());
     }
   },
 
