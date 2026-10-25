@@ -446,14 +446,17 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tfilter{width:100%;padding:8px 10px;font-size:0.95rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin:6px 0 4px}
-.tday{margin-top:10px}
-.tdayhead{margin:0 0 2px;font-size:0.8rem;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.04em}
+.tchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.tchip{background:#fff;color:#333;border:1px solid #ccc;border-radius:16px;padding:5px 12px;font-size:0.85rem;margin:0;cursor:pointer}
+.tchip:hover{background:#f3f3f3}
+.tchip.on{background:#111;color:#fff;border-color:#111}
+.tcat{margin-top:12px}
+.tcathead{margin:0 0 2px;font-size:0.85rem;font-weight:600;color:#333;border-bottom:1px solid #eee;padding-bottom:3px}
+.tcathead span{color:#999;font-weight:normal;font-size:0.8rem}
 .tline{display:block;margin:6px 0;font-size:0.9rem}
 .tline .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tline.sold .tstat{background:#fdecec;color:#b00}
 .tline.avail .tstat{background:#e6f4ea;color:#1e7e34}
-.textra{margin-top:10px}.textra summary{cursor:pointer;font-size:0.9rem;color:#555}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -651,43 +654,38 @@ const RESOLVE_SCRIPT = `<script>
     });
   }
 
-  // --- Ticket picker: big races list 100+ ticket types (category x day x charity x partner slot),
-  // so group them into a category-by-day grid and tuck the rarely-watched ones away. ---
+  // --- Ticket picker: big races list 100+ ticket types (category x day x charity x partner slot).
+  // Everything stays visible, grouped by category; two rows of buttons narrow it down by
+  // category and by day. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  var CATS = ['Men', 'Women', 'Pro', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
   function parseTicket(t) {
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
     var day = null;
     for (var d = 0; d < DAY_NAMES.length; d++) { if (last === DAY_NAMES[d].toLowerCase()) day = DAY_NAMES[d]; }
-    var upper = t.name.toUpperCase();
-    var charity = upper.indexOf('CHARITY') >= 0 || upper.indexOf('MACMILLAN') >= 0;
-    var partner = upper.indexOf('ATHLETE 2') >= 0 || upper.indexOf('TEAM MEMBER') >= 0;
-    var core = null;
-    for (var i = 0; i < segs.length; i++) {
-      var u = segs[i].toUpperCase();
-      if (u.indexOf('HYROX') >= 0 && u.indexOf('CHARITY') < 0 && u.indexOf('MACMILLAN') < 0) { core = u; break; }
-    }
-    var other = !core || upper.indexOf('SPECTATOR') >= 0 || upper.indexOf('PHOTO') >= 0 || upper.indexOf('CHILD') >= 0;
-    var fmt = null, gender = '';
-    if (core) {
-      if (core.indexOf('RELAY') >= 0) fmt = 'Relay';
-      else if (core.indexOf('DOUBLES') >= 0) fmt = 'Doubles';
-      else if (core.indexOf('ADAPTIVE') >= 0) fmt = 'Adaptive';
-      else if (core.indexOf('PRO') >= 0) fmt = 'Pro';
-      else fmt = 'Single';
-      if (core.indexOf('MIXED') >= 0) gender = 'Mixed';
-      else if (core.indexOf('WOMEN') >= 0) gender = 'Women';
-      else if (core.indexOf('MEN') >= 0) gender = 'Men';
-    }
-    var row = fmt === 'Single' ? (gender || 'Single') : (fmt + (gender ? ' ' + gender : ''));
-    return { t: t, day: day, row: row, fmt: fmt, gender: gender, sold: t.status === 'sold_out', main: !!core && !charity && !partner && !other };
+    var u = t.name.toUpperCase();
+    var cat;
+    if (u.indexOf('SPECTATOR') >= 0 || u.indexOf('PHOTO') >= 0 || u.indexOf('CHILD') >= 0 || u.indexOf('HYROX') < 0) cat = 'Spectators & extras';
+    else if (u.indexOf('CHARITY') >= 0 || u.indexOf('MACMILLAN') >= 0) cat = 'Charity';
+    else if (u.indexOf('RELAY') >= 0) cat = 'Relay';
+    else if (u.indexOf('DOUBLES') >= 0) cat = 'Doubles';
+    else if (u.indexOf('ADAPTIVE') >= 0) cat = 'Adaptive';
+    else if (/\\bPRO\\b/.test(u)) cat = 'Pro';
+    else if (u.indexOf('WOMEN') >= 0) cat = 'Women';
+    else if (u.indexOf('MEN') >= 0) cat = 'Men';
+    else cat = 'Spectators & extras';
+    return { t: t, day: day, cat: cat, sold: t.status === 'sold_out' };
   }
   function lineHtml(p) {
-    return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+    return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '" data-cat="' + esc(p.cat) + '" data-day="' + esc(p.day || '') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+  }
+  function chip(kind, value, label, active) {
+    return '<button type="button" class="tchip' + (active ? ' on' : '') + '" data-kind="' + kind + '" data-value="' + esc(value) + '">' + esc(label) + '</button>';
   }
   function renderTicketPicker(data) {
     if (!document.getElementById('ticketGridOn')) {
-      // Plain list (production until the grid is confirmed).
+      // Plain list (production until the new picker is confirmed).
       var plain = '<p><b>' + esc(data.event_name) + '</b></p>';
       for (var k = 0; k < data.tickets.length; k++) {
         var tk = data.tickets[k];
@@ -696,41 +694,46 @@ const RESOLVE_SCRIPT = `<script>
       return plain;
     }
     var parsed = data.tickets.map(parseTicket);
-    var main = parsed.filter(function(p) { return p.main; });
-    var extra = parsed.filter(function(p) { return !p.main; });
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-    var cols = [];
-    main.forEach(function(p) { if (p.day && cols.indexOf(p.day) < 0) cols.push(p.day); });
-    cols.sort(function(a, b) { return DAY_NAMES.indexOf(a) - DAY_NAMES.indexOf(b); });
-    if (main.some(function(p) { return !p.day; })) cols.push(null);
-    if (main.length >= 8) {
-      html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Available ones are on sale right now.</p>';
-      html += '<input type="text" class="tfilter" placeholder="Filter, e.g. women doubles friday" autocomplete="off">';
-      cols.forEach(function(c) {
-        var dayRows = main.filter(function(p) { return p.day === c; }).sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); });
-        if (!dayRows.length) return;
-        html += '<div class="tday"><p class="tdayhead">' + (c ? esc(c) : 'No specific day') + '</p>' + dayRows.map(lineHtml).join('') + '</div>';
-      });
-    } else {
-      main.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).forEach(function(p) { html += lineHtml(p); });
+    // A partner slot ("... ATHLETE 2 | Friday") sorts right after its main entry, not before it.
+    var nameKey = function(p) { return p.t.name.replace(' ATHLETE 2', '') + (p.t.name.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
+    var bySoldThenDay = function(a, b) {
+      return (a.sold ? 0 : 1) - (b.sold ? 0 : 1) || DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day) || (nameKey(a) < nameKey(b) ? -1 : 1);
+    };
+    if (parsed.length < 8) {
+      return html + parsed.slice().sort(bySoldThenDay).map(lineHtml).join('');
     }
-    if (extra.length) {
-      html += '<details class="textra"><summary>Show charity, partner-slot, spectator &amp; other tickets (' + extra.length + ')</summary>' + extra.map(lineHtml).join('') + '</details>';
+    var cats = CATS.filter(function(c) { return parsed.some(function(p) { return p.cat === c; }); });
+    var days = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
+    html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Use the buttons to narrow the list.</p>';
+    html += '<div class="tchips">' + chip('cat', '', 'All (' + parsed.length + ')', true) + cats.map(function(c) {
+      return chip('cat', c, c + ' (' + parsed.filter(function(p) { return p.cat === c; }).length + ')', false);
+    }).join('') + '</div>';
+    if (days.length >= 2) {
+      html += '<div class="tchips">' + chip('day', '', 'All days', true) + days.map(function(d) { return chip('day', d, d.slice(0, 3), false); }).join('') + '</div>';
     }
+    cats.forEach(function(c) {
+      var rows = parsed.filter(function(p) { return p.cat === c; }).sort(bySoldThenDay);
+      html += '<div class="tcat" data-cat="' + esc(c) + '"><p class="tcathead">' + esc(c) + ' <span>' + rows.length + '</span></p>' + rows.map(lineHtml).join('') + '</div>';
+    });
     return html;
   }
-  out.addEventListener('input', function(e) {
-    if (!e.target.classList || !e.target.classList.contains('tfilter')) return;
-    var words = e.target.value.toLowerCase().split(/\s+/).filter(Boolean);
-    out.querySelectorAll('.tday').forEach(function(day) {
+  out.addEventListener('click', function(e) {
+    var b = e.target.closest ? e.target.closest('.tchip') : null;
+    if (!b) return;
+    e.preventDefault();
+    b.parentNode.querySelectorAll('.tchip').forEach(function(x) { x.classList.toggle('on', x === b); });
+    var cat = (out.querySelector('.tchip.on[data-kind="cat"]') || {}).getAttribute ? out.querySelector('.tchip.on[data-kind="cat"]').getAttribute('data-value') : '';
+    var dayChip = out.querySelector('.tchip.on[data-kind="day"]');
+    var day = dayChip ? dayChip.getAttribute('data-value') : '';
+    out.querySelectorAll('.tcat').forEach(function(section) {
       var shown = 0;
-      day.querySelectorAll('.tline').forEach(function(line) {
-        var text = (line.textContent + ' ' + day.querySelector('.tdayhead').textContent).toLowerCase();
-        var ok = words.every(function(w) { return text.indexOf(w) >= 0; });
+      section.querySelectorAll('.tline').forEach(function(line) {
+        var ok = (!cat || line.getAttribute('data-cat') === cat) && (!day || line.getAttribute('data-day') === day);
         line.style.display = ok ? '' : 'none';
         if (ok) shown++;
       });
-      day.style.display = shown ? '' : 'none';
+      section.style.display = shown ? '' : 'none';
     });
   });
 
