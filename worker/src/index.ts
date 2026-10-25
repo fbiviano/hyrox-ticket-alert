@@ -2919,13 +2919,35 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
   // Looked up by the original marketing URL (event_directory's key), not the
   // vivenu shop URL resolveEvent() finds - carried along so a subscriber's
   // watches can later tell whether their event's date has passed.
-  const known = await env.DB.prepare("SELECT title, event_date, on_sale FROM event_directory WHERE url = ?").bind(url).first<any>();
+  const known = await env.DB.prepare("SELECT title, event_date, on_sale, shop_url FROM event_directory WHERE url = ?").bind(url).first<any>();
 
-  let found;
-  try {
-    found = await resolveEvent(url);
-  } catch (e) {
-    if (!(e instanceof FetchBlocked)) throw e;
+  let found: Awaited<ReturnType<typeof resolveEvent>> = null;
+  let blocked: unknown = null;
+  // Fast path: we already know this race's ticket shop. Country shops (gb.hyrox.com, ...) don't
+  // rate-limit us the way hyrox.com does, so most lookups never touch hyrox.com at all.
+  if (known?.shop_url) {
+    try {
+      found = await resolveEvent(known.shop_url);
+    } catch (e) {
+      if (!(e instanceof FetchBlocked)) throw e;
+    }
+  }
+  // hyrox.com refuses many requests from Cloudflare but usually answers a moment later.
+  for (let attempt = 0; !found && attempt < 3; attempt++) {
+    if (attempt) await pause(attempt * 1500);
+    try {
+      found = await resolveEvent(url);
+      blocked = null;
+      break;
+    } catch (e) {
+      if (!(e instanceof FetchBlocked)) throw e;
+      blocked = e;
+    }
+  }
+  if (found && known && found.shopUrl !== url) {
+    await env.DB.prepare("UPDATE event_directory SET shop_url = ? WHERE url = ?").bind(found.shopUrl, url).run();
+  }
+  if (blocked) {
     // hyrox.com is rate-limiting us. A race our directory knows isn't on sale yet can still be
     // watched (that needs no live data) - otherwise a busy minute would block the sign-up entirely.
     if (known && !known.on_sale) {
@@ -3731,6 +3753,9 @@ async function checkSaleWatches(env: Env): Promise<void> {
     // Now we know the shop's own event name (what ticket watches are keyed by), link any
     // "This race" Priority to it so it also covers this race's sold-out tickets.
     await env.DB.prepare("UPDATE race_priority SET event_name = ? WHERE event_url = ? AND event_name IS NULL").bind(found.event.name, row.event_url).run();
+    if (found.shopUrl !== row.event_url) {
+      await env.DB.prepare("UPDATE event_directory SET shop_url = ? WHERE url = ? AND shop_url IS NULL").bind(found.shopUrl, row.event_url).run();
+    }
 
     const { results: watchers } = await env.DB.prepare(
       `SELECT s.email, s.unsubscribe_token, s.whatsapp_phone, s.telegram_chat_id,
@@ -3842,9 +3867,11 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
   const today = todayIso();
   const nowIso = new Date().toISOString();
   const { results } = await env.DB.prepare(
-    `SELECT url, presale_live_at, presale_is_live FROM event_directory
+    `SELECT url, shop_url, presale_live_at, presale_is_live FROM event_directory
      WHERE (event_date IS NULL OR event_date >= ?)
-     ORDER BY on_sale ASC, (presale_live_at IS NOT NULL AND presale_live_at <= ?) DESC,
+     -- On-sale races whose shop we don't know yet come first: once known, ticket lookups for
+     -- them skip hyrox.com entirely (see handleResolve).
+     ORDER BY (on_sale = 1 AND shop_url IS NULL) DESC, on_sale ASC, (presale_live_at IS NOT NULL AND presale_live_at <= ?) DESC,
        event_date IS NULL, event_date ASC, last_sale_check IS NOT NULL, last_sale_check ASC
      LIMIT ?`
   )
@@ -3864,7 +3891,8 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // on-sale race is never flipped back to "not on sale" just because hyrox.com was busy.
     let found;
     try {
-      found = await resolveEvent(row.url);
+      if (row.shop_url) found = await resolveEvent(row.shop_url);
+      if (!found) found = await resolveEvent(row.url);
       if (!found) found = await resolveEvent(row.url);
     } catch (e) {
       if (!(e instanceof FetchBlocked)) throw e;
@@ -3897,6 +3925,9 @@ async function refreshEventDirectorySaleStatus(env: Env): Promise<void> {
     // as *local* time, not UTC, silently shifting the displayed time by
     // the viewer's own timezone offset.
     if (found) {
+      if (found.shopUrl !== row.url && found.shopUrl !== row.shop_url) {
+        await env.DB.prepare("UPDATE event_directory SET shop_url = ? WHERE url = ?").bind(found.shopUrl, row.url).run();
+      }
       // presale_timezone is deliberately kept (not nulled like the other
       // presale_* fields) - it's the only record of the event's own local
       // zone, needed to show "just went on sale" at a sensible local time

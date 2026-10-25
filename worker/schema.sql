@@ -458,3 +458,8 @@ CREATE TABLE IF NOT EXISTS kv_meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Ticket shop of each directory race (e.g. https://gb.hyrox.com/event/...), filled in once found.
+-- Lookups go there directly: hyrox.com rate-limits Cloudflare, the country shops don't.
+-- (Column added to event_directory by migration on 2026-10-26.)
+-- ALTER TABLE event_directory ADD COLUMN shop_url TEXT;
