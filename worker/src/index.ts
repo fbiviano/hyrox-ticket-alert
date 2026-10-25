@@ -446,17 +446,15 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tcat{margin-top:14px}
-.tcathead{margin:0 0 4px;font-size:0.9rem;font-weight:700;color:#222;border-bottom:1px solid #e5e5e5;padding-bottom:3px}
-.trow{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:5px 0;border-bottom:1px solid #f4f4f4}
-.tname{flex:1 1 220px;font-size:0.9rem}
-.tdays{display:flex;flex-wrap:wrap;gap:4px}
-.tdaybox{display:inline-flex;align-items:center;justify-content:center;gap:3px;min-width:52px;box-sizing:border-box;margin:0;padding:2px 7px;border-radius:10px;font-size:0.78rem;cursor:pointer;white-space:nowrap}
-.tdaybox input{margin:0}
-.tdaybox.sold{background:#fdecec;color:#b00}
-.tdaybox.avail{background:#e6f4ea;color:#1e7e34}
-.tdaybox.legend{cursor:default;padding:0 6px;min-width:0}
-.tdaybox.empty{background:transparent;cursor:default}
+.tdaysec{margin-top:12px;border:1px solid #e5e5e5;border-radius:8px;padding:6px 12px}
+.tdaysec>summary{cursor:pointer;font-weight:700;font-size:1rem;color:#111;padding:4px 0}
+.tdaysec>summary span,.tcatsec>summary span{color:#999;font-weight:normal;font-size:0.82rem;margin-left:4px}
+.tcatsec{margin:4px 0 6px 6px}
+.tcatsec>summary{cursor:pointer;font-weight:600;font-size:0.9rem;color:#333;padding:3px 0}
+.tline{display:block;margin:5px 0 5px 14px;font-size:0.9rem}
+.tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:2px}
+.tstat.sold{background:#fdecec;color:#b00}
+.tstat.avail{background:#e6f4ea;color:#1e7e34}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -655,10 +653,11 @@ const RESOLVE_SCRIPT = `<script>
   }
 
   // --- Ticket picker: big races list 100+ ticket types because every ticket exists once per day.
-  // Everything is shown immediately, grouped by category; each ticket type is ONE line with its
-  // days as small tick-boxes (red = sold out, green = available). ---
+  // Top level = race days; inside each day the tickets are grouped by category. Small categories
+  // are open straight away, big ones (e.g. Charity) are closed but visible with their count. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   var CATS = ['Men', 'Women', 'Pro', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
+  var OPEN_UP_TO = 6; // categories with more entries than this start closed
   function parseTicket(t) {
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
@@ -678,8 +677,8 @@ const RESOLVE_SCRIPT = `<script>
     else cat = 'Spectators & extras';
     return { t: t, day: day, base: base, cat: cat, sold: t.status === 'sold_out' };
   }
-  function dayBox(p) {
-    return '<label class="tdaybox ' + (p.sold ? 'sold' : 'avail') + '" title="' + esc(p.t.name) + (p.sold ? ' - sold out' : ' - available') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + (p.day ? p.day.slice(0, 3) : 'Any') + '</label>';
+  function ticketLine(p) {
+    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
   }
   function renderTicketPicker(data) {
     if (!document.getElementById('ticketGridOn')) {
@@ -692,29 +691,27 @@ const RESOLVE_SCRIPT = `<script>
       return plain;
     }
     var parsed = data.tickets.map(parseTicket);
-    // Same day columns on every line, so Friday is always in the same place.
-    var raceDays = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-    html += '<p class="hint">Tick the days you want to watch. <span class="tdaybox sold legend">Red</span> = sold out, we alert you the moment a place comes back. <span class="tdaybox avail legend">Green</span> = on sale now.</p>';
     // Partner slots ("... ATHLETE 2") sort right after their main ticket.
-    var rowKey = function(base) { return base.replace(' ATHLETE 2', '') + (base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
-    CATS.forEach(function(c) {
-      var inCat = parsed.filter(function(p) { return p.cat === c; });
-      if (!inCat.length) return;
-      var bases = [];
-      inCat.forEach(function(p) { if (bases.indexOf(p.base) < 0) bases.push(p.base); });
-      bases.sort(function(a, b) { return rowKey(a) < rowKey(b) ? -1 : 1; });
-      html += '<div class="tcat"><p class="tcathead">' + esc(c) + '</p>';
-      bases.forEach(function(base) {
-        var days = inCat.filter(function(p) { return p.base === base; }).sort(function(a, b) { return DAY_NAMES.indexOf(a.day) - DAY_NAMES.indexOf(b.day); });
-        var cells = raceDays.map(function(d) {
-          var p = days.filter(function(x) { return x.day === d; })[0];
-          return p ? dayBox(p) : '<span class="tdaybox empty"></span>';
-        });
-        days.filter(function(x) { return !x.day; }).forEach(function(p) { cells.push(dayBox(p)); });
-        html += '<div class="trow"><span class="tname">' + esc(base) + '</span><span class="tdays">' + cells.join('') + '</span></div>';
+    var nameKey = function(p) { return p.base.replace(' ATHLETE 2', '') + (p.base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
+    var byName = function(a, b) { return nameKey(a) < nameKey(b) ? -1 : 1; };
+    if (parsed.length < 8) {
+      return html + parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(function(p) {
+        return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+      }).join('');
+    }
+    html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment a place comes back. Click a heading to open or close it.</p>';
+    var sections = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
+    if (parsed.some(function(p) { return !p.day; })) sections.push(null);
+    sections.forEach(function(day) {
+      var inDay = parsed.filter(function(p) { return p.day === day; });
+      html += '<details class="tdaysec" open><summary>' + (day ? esc(day) : 'Other tickets') + ' <span>' + inDay.length + '</span></summary>';
+      CATS.forEach(function(c) {
+        var rows = inDay.filter(function(p) { return p.cat === c; }).sort(byName);
+        if (!rows.length) return;
+        html += '<details class="tcatsec"' + (rows.length <= OPEN_UP_TO ? ' open' : '') + '><summary>' + esc(c) + ' <span>' + rows.length + '</span></summary>' + rows.map(ticketLine).join('') + '</details>';
       });
-      html += '</div>';
+      html += '</details>';
     });
     return html;
   }
