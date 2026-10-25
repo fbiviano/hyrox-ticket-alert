@@ -209,6 +209,16 @@ async function sendDailyIgPostReminder(env: Env): Promise<void> {
  * owner's own watched tickets, alongside their regular alert email.
  * Failures are logged, never thrown - a missed Telegram ping shouldn't
  * fail the email send it's mirroring. */
+/** A heads-up to the admin's Telegram about something a visitor did (sign-up, confirmation,
+ * unsubscribe, ...). Best effort: never fails or slows the visitor's request. */
+async function pingAdmin(env: Env, text: string): Promise<void> {
+  try {
+    await sendTelegram(env, text);
+  } catch (e) {
+    console.error("Failed to ping admin on Telegram:", e);
+  }
+}
+
 async function notifyAdminTelegram(env: Env, recipientEmail: string, text: string): Promise<void> {
   if (!env.ADMIN_EMAIL || recipientEmail.toLowerCase() !== env.ADMIN_EMAIL.toLowerCase()) return;
   try {
@@ -1903,7 +1913,7 @@ async function saveWaitlistPhone(env: Env, subscriberId: number, digits: string)
 async function handleWhatsAppWaitlist(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const token = String(form.get("token") || "");
-  const s = await env.DB.prepare("SELECT id, verified FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
+  const s = await env.DB.prepare("SELECT id, email, verified FROM subscribers WHERE unsubscribe_token = ?").bind(token).first<any>();
   if (!s || !s.verified) return page("Not available", `<div class="card"><p>This link is invalid. <a href="/my-alerts">Back to my alerts</a></p></div>`);
   if (form.get("action") === "remove") {
     await env.DB.prepare("UPDATE subscribers SET whatsapp_waitlist_phone = NULL, whatsapp_waitlist_at = NULL, whatsapp_marketing_ok = 0 WHERE id = ?").bind(s.id).run();
@@ -1920,6 +1930,7 @@ async function handleWhatsAppWaitlist(req: Request, env: Env): Promise<Response>
     )
       .bind(digits, form.get("marketing") === "1" ? 1 : 0, s.id)
       .run();
+    await pingAdmin(env, `📱 WhatsApp number left: ${s.email} +${digits}${form.get("marketing") === "1" ? " (news OK)" : ""}`);
   }
   return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
 }
@@ -3114,6 +3125,14 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
       .bind(t.event_id, t.event_name, t.ticket_name, t.shop_url, t.status || "sold_out", t.event_date || null)
       .run();
   }
+  {
+    const picked = ticketValues.map(decodeTicket).filter(Boolean) as any[];
+    const names = picked.map((t) => t.ticket_name).join(", ");
+    await pingAdmin(
+      env,
+      `🎫 Ticket watch: ${subscriber.email}${needsVerification ? " (new - not yet confirmed)" : ""}\n${picked[0]?.event_name || "?"}: ${names}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
+    );
+  }
 
   // Chose "Watch first" (this race) or the season - the free watch is saved above either way.
   const first = ticketValues.map(decodeTicket).find(Boolean);
@@ -3171,6 +3190,10 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
     .bind(subscriber.id, eventUrl)
     .run();
+  await pingAdmin(
+    env,
+    `🏁 Race watch: ${subscriber.email}${needsVerification ? " (new - not yet confirmed)" : ""}\n${eventTitle}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
+  );
 
   // Chose "Notify me first" (this race) or the season - the free watch is saved above either way.
   const choice = String(form.get("priority") || "");
@@ -3223,6 +3246,7 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
     return page("Invalid or expired link", `<div class="card"><p>This confirmation link is invalid or already used.</p></div>`);
   }
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
+  await pingAdmin(env, `✅ Email confirmed: ${subscriber.email}`);
   const offers = priorityOpen(env, { ...subscriber, verified: 1 }) ? await priorityCandidates(env, subscriber.id) : [];
   return page(
     "Confirmed",
@@ -3259,6 +3283,7 @@ async function handleUnsubscribe(req: Request, env: Env): Promise<Response> {
     );
   }
   await env.DB.prepare("DELETE FROM subscribers WHERE id = ?").bind(subscriber.id).run();
+  await pingAdmin(env, `👋 Unsubscribed: ${subscriber.email}${(Number(paid?.n) || 0) > 0 ? " (had Priority - may ask for a refund)" : ""}`);
   return page(
     "Unsubscribed",
     `<div class="card"><p>You've been unsubscribed from all alerts. Sorry to see you go.</p></div>`,
@@ -4718,6 +4743,7 @@ async function handleFeedback(req: Request, env: Env): Promise<Response> {
   await env.DB.prepare("INSERT INTO feedback (message, email) VALUES (?, ?)")
     .bind(message, email || null)
     .run();
+  await pingAdmin(env, `💬 Feedback${email ? ` from ${email}` : ""}:\n${message.slice(0, 500)}`);
 
   if (env.ADMIN_EMAIL) {
     try {
