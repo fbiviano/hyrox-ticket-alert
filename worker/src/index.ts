@@ -446,17 +446,9 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tgrid-wrap{overflow-x:auto;margin:8px 0}
-.tgrid{border-collapse:collapse;font-size:0.85rem;width:100%}
-.tgrid th,.tgrid td{padding:6px 6px;border-bottom:1px solid #eee;text-align:center;vertical-align:middle}
-.tgrid thead th{color:#666;font-weight:600}
-.tgrid tbody th{text-align:left;white-space:nowrap;font-weight:600;line-height:1.3}
-.tcell{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:10px;font-size:0.78rem;white-space:nowrap;cursor:pointer;margin:2px}
-.tcell.sold{background:#fdecec;color:#b00}
-.tcell.avail{background:#e6f4ea;color:#1e7e34}
-.tcell input{margin:0}
-.tnone{color:#ccc}
-.tgrid .tall{font-size:0.72rem;color:#666;font-weight:normal}
+.tfilter{width:100%;padding:8px 10px;font-size:0.95rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin:6px 0 4px}
+.tday{margin-top:10px}
+.tdayhead{margin:0 0 2px;font-size:0.8rem;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.04em}
 .tline{display:block;margin:6px 0;font-size:0.9rem}
 .tline .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tline.sold .tstat{background:#fdecec;color:#b00}
@@ -662,8 +654,6 @@ const RESOLVE_SCRIPT = `<script>
   // --- Ticket picker: big races list 100+ ticket types (category x day x charity x partner slot),
   // so group them into a category-by-day grid and tuck the rarely-watched ones away. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-  var FMT_ORDER = ['Single', 'Pro', 'Doubles', 'Relay', 'Adaptive'];
-  var GEN_ORDER = ['Men', 'Women', 'Mixed', ''];
   function parseTicket(t) {
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
@@ -692,9 +682,6 @@ const RESOLVE_SCRIPT = `<script>
     var row = fmt === 'Single' ? (gender || 'Single') : (fmt + (gender ? ' ' + gender : ''));
     return { t: t, day: day, row: row, fmt: fmt, gender: gender, sold: t.status === 'sold_out', main: !!core && !charity && !partner && !other };
   }
-  function cellHtml(p) {
-    return '<label class="tcell ' + (p.sold ? 'sold' : 'avail') + '" title="' + esc(p.t.name) + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + (p.sold ? 'Sold out' : 'Available') + '</label>';
-  }
   function lineHtml(p) {
     return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
   }
@@ -716,27 +703,14 @@ const RESOLVE_SCRIPT = `<script>
     main.forEach(function(p) { if (p.day && cols.indexOf(p.day) < 0) cols.push(p.day); });
     cols.sort(function(a, b) { return DAY_NAMES.indexOf(a) - DAY_NAMES.indexOf(b); });
     if (main.some(function(p) { return !p.day; })) cols.push(null);
-    var rowMeta = {};
-    main.forEach(function(p) { if (!rowMeta[p.row]) rowMeta[p.row] = p; });
-    var rows = Object.keys(rowMeta).sort(function(a, b) {
-      var A = rowMeta[a], B = rowMeta[b];
-      return (FMT_ORDER.indexOf(A.fmt) - FMT_ORDER.indexOf(B.fmt)) || (GEN_ORDER.indexOf(A.gender) - GEN_ORDER.indexOf(B.gender));
-    });
-    if (cols.length >= 2 && main.length >= 8) {
-      html += '<p class="hint">Tick what you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Available ones are on sale right now.</p>';
-      html += '<div class="tgrid-wrap"><table class="tgrid"><thead><tr><th></th>';
-      cols.forEach(function(c) { html += '<th>' + (c ? c.slice(0, 3) : 'No date') + '</th>'; });
-      html += '</tr></thead><tbody>';
-      rows.forEach(function(row) {
-        var anySold = main.some(function(p) { return p.row === row && p.sold; });
-        html += '<tr><th>' + esc(row) + (anySold ? '<br><a href="#" class="tall">all sold out</a>' : '') + '</th>';
-        cols.forEach(function(c) {
-          var cell = main.filter(function(p) { return p.row === row && p.day === c; });
-          html += cell.length ? '<td>' + cell.map(cellHtml).join('') + '</td>' : '<td class="tnone">&ndash;</td>';
-        });
-        html += '</tr>';
+    if (main.length >= 8) {
+      html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Available ones are on sale right now.</p>';
+      html += '<input type="text" class="tfilter" placeholder="Filter, e.g. women doubles friday" autocomplete="off">';
+      cols.forEach(function(c) {
+        var dayRows = main.filter(function(p) { return p.day === c; }).sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); });
+        if (!dayRows.length) return;
+        html += '<div class="tday"><p class="tdayhead">' + (c ? esc(c) : 'No specific day') + '</p>' + dayRows.map(lineHtml).join('') + '</div>';
       });
-      html += '</tbody></table></div>';
     } else {
       main.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).forEach(function(p) { html += lineHtml(p); });
     }
@@ -745,12 +719,19 @@ const RESOLVE_SCRIPT = `<script>
     }
     return html;
   }
-  out.addEventListener('click', function(e) {
-    var a = e.target.closest ? e.target.closest('.tall') : null;
-    if (!a) return;
-    e.preventDefault();
-    var tr = a.closest('tr');
-    if (tr) tr.querySelectorAll('.tcell.sold input').forEach(function(cb) { cb.checked = true; });
+  out.addEventListener('input', function(e) {
+    if (!e.target.classList || !e.target.classList.contains('tfilter')) return;
+    var words = e.target.value.toLowerCase().split(/\s+/).filter(Boolean);
+    out.querySelectorAll('.tday').forEach(function(day) {
+      var shown = 0;
+      day.querySelectorAll('.tline').forEach(function(line) {
+        var text = (line.textContent + ' ' + day.querySelector('.tdayhead').textContent).toLowerCase();
+        var ok = words.every(function(w) { return text.indexOf(w) >= 0; });
+        line.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      day.style.display = shown ? '' : 'none';
+    });
   });
 
   async function doFind(url) {
