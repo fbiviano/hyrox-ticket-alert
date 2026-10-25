@@ -446,15 +446,14 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tdaysec{margin-top:12px;border:1px solid #e5e5e5;border-radius:8px;padding:6px 12px}
-.tdaysec>summary{cursor:pointer;font-weight:700;font-size:1rem;color:#111;padding:4px 0}
-.tdaysec>summary span,.tcatsec>summary span{color:#999;font-weight:normal;font-size:0.82rem;margin-left:4px}
-.tcatsec{margin:4px 0 6px 6px}
-.tcatsec>summary{cursor:pointer;font-weight:600;font-size:0.9rem;color:#333;padding:3px 0}
-.tline{display:block;margin:5px 0 5px 14px;font-size:0.9rem}
-.tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:2px}
-.tstat.sold{background:#fdecec;color:#b00}
-.tstat.avail{background:#e6f4ea;color:#1e7e34}
+.tdaysec{margin-top:16px}
+.tdayhead{margin:0 0 2px;font-weight:700;font-size:1rem;color:#111}
+.tcatsec{margin:6px 0 0}
+.tcathead{margin:6px 0 2px;font-size:0.78rem;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.04em}
+.tcathead a{text-transform:none;letter-spacing:0;font-weight:normal;margin-left:6px;color:#111}
+.tline{display:block;margin:4px 0;font-size:0.92rem}
+.tstat{font-size:0.8rem;color:#999;margin-left:4px}
+.tstat.avail{color:#1e7e34}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -678,7 +677,7 @@ const RESOLVE_SCRIPT = `<script>
     return { t: t, day: day, base: base, cat: cat, sold: t.status === 'sold_out' };
   }
   function ticketLine(p) {
-    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
+    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + esc(p.base) + ' <span class="tstat' + (p.sold ? '' : ' avail') + '">' + (p.sold ? 'sold out' : 'available') + '</span></label>';
   }
   function renderTicketPicker(data) {
     if (!document.getElementById('ticketGridOn')) {
@@ -700,22 +699,33 @@ const RESOLVE_SCRIPT = `<script>
         return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
       }).join('');
     }
-    html += '<p class="hint">Tick the tickets you want to watch. <span class="tsold">Sold out</span> = we alert you the moment a place comes back. Click a heading to open or close it.</p>';
+    html += '<p class="hint">Tick the tickets you want to watch. For sold-out tickets we alert you the moment a place comes back.</p>';
     var sections = DAY_NAMES.filter(function(d) { return parsed.some(function(p) { return p.day === d; }); });
     if (parsed.some(function(p) { return !p.day; })) sections.push(null);
     sections.forEach(function(day) {
       var inDay = parsed.filter(function(p) { return p.day === day; });
-      html += '<details class="tdaysec" open><summary>' + (day ? esc(day) : 'Other tickets') + ' <span>' + inDay.length + '</span></summary>';
+      html += '<div class="tdaysec"><p class="tdayhead">' + (day ? esc(day) : 'Other tickets') + '</p>';
       CATS.forEach(function(c) {
         var rows = inDay.filter(function(p) { return p.cat === c; }).sort(byName);
         if (!rows.length) return;
-        html += '<details class="tcatsec"' + (rows.length <= OPEN_UP_TO ? ' open' : '') + '><summary>' + esc(c) + ' <span>' + rows.length + '</span></summary>' + rows.map(ticketLine).join('') + '</details>';
+        var big = rows.length > OPEN_UP_TO;
+        html += '<div class="tcatsec"><p class="tcathead">' + esc(c) + (big ? ' (' + rows.length + ') <a href="#" class="ttoggle">Show</a>' : '') + '</p>' +
+          '<div class="tcatbody"' + (big ? ' style="display:none"' : '') + '>' + rows.map(ticketLine).join('') + '</div></div>';
       });
-      html += '</details>';
+      html += '</div>';
     });
     return html;
   }
   function afterPickerRender() {}
+  out.addEventListener('click', function(e) {
+    var a = e.target.closest ? e.target.closest('.ttoggle') : null;
+    if (!a) return;
+    e.preventDefault();
+    var body = a.closest('.tcatsec').querySelector('.tcatbody');
+    var open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    a.textContent = open ? 'Hide' : 'Show';
+  });
 
   async function doFind(url) {
     url = url.trim();
