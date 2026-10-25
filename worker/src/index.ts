@@ -27,6 +27,7 @@ export interface Env {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_CHAT_ID?: string;
   EMAIL_DRY_RUN?: string; // "1" on staging: emails are logged, never sent
+  SCHEDULER: DurableObjectNamespace; // CheckScheduler: alarm-driven fallback for the frequent checks
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
   TELEGRAM_WEBHOOK_SECRET?: string; // header secret Telegram echoes on every webhook call
   STRIPE_SECRET_KEY?: string; // Stripe secret key (sk_test_... in staging); Priority is off without it
@@ -443,6 +444,23 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
+.tgrid-wrap{overflow-x:auto;margin:8px 0}
+.tgrid{border-collapse:collapse;font-size:0.85rem;width:100%}
+.tgrid th,.tgrid td{padding:6px 6px;border-bottom:1px solid #eee;text-align:center;vertical-align:middle}
+.tgrid thead th{color:#666;font-weight:600}
+.tgrid tbody th{text-align:left;white-space:nowrap;font-weight:600;line-height:1.3}
+.tcell{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:10px;font-size:0.78rem;white-space:nowrap;cursor:pointer;margin:2px}
+.tcell.sold{background:#fdecec;color:#b00}
+.tcell.avail{background:#e6f4ea;color:#1e7e34}
+.tcell input{margin:0}
+.tnone{color:#ccc}
+.tgrid .tall{font-size:0.72rem;color:#666;font-weight:normal}
+.tline{display:block;margin:6px 0;font-size:0.9rem}
+.tline .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
+.tline.sold .tstat{background:#fdecec;color:#b00}
+.tline.avail .tstat{background:#e6f4ea;color:#1e7e34}
+.textra{margin-top:10px}.textra summary{cursor:pointer;font-size:0.9rem;color:#555}
+.tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
 .urlWrap{position:relative;flex:1}
@@ -639,6 +657,91 @@ const RESOLVE_SCRIPT = `<script>
     });
   }
 
+  // --- Ticket picker: big races list 100+ ticket types (category x day x charity x partner slot),
+  // so group them into a category-by-day grid and tuck the rarely-watched ones away. ---
+  var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  var FMT_ORDER = ['Single', 'Pro', 'Doubles', 'Relay', 'Adaptive'];
+  var GEN_ORDER = ['Men', 'Women', 'Mixed', ''];
+  function parseTicket(t) {
+    var segs = t.name.split('|').map(function(x) { return x.trim(); });
+    var last = segs[segs.length - 1].toLowerCase();
+    var day = null;
+    for (var d = 0; d < DAY_NAMES.length; d++) { if (last === DAY_NAMES[d].toLowerCase()) day = DAY_NAMES[d]; }
+    var upper = t.name.toUpperCase();
+    var charity = upper.indexOf('CHARITY') >= 0 || upper.indexOf('MACMILLAN') >= 0;
+    var partner = upper.indexOf('ATHLETE 2') >= 0 || upper.indexOf('TEAM MEMBER') >= 0;
+    var core = null;
+    for (var i = 0; i < segs.length; i++) {
+      var u = segs[i].toUpperCase();
+      if (u.indexOf('HYROX') >= 0 && u.indexOf('CHARITY') < 0 && u.indexOf('MACMILLAN') < 0) { core = u; break; }
+    }
+    var other = !core || upper.indexOf('SPECTATOR') >= 0 || upper.indexOf('PHOTO') >= 0 || upper.indexOf('CHILD') >= 0;
+    var fmt = null, gender = '';
+    if (core) {
+      if (core.indexOf('RELAY') >= 0) fmt = 'Relay';
+      else if (core.indexOf('DOUBLES') >= 0) fmt = 'Doubles';
+      else if (core.indexOf('ADAPTIVE') >= 0) fmt = 'Adaptive';
+      else if (core.indexOf('PRO') >= 0) fmt = 'Pro';
+      else fmt = 'Single';
+      if (core.indexOf('MIXED') >= 0) gender = 'Mixed';
+      else if (core.indexOf('WOMEN') >= 0) gender = 'Women';
+      else if (core.indexOf('MEN') >= 0) gender = 'Men';
+    }
+    var row = fmt === 'Single' ? (gender || 'Single') : (fmt + (gender ? ' ' + gender : ''));
+    return { t: t, day: day, row: row, fmt: fmt, gender: gender, sold: t.status === 'sold_out', main: !!core && !charity && !partner && !other };
+  }
+  function cellHtml(p) {
+    return '<label class="tcell ' + (p.sold ? 'sold' : 'avail') + '" title="' + esc(p.t.name) + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + (p.sold ? 'Sold out' : 'Available') + '</label>';
+  }
+  function lineHtml(p) {
+    return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+  }
+  function renderTicketPicker(data) {
+    var parsed = data.tickets.map(parseTicket);
+    var main = parsed.filter(function(p) { return p.main; });
+    var extra = parsed.filter(function(p) { return !p.main; });
+    var html = '<p><b>' + esc(data.event_name) + '</b></p>';
+    var cols = [];
+    main.forEach(function(p) { if (p.day && cols.indexOf(p.day) < 0) cols.push(p.day); });
+    cols.sort(function(a, b) { return DAY_NAMES.indexOf(a) - DAY_NAMES.indexOf(b); });
+    if (main.some(function(p) { return !p.day; })) cols.push(null);
+    var rowMeta = {};
+    main.forEach(function(p) { if (!rowMeta[p.row]) rowMeta[p.row] = p; });
+    var rows = Object.keys(rowMeta).sort(function(a, b) {
+      var A = rowMeta[a], B = rowMeta[b];
+      return (FMT_ORDER.indexOf(A.fmt) - FMT_ORDER.indexOf(B.fmt)) || (GEN_ORDER.indexOf(A.gender) - GEN_ORDER.indexOf(B.gender));
+    });
+    if (cols.length >= 2 && main.length >= 8) {
+      html += '<p class="hint">Tick what you want to watch. <span class="tsold">Sold out</span> = we alert you the moment it comes back. Available ones are on sale right now.</p>';
+      html += '<div class="tgrid-wrap"><table class="tgrid"><thead><tr><th></th>';
+      cols.forEach(function(c) { html += '<th>' + (c ? c.slice(0, 3) : 'No date') + '</th>'; });
+      html += '</tr></thead><tbody>';
+      rows.forEach(function(row) {
+        var anySold = main.some(function(p) { return p.row === row && p.sold; });
+        html += '<tr><th>' + esc(row) + (anySold ? '<br><a href="#" class="tall">all sold out</a>' : '') + '</th>';
+        cols.forEach(function(c) {
+          var cell = main.filter(function(p) { return p.row === row && p.day === c; });
+          html += cell.length ? '<td>' + cell.map(cellHtml).join('') + '</td>' : '<td class="tnone">&ndash;</td>';
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table></div>';
+    } else {
+      main.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).forEach(function(p) { html += lineHtml(p); });
+    }
+    if (extra.length) {
+      html += '<details class="textra"><summary>Show charity, partner-slot, spectator &amp; other tickets (' + extra.length + ')</summary>' + extra.map(lineHtml).join('') + '</details>';
+    }
+    return html;
+  }
+  out.addEventListener('click', function(e) {
+    var a = e.target.closest ? e.target.closest('.tall') : null;
+    if (!a) return;
+    e.preventDefault();
+    var tr = a.closest('tr');
+    if (tr) tr.querySelectorAll('.tcell.sold input').forEach(function(cb) { cb.checked = true; });
+  });
+
   async function doFind(url) {
     url = url.trim();
     if (!url) return;
@@ -721,12 +824,7 @@ const RESOLVE_SCRIPT = `<script>
         }
         return;
       }
-      var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-      for (var i = 0; i < data.tickets.length; i++) {
-        var t = data.tickets[i];
-        html += '<label><input type="checkbox" name="ticket" value="' + esc(t.encoded) + '"> [' + esc(t.status.toUpperCase()) + '] ' + esc(t.name) + '</label>';
-      }
-      out.innerHTML = html;
+      out.innerHTML = renderTicketPicker(data);
       if (submitBtn) submitBtn.style.display = 'block';
     } catch (e) {
       out.innerHTML = '<p>Something went wrong. Try again.</p>';
@@ -5341,6 +5439,53 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
 }
 
+/** The frequent (every ~2 min) job: everything that must notice a change quickly. */
+async function runFrequentChecks(env: Env): Promise<void> {
+  await Promise.allSettled([
+    checkCommunityTickets(env).then(() => sendDueFreeTicketAlerts(env)),
+    checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)),
+    refreshEventDirectorySaleStatus(env),
+    checkAnnouncementReminders(env),
+    sendManualVerificationNotices(env),
+  ]);
+}
+
+const SCHEDULER_INTERVAL_MS = 2 * 60_000;
+
+/** Alarm-driven scheduler: a Durable Object whose alarm re-arms itself every two minutes and runs
+ * the frequent checks. Added 2026-10-25 because Cloudflare stopped invoking this account's cron
+ * triggers (no scheduled invocation on either script since 23 Oct, trigger re-creation and a new
+ * expression didn't help) while HTTP kept working. The next alarm is armed BEFORE the checks run,
+ * so a failing round can never stop the loop. POST /admin/scheduler/start kicks it off once;
+ * it then survives deploys. kv_meta "alarm_last_run" is its heartbeat. */
+export class CheckScheduler {
+  constructor(private state: DurableObjectState, private env: Env) {}
+
+  async fetch(req: Request): Promise<Response> {
+    const path = new URL(req.url).pathname;
+    const current = await this.state.storage.getAlarm();
+    if (path === "/start") {
+      if (current === null) await this.state.storage.setAlarm(Date.now() + 5_000);
+      return Response.json({ running: true, next_alarm: current ?? Date.now() + 5_000 });
+    }
+    if (path === "/stop") {
+      await this.state.storage.deleteAlarm();
+      return Response.json({ running: false });
+    }
+    return Response.json({ running: current !== null, next_alarm: current });
+  }
+
+  async alarm(): Promise<void> {
+    await this.state.storage.setAlarm(Date.now() + SCHEDULER_INTERVAL_MS);
+    try {
+      await this.env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('alarm_last_run', datetime('now'))").run();
+    } catch (e) {
+      console.error("alarm heartbeat failed:", e);
+    }
+    await runFrequentChecks(this.env);
+  }
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -5383,6 +5528,22 @@ export default {
       if (url.pathname === "/admin/whatsapp/register-webhook" && req.method === "POST") return await handleWhatsAppRegisterWebhook(req, env);
       if (url.pathname === "/admin/whatsapp/test-alert" && req.method === "POST") return await handleWhatsAppTestAlert(req, env);
       if (url.pathname === "/whatsapp/unlink" && req.method === "POST") return await handleWhatsAppUnlink(req, env);
+      if ((url.pathname === "/admin/scheduler/start" || url.pathname === "/admin/scheduler/stop" || url.pathname === "/admin/scheduler/status") && req.method === "POST") {
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        const stub = env.SCHEDULER.get(env.SCHEDULER.idFromName("main"));
+        const r = await stub.fetch(`https://scheduler/${url.pathname.split("/").pop()}`);
+        const body: any = await r.json();
+        const hb = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'alarm_last_run'").first<any>();
+        return jsonResponse({ ...body, alarm_last_run: hb?.value ?? null });
+      }
+      if (url.pathname === "/admin/heartbeat-test" && req.method === "POST") {
+        // Same write the scheduled handler does, over HTTP: tells "cron never invoked" apart from
+        // "heartbeat write fails in production". Admin only.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, datetime('now'))").bind("heartbeat-test:http").run();
+        const rows = await env.DB.prepare("SELECT key, value FROM kv_meta").all<any>();
+        return jsonResponse({ ok: true, rows: rows.results });
+      }
       if (url.pathname === "/admin/run-checks" && req.method === "POST") {
         // Runs one round of the sale + ticket checks now (incl. due free alerts). Staging has no
         // schedule, so this is how its alert ordering gets tested. Admin only.
@@ -5458,11 +5619,12 @@ export default {
       ctx.waitUntil(env.DB.prepare("DELETE FROM whatsapp_log WHERE created_at < datetime('now', '-90 days')").run());
       ctx.waitUntil(env.DB.prepare("DELETE FROM telegram_log WHERE created_at < datetime('now', '-90 days')").run());
     } else {
-      ctx.waitUntil(checkCommunityTickets(env).then(() => sendDueFreeTicketAlerts(env)));
-      ctx.waitUntil(checkSaleWatches(env).then(() => sendDueFreeSaleAlerts(env)));
-      ctx.waitUntil(refreshEventDirectorySaleStatus(env));
-      ctx.waitUntil(checkAnnouncementReminders(env));
-      ctx.waitUntil(sendManualVerificationNotices(env));
+      // If the alarm scheduler is alive it already runs these every two minutes; don't double up.
+      ctx.waitUntil(
+        env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'alarm_last_run' AND value >= datetime('now', '-3 minutes')")
+          .first<any>()
+          .then((alive) => (alive ? undefined : runFrequentChecks(env)))
+      );
     }
   },
 

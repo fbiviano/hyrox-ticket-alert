@@ -42,6 +42,15 @@ PRIORITY_FREE_DELAY_MINUTES = "3"
 #   STRIPE_WEBHOOK_SECRET - signing secret of the /stripe/webhook endpoint in Stripe
 # Optional var WHATSAPP_OPEN_TO_ALL = "1" lets every verified subscriber link WhatsApp (default: admin only).
 
+# Alarm-driven fallback scheduler (see CheckScheduler in src/index.ts).
+[[durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "CheckScheduler"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CheckScheduler"]
+
 [limits]
 # Free plan hard-caps CPU time at 10ms per invocation (not configurable) -
 # the */2 * * * * cron's four checking functions (HTML/JSON parsing across
@@ -55,7 +64,9 @@ cpu_ms = 1000
 # */2 * * * *  - re-checks watched tickets (checkCommunityTickets)
 # 0 3 * * *    - daily event-directory indexing batch (indexEvents)
 # 0 8 * * *    - daily Instagram ticket-announcement check (checkInstagramAnnouncements)
-crons = ["*/2 * * * *", "0 3 * * *", "0 8 * * *"]
+# Frequent check registered as "1-59/2" (odd minutes) rather than "*/2": the "*/2" trigger on this
+# script stopped being invoked by Cloudflare on 2026-10-23 and re-creating it did not help.
+crons = ["1-59/2 * * * *", "0 3 * * *", "0 8 * * *"]
 
 [[routes]]
 pattern = "roxracealerts.com/*"
@@ -93,9 +104,13 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 cpu_ms = 1000
 
 [env.staging.triggers]
-# No schedule: hyrox.com rate-limits requests from Cloudflare (429), and staging polling it would
-# only eat into production's allowance. Staging checks are triggered by hand when testing.
-crons = []
+# Temporarily scheduled to test whether the scheduled handler runs at all (heartbeat in kv_meta).
+# Normally [] - hyrox.com rate-limits Cloudflare, and staging polling only eats production's allowance.
+crons = ["*/2 * * * *"]
+
+[[env.staging.durable_objects.bindings]]
+name = "SCHEDULER"
+class_name = "CheckScheduler"
 
 [[env.staging.d1_databases]]
 binding = "DB"
