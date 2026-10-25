@@ -446,14 +446,15 @@ a{color:#111}
 .plan-note{font-size:0.8rem;color:#666;margin:8px 0 0}
 .plan.season{grid-column:1/-1;border-color:#e0a83a;background:#fff3d6}
 .plan-line{font-size:0.9rem;margin:0 0 10px}
-.tdaysec{margin-top:16px}
-.tdayhead{margin:0 0 2px;font-weight:700;font-size:1rem;color:#111}
-.tcatsec{margin:6px 0 0}
-.tcathead{margin:6px 0 2px;font-size:0.78rem;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.04em}
-.tcathead a{text-transform:none;letter-spacing:0;font-weight:normal;margin-left:6px;color:#111}
-.tline{display:block;margin:4px 0;font-size:0.92rem}
-.tstat{font-size:0.8rem;color:#999;margin-left:4px}
-.tstat.avail{color:#1e7e34}
+.tdaysec{margin-top:22px;padding-top:12px;border-top:1px solid #e5e5e5}
+#resolveResult .tdayhead{margin:0 0 4px;font-weight:700;font-size:1.2rem;color:#111}
+.tcatsec{margin:14px 0 0}
+#resolveResult .tcathead{margin:0 0 6px;font-size:0.95rem;font-weight:700;color:#333}
+.tcathead a{font-weight:normal;margin-left:6px;color:#111;font-size:0.88rem}
+.tline{display:block;margin:7px 0;font-size:0.92rem}
+.tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
+.tstat.sold{background:#fdecec;color:#b00}
+.tstat.avail{background:#e6f4ea;color:#1e7e34}
 .tsold{background:#fdecec;color:#b00;padding:1px 7px;border-radius:8px;font-size:0.8rem}
 #resolveResult{margin-top:12px}
 #resolveResult p{color:#666;font-size:0.9rem}
@@ -677,7 +678,7 @@ const RESOLVE_SCRIPT = `<script>
     return { t: t, day: day, base: base, cat: cat, sold: t.status === 'sold_out' };
   }
   function ticketLine(p) {
-    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> ' + esc(p.base) + ' <span class="tstat' + (p.sold ? '' : ' avail') + '">' + (p.sold ? 'sold out' : 'available') + '</span></label>';
+    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
   }
   function renderTicketPicker(data) {
     if (!document.getElementById('ticketGridOn')) {
