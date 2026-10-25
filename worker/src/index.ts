@@ -28,6 +28,8 @@ export interface Env {
   TELEGRAM_CHAT_ID?: string;
   EMAIL_DRY_RUN?: string; // "1" on staging: emails are logged, never sent
   SCHEDULER: DurableObjectNamespace; // CheckScheduler: alarm-driven fallback for the frequent checks
+  SCHEDULER_AUTOSTART?: string; // "1" = any request arms the alarm scheduler (production)
+  TICKET_GRID?: string; // "1" = category-by-day ticket picker; unset = the plain list (until confirmed)
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
   TELEGRAM_WEBHOOK_SECRET?: string; // header secret Telegram echoes on every webhook call
   STRIPE_SECRET_KEY?: string; // Stripe secret key (sk_test_... in staging); Priority is off without it
@@ -697,6 +699,15 @@ const RESOLVE_SCRIPT = `<script>
     return '<label class="tline ' + (p.sold ? 'sold' : 'avail') + '"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
   }
   function renderTicketPicker(data) {
+    if (!document.getElementById('ticketGridOn')) {
+      // Plain list (production until the grid is confirmed).
+      var plain = '<p><b>' + esc(data.event_name) + '</b></p>';
+      for (var k = 0; k < data.tickets.length; k++) {
+        var tk = data.tickets[k];
+        plain += '<label><input type="checkbox" name="ticket" value="' + esc(tk.encoded) + '"> [' + esc(tk.status.toUpperCase()) + '] ' + esc(tk.name) + '</label>';
+      }
+      return plain;
+    }
     var parsed = data.tickets.map(parseTicket);
     var main = parsed.filter(function(p) { return p.main; });
     var extra = parsed.filter(function(p) { return !p.main; });
@@ -1352,6 +1363,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // their second. A first-time visitor just sees Free vs Priority.
   const watchedRaces = subscriber ? await watchedRaceCount(env, subscriber.id) : 0;
   const seasonOffer = (button: string): string | null => (watchedRaces < 1 ? null : button);
+  const gridFlag = env.TICKET_GRID === "1" ? '<span id="ticketGridOn" hidden></span>' : "";
   const priorityFlag = offerPriority
     ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-choice="${escapeHtml(
         priorityChoiceHtml(
@@ -1389,7 +1401,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                     : `<button type="submit" name="priority" value="0">Add selected ticket(s)</button>`
                 }
               </div>
-            </form>${priorityFlag}
+            </form>${priorityFlag}${gridFlag}
             ${browseSection}
           </div>
         </div>
@@ -1433,7 +1445,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                   : `<button type="submit" name="priority" value="0">Subscribe</button>`
               }
             </div>
-          </form>${priorityFlag}
+          </form>${priorityFlag}${gridFlag}
           ${browseSection}
         </div>
       </div>
@@ -5452,6 +5464,22 @@ async function runFrequentChecks(env: Env): Promise<void> {
 
 const SCHEDULER_INTERVAL_MS = 2 * 60_000;
 
+/** Makes sure the alarm scheduler is armed. Idempotent and cheap (the DO only arms an alarm when
+ * none exists), so it is called from the first request each isolate serves and from the daily
+ * crons: the loop restarts by itself after a deploy or a DO reset, with no admin action needed. */
+let schedulerKicked = false;
+async function ensureScheduler(env: Env): Promise<void> {
+  // Only where wanted (production): staging must not poll hyrox.com every two minutes by itself.
+  if (schedulerKicked || !env.SCHEDULER || env.SCHEDULER_AUTOSTART !== "1") return;
+  schedulerKicked = true;
+  try {
+    await env.SCHEDULER.get(env.SCHEDULER.idFromName("main")).fetch("https://scheduler/start");
+  } catch (e) {
+    schedulerKicked = false;
+    console.error("ensureScheduler failed:", e);
+  }
+}
+
 /** Alarm-driven scheduler: a Durable Object whose alarm re-arms itself every two minutes and runs
  * the frequent checks. Added 2026-10-25 because Cloudflare stopped invoking this account's cron
  * triggers (no scheduled invocation on either script since 23 Oct, trigger re-creation and a new
@@ -5487,7 +5515,8 @@ export class CheckScheduler {
 }
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    ctx.waitUntil(ensureScheduler(env));
     const url = new URL(req.url);
     try {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
@@ -5608,6 +5637,7 @@ export default {
     // The two daily jobs are matched by their exact expression; anything else is the frequent
     // check, so the frequent trigger can be re-registered under a different expression (e.g.
     // "1-59/2 * * * *") without touching this code.
+    ctx.waitUntil(ensureScheduler(env));
     if (event.cron === "0 8 * * *") {
       ctx.waitUntil(checkInstagramAnnouncements(env));
       ctx.waitUntil(sendVerificationNudges(env));

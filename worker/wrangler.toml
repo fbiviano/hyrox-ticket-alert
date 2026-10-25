@@ -24,6 +24,8 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 # where someone holds Priority). PRIORITY_OPEN_TO_ALL = "1" shows the offers to everyone; until
 # then only ADMIN_EMAIL sees them.
 PRIORITY_FREE_DELAY_MINUTES = "3"
+# Arms the alarm-driven fallback scheduler from any request (see CheckScheduler). Production only.
+SCHEDULER_AUTOSTART = "1"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
@@ -96,6 +98,8 @@ ADMIN_EMAIL = "test@example.com"
 PRIORITY_FREE_DELAY_MINUTES = "1"
 # Staging only: offer Priority to every visitor (production keeps it admin-only until launch).
 PRIORITY_OPEN_TO_ALL = "1"
+# New category-by-day ticket picker, staging only until confirmed.
+TICKET_GRID = "1"
 # Emails are written to email_log as "dry run" instead of being sent - staging never mails anyone.
 EMAIL_DRY_RUN = "1"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
@@ -104,9 +108,9 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 cpu_ms = 1000
 
 [env.staging.triggers]
-# Temporarily scheduled to test whether the scheduled handler runs at all (heartbeat in kv_meta).
-# Normally [] - hyrox.com rate-limits Cloudflare, and staging polling only eats production's allowance.
-crons = ["*/2 * * * *"]
+# No schedule: hyrox.com rate-limits Cloudflare, and staging polling only eats production's allowance.
+# Staging checks run by hand (POST /admin/run-checks) or via the alarm scheduler when started.
+crons = []
 
 [[env.staging.durable_objects.bindings]]
 name = "SCHEDULER"
