@@ -26,6 +26,10 @@ TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 PRIORITY_FREE_DELAY_MINUTES = "3"
 # Arms the alarm-driven fallback scheduler from any request (see CheckScheduler). Production only.
 SCHEDULER_AUTOSTART = "1"
+# Priority offers for every visitor (live Stripe checkout verified 2026-10-26).
+PRIORITY_OPEN_TO_ALL = "1"
+# Day -> category ticket picker.
+TICKET_GRID = "1"
 
 # Secrets (set via `wrangler secret put`, not stored here):
 #   RESEND_API_KEY
