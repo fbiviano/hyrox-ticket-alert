@@ -139,9 +139,9 @@ export function listCardSvg(c: ListCardInput): string {
 </svg>`;
 }
 
-/** Any slide as JPEG bytes. */
-export async function renderSlideJpeg(s: Slide): Promise<Uint8Array> {
-  return svgToJpeg(s.kind === "list" ? listCardSvg(s.list) : cardSvg(s.card));
+/** Any slide as JPEG bytes (a headline card can also be drawn in story format). */
+export async function renderSlideJpeg(s: Slide, format: CardFormat = "square"): Promise<Uint8Array> {
+  return svgToJpeg(s.kind === "list" ? listCardSvg(s.list) : cardSvg(s.card, format));
 }
 
 /** The card as JPEG bytes. */
