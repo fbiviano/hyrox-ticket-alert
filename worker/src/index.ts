@@ -3382,17 +3382,29 @@ async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; 
     `Share it in your HYROX WhatsApp groups: if at least ${REFERRAL_LIFETIME_AT} people sign up, you get all these benefits free for life.`,
   ];
   const feedback = "Tell me what to improve or what you would like to see. Just reply to this email, it comes straight to me.";
-  const html = `<p>Hi HYROX athlete,</p>
-<p>${escapeHtml(intro)}</p>
-<p><b>What's new</b></p>
-<ul>${news.map(([k, v]) => `<li><b>${k}</b> ${escapeHtml(v)}</li>`).join("")}</ul>
-<p><b>Priority + WhatsApp for free</b></p>
-<p>Share your personal link: <a href="${link}"><b>${escapeHtml(linkLabel)}</b></a></p>
-<ul>${rewards.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
-<p><a href="${wa}">Share on WhatsApp</a></p>
-<p><b>Feedback</b><br>${escapeHtml(feedback)}</p>
-<p>Francesco</p>
-<p><small><a href="${myAlerts}">Manage my alerts</a> &middot; <a href="${unsub}">Unsubscribe</a></small></p>`;
+  // Layout for skimming (the words are the admin's own and stay as written): short paragraphs, clear
+  // headings, the personal link in a big box, key numbers in bold. Inline styles - email clients
+  // ignore <style> blocks.
+  const h = (t: string) => `<h2 style="font-size:18px;margin:28px 0 10px;color:#111">${t}</h2>`;
+  const li = (t: string) => `<li style="margin:0 0 10px">${t}</li>`;
+  const boldNumbers = (t: string) => escapeHtml(t).replace(/(At least \d+ friends|at least \d+ people|free for life)/g, "<b>$1</b>");
+  const [introA, introB] = intro.split(/(?<=available to anyone\.) /);
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.55;color:#222;max-width:560px">
+<p>Hi HYROX athlete,</p>
+<p>${escapeHtml(introA)}</p>
+${introB ? `<p>${escapeHtml(introB)}</p>` : ""}
+${h("What's new")}
+<ul style="padding-left:20px;margin:0">${news.map(([k, v]) => li(`<b>${k}</b> ${escapeHtml(v)}`)).join("")}</ul>
+${h("Priority + WhatsApp for free")}
+<p style="margin:0 0 8px">Share your personal link:</p>
+<p style="margin:0 0 14px"><a href="${link}" style="display:inline-block;background:#ff6a00;color:#fff;font-weight:bold;font-size:18px;padding:12px 18px;border-radius:8px;text-decoration:none">${escapeHtml(linkLabel)}</a></p>
+<ul style="padding-left:20px;margin:0">${rewards.map((r) => li(boldNumbers(r))).join("")}</ul>
+<p style="margin:6px 0 0"><a href="${wa}" style="display:inline-block;background:#25d366;color:#fff;font-weight:bold;padding:10px 16px;border-radius:8px;text-decoration:none">Share on WhatsApp</a></p>
+${h("Feedback")}
+<p>${escapeHtml(feedback)}</p>
+<p style="margin-top:24px">Francesco</p>
+<p style="margin-top:28px;font-size:12px;color:#888"><a href="${myAlerts}" style="color:#888">Manage my alerts</a> &middot; <a href="${unsub}" style="color:#888">Unsubscribe</a></p>
+</div>`;
   const text = `Hi HYROX athlete,
 
 ${intro}
