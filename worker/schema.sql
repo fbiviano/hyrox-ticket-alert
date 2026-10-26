@@ -507,3 +507,7 @@ CREATE TABLE IF NOT EXISTS email_events (
   created_at TEXT NOT NULL,
   PRIMARY KEY (resend_id, type)
 );
+
+-- Traffic source (2026-10-26): ?src=ig on a link (e.g. the Instagram bio) is remembered for
+-- 30 days and stored on sign-up, so the Sunday Instagram report can count sign-ups from it.
+-- ALTER TABLE subscribers ADD COLUMN source TEXT;

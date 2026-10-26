@@ -1,5 +1,5 @@
 import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS, FetchBlocked } from "./resolve";
-import { renderCardJpeg, type CardInput } from "./igcard";
+import { renderCardJpeg, renderSlideJpeg, type CardInput, type Slide } from "./igcard";
 import PostalMime from "postal-mime";
 
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
@@ -3040,11 +3040,20 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
       // Arrived through a friend's referral link (cookie set on the homepage)?
       const refCode = parseCookies(req)[REF_COOKIE] || "";
       const referrer = REF_CODE_RE.test(refCode) ? await env.DB.prepare("SELECT id FROM subscribers WHERE ref_code = ?").bind(refCode).first<any>() : null;
-      await env.DB.prepare(
-        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by) VALUES (?, 0, ?, ?, ?)"
-      )
-        .bind(email, verifyToken, unsubToken, referrer?.id ?? null)
-        .run();
+      const src = parseCookies(req)[SRC_COOKIE] || "";
+      try {
+        await env.DB.prepare(
+          "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by, source) VALUES (?, 0, ?, ?, ?, ?)"
+        )
+          .bind(email, verifyToken, unsubToken, referrer?.id ?? null, /^[a-z0-9_-]{1,20}$/.test(src) ? src : null)
+          .run();
+      } catch (e) {
+        // A sign-up must never fail over tracking (e.g. code deployed before the "source" column exists).
+        if (!/no such column: source/.test(String(e))) throw e;
+        await env.DB.prepare("INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by) VALUES (?, 0, ?, ?, ?)")
+          .bind(email, verifyToken, unsubToken, referrer?.id ?? null)
+          .run();
+      }
       subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
       needsVerification = true;
     } else if (!subscriber.verified) {
@@ -3252,6 +3261,7 @@ function redirectHome(env: Env, unsubscribeToken: string): Response {
 // once. Rewards are season_pass rows with livemode = 2 ("granted", never counted as sales).
 // ---------------------------------------------------------------------------
 const REF_COOKIE = "rra_ref";
+const SRC_COOKIE = "rra_src"; // traffic source from ?src=..., stored as subscribers.source
 const REF_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/;
 const REFERRAL_SEASON_AT = 5;
 const REFERRAL_LIFETIME_AT = 10;
@@ -5908,10 +5918,21 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
 // ---------------------------------------------------------------------------
 function titleCase(w: string): string {
   return w
-    .toLowerCase()
     .split(/([ -])/)
-    .map((p) => (p.length > 1 || /[a-zà-ÿ]/i.test(p) ? p.charAt(0).toUpperCase() + p.slice(1) : p))
+    .map((p) =>
+      /^(I{1,3}|IV|VI{0,3}|IX|X)$/i.test(p) // "Singapore II" stays "II"
+        ? p.toUpperCase()
+        : p.length > 1 || /[a-zà-ÿ]/i.test(p)
+          ? p.charAt(0).toUpperCase() + p.slice(1).toLowerCase()
+          : p
+    )
     .join("");
+}
+
+/** Race name from a shop event name ("BYD | HYROX Bangkok | Season 26/27" -> "HYROX Bangkok"). */
+function shortRaceName(eventName: string): { name: string; city: string } {
+  const segs = eventName.split("|").map((s) => s.trim()).filter(Boolean);
+  return raceNameParts(segs.find((s) => /HYROX/i.test(s)) || segs[0] || eventName);
 }
 
 /** "INTERSPORT HYROX Vienna" -> { name: "HYROX Vienna", city: "Vienna" } (sponsor dropped). */
@@ -6069,8 +6090,19 @@ async function checkInstagramToken(env: Env): Promise<void> {
 const IG_DRAFT_EVERY_HOURS = 4; // at most one new draft per 4 hours
 const IG_DRAFT_SWISS_HOURS = [9, 21]; // drafts only arrive between 09:00 and 21:00 Swiss time
 
-function igMediaUrl(env: Env, id: number, key: string, story = false): string {
-  return `${env.SITE_URL}/ig-media/${id}-${key}${story ? "-story" : ""}.jpg`;
+/** Public image URL of a draft: the feed card, its "story" version, or slide n of a scheduled post. */
+function igMediaUrl(env: Env, id: number, key: string, variant?: "story" | number): string {
+  return `${env.SITE_URL}/ig-media/${id}-${key}${variant === undefined ? "" : `-${variant}`}.jpg`;
+}
+
+/** Scheduled posts store {"slides": [...]} in card_json; "GOING LIVE SOON" drafts store one card. */
+function draftSlides(row: { card_json: string }): Slide[] | null {
+  try {
+    const parsed = JSON.parse(row.card_json);
+    return Array.isArray(parsed?.slides) ? parsed.slides : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Creates a draft for one directory race and sends it to the admin's Telegram (when configured).
@@ -6156,6 +6188,39 @@ async function publishToInstagram(env: Env, imageUrl: string, caption: string | 
   return { id: done.id, permalink: info?.permalink };
 }
 
+/** Publishes a carousel (2-10 images): one container per image, then the carousel container. */
+async function publishCarouselToInstagram(env: Env, imageUrls: string[], caption: string): Promise<{ id: string; permalink?: string }> {
+  const api = "https://graph.instagram.com";
+  const tok = await igToken(env);
+  const get = (path: string) => fetch(`${api}/${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(tok)}`).then((r) => r.json() as Promise<any>);
+  const post = async (path: string, params: Record<string, string>) => {
+    const r: any = await fetch(`${api}/${path}`, { method: "POST", body: new URLSearchParams({ ...params, access_token: tok }) }).then((x) => x.json());
+    if (r?.error) throw new Error(r.error.error_user_msg || r.error.message || JSON.stringify(r.error));
+    return r;
+  };
+  const waitReady = async (id: string) => {
+    for (let i = 0; i < 10; i++) {
+      const s = await get(`${id}?fields=status_code`);
+      if (s?.status_code === "FINISHED") return;
+      if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") throw new Error(`Instagram couldn't process an image (${s.status_code})`);
+      await pause(2000);
+    }
+  };
+  const me = await get("me?fields=user_id");
+  if (!me?.user_id) throw new Error(me?.error?.message || "Instagram token check failed");
+  const children: string[] = [];
+  for (const url of imageUrls.slice(0, 10)) {
+    const c = await post(`${me.user_id}/media`, { image_url: url, is_carousel_item: "true" });
+    await waitReady(c.id);
+    children.push(c.id);
+  }
+  const carousel = await post(`${me.user_id}/media`, { media_type: "CAROUSEL", children: children.join(","), caption });
+  await waitReady(carousel.id);
+  const done = await post(`${me.user_id}/media_publish`, { creation_id: carousel.id });
+  const info = await get(`${done.id}?fields=permalink`).catch(() => null);
+  return { id: done.id, permalink: info?.permalink };
+}
+
 /** [Post now] / [Skip] on a draft in the admin's Telegram. Only the admin's own taps count. */
 async function handleIgDraftButton(env: Env, cb: any): Promise<void> {
   const tg = (method: string, body: object) =>
@@ -6185,9 +6250,11 @@ async function handleIgDraftButton(env: Env, cb: any): Promise<void> {
     return;
   }
   if (action !== "post") return;
+  const slides = draftSlides(row);
+  // presale_live_at is the draft's "valid until": the sale start, or for scheduled posts a few days.
   if (Date.parse(row.presale_live_at) <= Date.now()) {
     await env.DB.prepare("UPDATE ig_auto_posts SET status = 'expired', decided_at = datetime('now') WHERE id = ?").bind(row.id).run();
-    await answer("Tickets are already on sale - not posted.");
+    await answer(slides ? "This draft is out of date - not posted." : "Tickets are already on sale - not posted.");
     await closeButtons();
     return;
   }
@@ -6199,7 +6266,10 @@ async function handleIgDraftButton(env: Env, cb: any): Promise<void> {
   }
   await answer("Posting to Instagram...");
   try {
-    const done = await publishToInstagram(env, igMediaUrl(env, row.id, row.media_key), row.caption);
+    const done =
+      slides && slides.length > 1
+        ? await publishCarouselToInstagram(env, slides.map((_, i) => igMediaUrl(env, row.id, row.media_key, i)), row.caption)
+        : await publishToInstagram(env, igMediaUrl(env, row.id, row.media_key, slides ? 0 : undefined), row.caption);
     await env.DB.prepare("UPDATE ig_auto_posts SET status = 'posted', ig_media_id = ?, error = NULL, decided_at = datetime('now') WHERE id = ?")
       .bind(done.id, row.id)
       .run();
@@ -6223,9 +6293,14 @@ async function postPendingStories(env: Env): Promise<void> {
     .bind(new Date().toISOString())
     .first<any>();
   if (!row) return;
+  if (draftSlides(row)) {
+    // Scheduled posts (weekly carousel, race weekend) don't get the automatic story.
+    await env.DB.prepare("UPDATE ig_auto_posts SET story_status = 'skipped' WHERE id = ? AND story_status IS NULL").bind(row.id).run();
+    return;
+  }
   const claim = await env.DB.prepare("UPDATE ig_auto_posts SET story_status = 'posting' WHERE id = ? AND story_status IS NULL").bind(row.id).run();
   if (!claim.meta.changes) return;
-  const storyUrl = igMediaUrl(env, row.id, row.media_key, true);
+  const storyUrl = igMediaUrl(env, row.id, row.media_key, "story");
   let note: string;
   try {
     const done = await publishToInstagram(env, storyUrl, null);
@@ -6249,12 +6324,204 @@ async function postPendingStories(env: Env): Promise<void> {
   }).catch((e) => console.error("story image to Telegram failed:", e));
 }
 
-/** Public JPEG of a draft (feed or story format), for Instagram to download when publishing. */
-async function handleIgMedia(env: Env, id: number, key: string, story: boolean): Promise<Response> {
+/** Public JPEG of a draft (feed or story format, or slide n of a scheduled post), for Instagram
+ * to download when publishing. */
+async function handleIgMedia(env: Env, id: number, key: string, variant: string | undefined): Promise<Response> {
   const row = await env.DB.prepare("SELECT card_json FROM ig_auto_posts WHERE id = ? AND media_key = ?").bind(id, key).first<any>();
   if (!row) return new Response("Not found", { status: 404 });
-  const jpg = await renderCardJpeg(JSON.parse(row.card_json), story ? "story" : "square");
+  const slides = draftSlides(row);
+  let jpg: Uint8Array;
+  if (slides) {
+    const slide = slides[Number(variant)];
+    if (!slide) return new Response("Not found", { status: 404 });
+    jpg = await renderSlideJpeg(slide);
+  } else {
+    if (variant !== undefined && variant !== "story") return new Response("Not found", { status: 404 });
+    jpg = await renderCardJpeg(JSON.parse(row.card_json), variant === "story" ? "story" : "square");
+  }
   return new Response(jpg, { headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=86400" } });
+}
+
+// ---------------------------------------------------------------------------
+// Instagram posting plan (agreed 2026-10-26): besides "GOING LIVE SOON" (whenever a sale is
+// announced), two scheduled posts are drafted to the admin's Telegram for approval:
+//   Monday 18:00 Swiss  - "This week in HYROX tickets" carousel (sales opening, races, selling fast)
+//   Thursday 18:00 Swiss - "Racing this weekend" list
+// and a Sunday 19:00 report of how the week's posts did. ig_auto_posts.event_url holds a key
+// like "weekly:2026-11-02"; presale_live_at is how long the draft stays postable.
+// ---------------------------------------------------------------------------
+const IG_FOOTER = { footer1: "Get alerted the second it opens", footer2: "roxracealerts.com" };
+const IG_TAGS = "#hyrox #hyroxcommunity #hyroxticket #hybridathlete #hyroxtraining";
+
+/** Swiss local date/weekday/hour right now. */
+function swissNow(): { date: string; weekday: number; hour: number } {
+  const local = new Date(Date.now() + zurichOffsetMinutes() * 60000);
+  return { date: local.toISOString().slice(0, 10), weekday: local.getUTCDay(), hour: local.getUTCHours() };
+}
+
+const dayLabel = (isoDate: string) =>
+  new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" }).format(new Date(`${isoDate}T00:00:00Z`));
+
+/** Races between two dates (inclusive), one per city. */
+async function racesBetween(env: Env, from: string, to: string): Promise<{ city: string; date: string }[]> {
+  const { results } = await env.DB.prepare("SELECT title, event_date FROM event_directory WHERE event_date BETWEEN ? AND ? ORDER BY event_date, title")
+    .bind(from, to)
+    .all<any>();
+  const seen = new Set<string>();
+  const out: { city: string; date: string }[] = [];
+  for (const r of results || []) {
+    const city = shortRaceName(r.title).city || r.title;
+    if (seen.has(city)) continue;
+    seen.add(city);
+    out.push({ city, date: r.event_date });
+  }
+  return out;
+}
+
+/** Monday carousel: cover, sales opening this week, races this week, selling fast, call to action. */
+async function weeklyPost(env: Env, today: string): Promise<{ slides: Slide[]; caption: string } | null> {
+  const now = Date.now();
+  const weekEnd = new Date(Date.parse(`${today}T00:00:00Z`) + 6 * 86400_000).toISOString().slice(0, 10);
+  const { results: sales } = await env.DB.prepare(
+    "SELECT title, presale_live_at, presale_timezone FROM event_directory WHERE presale_is_live = 0 AND presale_live_at > ? AND presale_live_at < ? ORDER BY presale_live_at LIMIT 6"
+  )
+    .bind(new Date(now).toISOString(), new Date(now + 7 * 86400_000).toISOString())
+    .all<any>();
+  const saleRows = (sales || []).map((r: any) => {
+    const tz = r.presale_timezone || "UTC";
+    const at = new Date(r.presale_live_at);
+    const when = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: tz }).format(at);
+    const time = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz }).format(at);
+    return { left: shortRaceName(r.title).city, right: `${when} · ${time}`, zone: tzLabel(at, tz) };
+  });
+  const races = await racesBetween(env, today, weekEnd);
+  const { results: hot } = await env.DB.prepare(
+    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ?)
+     GROUP BY event_name ORDER BY n DESC LIMIT 6`
+  )
+    .bind(today)
+    .all<any>();
+  const hotRows = (hot || []).map((r: any) => ({ left: shortRaceName(r.event_name).city, right: `${r.n} sold out` }));
+  if (!saleRows.length && !races.length && !hotRows.length) return null;
+
+  const slides: Slide[] = [
+    {
+      kind: "card",
+      card: { badge: "THIS WEEK", titleLines: ["HYROX", "TICKETS"], line1: `Week of ${dayLabel(today)}`, line2: "Sales opening, races & sell-outs", footer1: "Swipe for this week's list →", footer2: "roxracealerts.com" },
+    },
+  ];
+  if (saleRows.length) slides.push({ kind: "list", list: { badge: "SALES OPENING", titleLines: ["TICKETS", "GO LIVE"], rows: saleRows.map(({ left, right }) => ({ left, right })), ...IG_FOOTER } });
+  if (races.length) slides.push({ kind: "list", list: { badge: "RACE WEEK", titleLines: ["RACING", "THIS WEEK"], rows: races.map((r) => ({ left: r.city, right: dayLabel(r.date) })), ...IG_FOOTER } });
+  if (hotRows.length) slides.push({ kind: "list", list: { badge: "SELLING FAST", titleLines: ["SOLD-OUT", "TICKETS"], rows: hotRows, footer1: "We alert you when spots come back", footer2: "roxracealerts.com" } });
+  slides.push({
+    kind: "card",
+    card: { badge: "FREE ALERTS", titleLines: ["NEVER MISS", "A DROP"], line1: "Alerted the second tickets open", line2: "or a sold-out spot comes back", footer1: "Link in bio", footer2: "roxracealerts.com" },
+  });
+
+  const parts = [`This week in HYROX tickets 🗓️`];
+  if (saleRows.length) parts.push(`🎟️ Tickets go live:\n${saleRows.map((r) => `- ${r.left}: ${r.right} ${r.zone}`).join("\n")}`);
+  if (races.length) parts.push(`🏁 Racing this week:\n${races.map((r) => `- ${r.city} (${dayLabel(r.date)})`).join("\n")}`);
+  if (hotRows.length) parts.push(`🔥 Selling fast: ${hotRows.map((r) => r.left).join(", ")}`);
+  parts.push("Save this post 📌 and get alerted free the second tickets open or a sold-out spot comes back. Link in bio.");
+  parts.push(IG_TAGS);
+  return { slides, caption: parts.join("\n\n") };
+}
+
+/** Thursday post: races Friday-Sunday. */
+async function weekendPost(env: Env, today: string): Promise<{ slides: Slide[]; caption: string } | null> {
+  const day = (n: number) => new Date(Date.parse(`${today}T00:00:00Z`) + n * 86400_000).toISOString().slice(0, 10);
+  const races = await racesBetween(env, day(1), day(3));
+  if (!races.length) return null;
+  const tags = races
+    .slice(0, 3)
+    .map((r) => `#hyrox${r.city.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]/g, "")}`)
+    .join(" ");
+  return {
+    slides: [{ kind: "list", list: { badge: "RACE WEEKEND", titleLines: ["RACING", "THIS WEEKEND"], rows: races.map((r) => ({ left: r.city, right: dayLabel(r.date) })), ...IG_FOOTER } }],
+    caption:
+      `🏁 HYROX races this weekend:\n${races.map((r) => `- ${r.city} (${dayLabel(r.date)})`).join("\n")}\n\n` +
+      `Good luck to everyone racing! 💪 Missed out on a ticket? Sold-out spots come back more often than you think, and RoxRaceAlerts tells you the second they do. Free, link in bio.\n\n` +
+      `${IG_TAGS} ${tags}`,
+  };
+}
+
+/** Saves a scheduled draft and sends it to the admin's Telegram: the images as an album, then
+ * the caption with [Post now] / [Skip]. */
+async function createScheduledDraft(env: Env, key: string, post: { slides: Slide[]; caption: string }, validHours: number): Promise<number | null> {
+  const mediaKey = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const ins = await env.DB.prepare(
+    "INSERT OR IGNORE INTO ig_auto_posts (event_url, presale_live_at, card_json, caption, media_key) VALUES (?, ?, ?, ?, ?)"
+  )
+    .bind(key, new Date(Date.now() + validHours * 3600_000).toISOString(), JSON.stringify({ slides: post.slides }), post.caption, mediaKey)
+    .run();
+  if (!ins.meta.changes) return null;
+  const id = Number(ins.meta.last_row_id);
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return id;
+  const tg = (method: string, body: object) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const buttons = { inline_keyboard: [[{ text: "✅ Post now", callback_data: `ig:post:${id}:${mediaKey}` }, { text: "✖ Skip", callback_data: `ig:skip:${id}:${mediaKey}` }]] };
+  const label = key.startsWith("weekly:") ? "Weekly carousel" : "Race weekend post";
+  if (post.slides.length > 1) {
+    await tg("sendMediaGroup", { chat_id: env.TELEGRAM_CHAT_ID, media: post.slides.map((_, i) => ({ type: "photo", media: igMediaUrl(env, id, mediaKey, i) })) });
+    await tg("sendMessage", { chat_id: env.TELEGRAM_CHAT_ID, text: `📸 Instagram draft: ${label} (${post.slides.length} slides)\n\n${post.caption}`.slice(0, 4000), reply_markup: buttons });
+  } else {
+    await tg("sendPhoto", { chat_id: env.TELEGRAM_CHAT_ID, photo: igMediaUrl(env, id, mediaKey, 0), caption: `📸 Instagram draft: ${label}\n\n${post.caption}`.slice(0, 1024), reply_markup: buttons });
+  }
+  return id;
+}
+
+/** Part of the frequent checks: drafts Monday's carousel and Thursday's post at 18:00 Swiss time,
+ * and sends Sunday's report at 19:00. Each at most once (keyed by date). */
+async function runInstagramPlan(env: Env): Promise<void> {
+  if (!env.IG_ACCESS_TOKEN || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const { date, weekday, hour } = swissNow();
+  if (hour < 18 || hour >= 21) return;
+  if (weekday === 1 || weekday === 4) {
+    const key = `${weekday === 1 ? "weekly" : "weekend"}:${date}`;
+    const exists = await env.DB.prepare("SELECT 1 FROM ig_auto_posts WHERE event_url = ?").bind(key).first();
+    if (exists) return;
+    const post = weekday === 1 ? await weeklyPost(env, date) : await weekendPost(env, date);
+    if (post) await createScheduledDraft(env, key, post, weekday === 1 ? 48 : 30);
+    else {
+      // Nothing to post this time: remember that, so we don't look again every two minutes.
+      await env.DB.prepare("INSERT OR IGNORE INTO ig_auto_posts (event_url, presale_live_at, card_json, caption, media_key, status) VALUES (?, ?, '{\"slides\":[]}', '', '', 'skipped')")
+        .bind(key, new Date().toISOString())
+        .run();
+    }
+    return;
+  }
+  if (weekday === 0 && hour >= 19) {
+    const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'ig_weekly_report'").first<any>();
+    if (last?.value === date) return;
+    await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_weekly_report', ?)").bind(date).run();
+    await sendTelegram(env, await instagramWeeklyReport(env));
+  }
+}
+
+/** Sunday report: followers, how each of the week's posts did, sign-ups from Instagram. */
+async function instagramWeeklyReport(env: Env): Promise<string> {
+  const tok = encodeURIComponent(await igToken(env));
+  const me: any = await fetch(`https://graph.instagram.com/me?fields=followers_count,media_count&access_token=${tok}`).then((r) => r.json()).catch(() => null);
+  const followers = Number(me?.followers_count);
+  const prevRow = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'ig_followers'").first<any>();
+  const prev = Number(prevRow?.value);
+  if (Number.isFinite(followers)) await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_followers', ?)").bind(String(followers)).run();
+  const lines = [`📊 Instagram this week`];
+  lines.push(Number.isFinite(followers) ? `Followers: ${followers}${Number.isFinite(prev) ? ` (${followers - prev >= 0 ? "+" : ""}${followers - prev})` : ""}` : "Followers: couldn't read");
+  const media = await fetchInstagramMedia(env).catch(() => null);
+  const week = (media?.items || []).filter((m: any) => Date.now() - Date.parse(m.timestamp) < 7 * 86400_000);
+  if (week.length) {
+    for (const m of week) {
+      const i = m.insights || {};
+      lines.push(`• ${String(m.caption || m.media_type).replace(/\s+/g, " ").slice(0, 40)}… reach ${i.reach ?? "?"} · likes ${m.like_count ?? 0} · saves ${i.saved ?? 0} · shares ${i.shares ?? 0}`);
+    }
+  } else lines.push("No posts this week.");
+  const s = await env.DB.prepare(
+    `SELECT COUNT(*) AS total, SUM(CASE WHEN source = 'ig' THEN 1 ELSE 0 END) AS ig, SUM(CASE WHEN referred_by IS NOT NULL THEN 1 ELSE 0 END) AS ref
+     FROM subscribers WHERE created_at >= datetime('now', '-7 days')`
+  ).first<any>();
+  lines.push(`Sign-ups this week: ${Number(s?.total) || 0} (from Instagram: ${Number(s?.ig) || 0} · via friends' links: ${Number(s?.ref) || 0})`);
+  return lines.join("\n");
 }
 
 /** The frequent (every ~2 min) job: everything that must notice a change quickly. */
@@ -6269,6 +6536,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     draftGoingLivePosts(env),
     postPendingStories(env),
     sendUpdateEmails(env),
+    runInstagramPlan(env),
   ]);
 }
 
@@ -6332,13 +6600,16 @@ export default {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
-      const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(-story)?\.jpg$/);
-      if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2], !!igMedia[3]);
+      const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(?:-(story|\d{1,2}))?\.jpg$/);
+      if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2], igMedia[3]);
       if (url.pathname === "/" && req.method === "GET") {
         const resp = await handleSignupPage(req, env);
         // A friend's referral link: remember it for 30 days, until this visitor signs up.
         const ref = (url.searchParams.get("ref") || "").toUpperCase();
         if (REF_CODE_RE.test(ref)) resp.headers.append("Set-Cookie", `${REF_COOKIE}=${ref}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
+        // Where the visitor came from (e.g. ?src=ig on the Instagram bio link), saved on sign-up.
+        const src = (url.searchParams.get("src") || "").toLowerCase();
+        if (/^[a-z0-9_-]{1,20}$/.test(src)) resp.headers.append("Set-Cookie", `${SRC_COOKIE}=${src}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
         return resp;
       }
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
@@ -6414,6 +6685,17 @@ export default {
         if (!row?.presale_live_at) return jsonResponse({ error: "no sale time for that race" }, 404);
         const draft = await createIgDraft(env, row);
         return draft ? jsonResponse(draft) : jsonResponse({ error: "that race already has a draft" }, 409);
+      }
+      if (url.pathname === "/admin/ig/plan-preview" && req.method === "POST") {
+        // Builds Monday's carousel (kind=weekly) or Thursday's post (kind=weekend) for a date as a
+        // test draft and returns its image URLs - sent to Telegram where configured, never posted.
+        const kind = url.searchParams.get("kind") === "weekend" ? "weekend" : "weekly";
+        const date = url.searchParams.get("date") || swissNow().date;
+        const post = kind === "weekly" ? await weeklyPost(env, date) : await weekendPost(env, date);
+        if (!post) return jsonResponse({ error: "nothing to post for that date" }, 404);
+        const id = await createScheduledDraft(env, `test-${kind}:${date}:${Date.now()}`, post, 1);
+        const row = await env.DB.prepare("SELECT media_key FROM ig_auto_posts WHERE id = ?").bind(id).first<any>();
+        return jsonResponse({ id, caption: post.caption, images: post.slides.map((_, i) => igMediaUrl(env, Number(id), row?.media_key, i)) });
       }
       if (url.pathname === "/admin/ig/check" && req.method === "POST") {
         // Read-only: which Instagram account the token belongs to and how much posting quota is left.
