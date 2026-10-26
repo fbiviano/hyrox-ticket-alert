@@ -485,3 +485,13 @@ CREATE TABLE IF NOT EXISTS ig_auto_posts (
   story_media_id TEXT,
   story_error TEXT
 );
+
+-- Referrals (2026-10-26): ref_code = the subscriber's personal link code (/?ref=CODE, created on
+-- first use); referred_by = who invited this subscriber; referral_level = reward reached
+-- (0 none, 1 Season Priority at 5 friends, 2 Priority for life at 10). Rewards are season_pass
+-- rows with livemode = 2 (granted, not sold). update_email_sent_at = the one-off update email.
+-- ALTER TABLE subscribers ADD COLUMN ref_code TEXT;
+-- CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribers_ref_code ON subscribers(ref_code);
+-- ALTER TABLE subscribers ADD COLUMN referred_by INTEGER;
+-- ALTER TABLE subscribers ADD COLUMN referral_level INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE subscribers ADD COLUMN update_email_sent_at TEXT;

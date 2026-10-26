@@ -121,7 +121,7 @@ const IG_PROFILE_URL = "https://www.instagram.com/roxracealerts/";
 const IG_FOLLOW_HTML = `<p><small>📸 Upcoming ticket dates on Instagram: <a href="${IG_PROFILE_URL}">@roxracealerts</a></small></p>`;
 const IG_FOLLOW_TEXT = `\n\nUpcoming ticket dates on Instagram: ${IG_PROFILE_URL}`;
 
-async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
+async function sendEmail(env: Env, to: string, subject: string, html: string, text: string, opts: { fromName?: string; replyTo?: string } = {}) {
   if (env.EMAIL_DRY_RUN === "1") {
     // Staging: behave as if sent (so every flow runs like production) but never mail anyone.
     await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, 1, ?)").bind(to, subject, `dry run - not sent | ${text.slice(0, 1500)}`).run();
@@ -135,7 +135,15 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
         Authorization: `Bearer ${env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ from: env.SEND_FROM, to: [to], subject, html, text }),
+      body: JSON.stringify({
+        // fromName swaps only the display name ("Francesco from RoxRaceAlerts <alerts@...>").
+        from: opts.fromName ? env.SEND_FROM.replace(/^[^<]*</, `${opts.fromName} <`) : env.SEND_FROM,
+        to: [to],
+        subject,
+        html,
+        text,
+        ...(opts.replyTo ? { reply_to: opts.replyTo } : {}),
+      }),
     });
     if (!resp.ok) {
       const body = await resp.text();
@@ -1348,6 +1356,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
 
   if (subscriber) {
     const counts = await getWatchCounts(subscriber.id, env);
+    const inviteCard = await renderInviteCard(env, subscriber);
     return page(
       "RoxRaceAlerts",
       `${navBar("/", subscriber, counts.tickets + counts.races, false, env)}
@@ -1376,6 +1385,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           </div>
         </div>
         <div class="sidebar">
+          ${inviteCard}
           ${sideOnSaleCard}
           ${sponsorsCard}
           ${announcements}
@@ -2351,9 +2361,11 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   }
   if (update?.callback_query) {
     try {
-      if (String(update.callback_query.data || "").startsWith("ig:")) await handleIgDraftButton(env, update.callback_query);
+      const data = String(update.callback_query.data || "");
+      if (data.startsWith("ig:")) await handleIgDraftButton(env, update.callback_query);
+      else if (data.startsWith("upd:")) await handleUpdateButton(env, update.callback_query);
     } catch (e) {
-      console.error("Instagram draft button failed:", e);
+      console.error("Telegram button failed:", e);
     }
     return new Response("ok");
   }
@@ -2363,6 +2375,10 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   const chatId = String(msg.chat.id);
   const text = msg.text.trim().slice(0, 100);
   try {
+    if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/update_/i.test(text)) {
+      await handleUpdateCommand(env, text);
+      return new Response("ok");
+    }
     const upper = text.toUpperCase();
     if (/^\/(STOP|UNSUBSCRIBE)(@\w+)?$/.test(upper) || upper === "STOP") {
       await env.DB.prepare(
@@ -3011,10 +3027,13 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
     const unsubToken = subscriber ? subscriber.unsubscribe_token : randomToken();
 
     if (!subscriber) {
+      // Arrived through a friend's referral link (cookie set on the homepage)?
+      const refCode = parseCookies(req)[REF_COOKIE] || "";
+      const referrer = REF_CODE_RE.test(refCode) ? await env.DB.prepare("SELECT id FROM subscribers WHERE ref_code = ?").bind(refCode).first<any>() : null;
       await env.DB.prepare(
-        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token) VALUES (?, 0, ?, ?)"
+        "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by) VALUES (?, 0, ?, ?, ?)"
       )
-        .bind(email, verifyToken, unsubToken)
+        .bind(email, verifyToken, unsubToken, referrer?.id ?? null)
         .run();
       subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
       needsVerification = true;
@@ -3216,6 +3235,296 @@ function redirectHome(env: Env, unsubscribeToken: string): Response {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Referrals: every subscriber has a personal link (/?ref=CODE). A friend counts once they signed
+// up through it, confirmed their email and watch something. 5 friends unlock Season Priority
+// (WhatsApp included), 10 unlock it for life. Variants of one inbox (Gmail dots, "+tags") count
+// once. Rewards are season_pass rows with livemode = 2 ("granted", never counted as sales).
+// ---------------------------------------------------------------------------
+const REF_COOKIE = "rra_ref";
+const REF_CODE_RE = /^[A-HJ-NP-Z2-9]{6}$/;
+const REFERRAL_SEASON_AT = 5;
+const REFERRAL_LIFETIME_AT = 10;
+const LIFETIME_VALID_UNTIL = "2099-12-31";
+
+function refLink(env: Env, code: string): string {
+  return `${env.SITE_URL}/?ref=${code}`;
+}
+
+/** The subscriber's referral code, created on first use. */
+async function ensureRefCode(env: Env, subscriber: any): Promise<string> {
+  if (subscriber.ref_code) return subscriber.ref_code;
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  for (let i = 0; i < 5; i++) {
+    const code = Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => alphabet[b % alphabet.length]).join("");
+    try {
+      await env.DB.prepare("UPDATE subscribers SET ref_code = ? WHERE id = ? AND ref_code IS NULL").bind(code, subscriber.id).run();
+    } catch {
+      continue; // taken by someone else (unique index) - try another
+    }
+    const row = await env.DB.prepare("SELECT ref_code FROM subscribers WHERE id = ?").bind(subscriber.id).first<any>();
+    if (row?.ref_code) {
+      subscriber.ref_code = row.ref_code;
+      return row.ref_code;
+    }
+  }
+  throw new Error("could not create a referral code");
+}
+
+/** One key per real inbox: "j.o.e+hyrox@gmail.com" and "joe@gmail.com" are the same person. */
+function inboxKey(email: string): string {
+  const [user, domain = ""] = email.toLowerCase().split("@");
+  const base = user.split("+")[0];
+  return domain === "gmail.com" || domain === "googlemail.com" ? `${base.replace(/\./g, "")}@gmail.com` : `${base}@${domain}`;
+}
+
+async function referralCount(env: Env, subscriber: { id: number; email: string }): Promise<number> {
+  const { results } = await env.DB.prepare(
+    `SELECT s.email FROM subscribers s
+     WHERE s.referred_by = ? AND s.verified = 1
+       AND (EXISTS(SELECT 1 FROM sale_watchers w WHERE w.subscriber_id = s.id) OR EXISTS(SELECT 1 FROM subscriptions t WHERE t.subscriber_id = s.id))`
+  )
+    .bind(subscriber.id)
+    .all<any>();
+  const own = inboxKey(subscriber.email);
+  return new Set((results || []).map((r: any) => inboxKey(r.email)).filter((k) => k !== own)).size;
+}
+
+/** Called when a referred friend confirms: grants the next reward level the referrer has reached. */
+async function checkReferralReward(env: Env, referrerId: number): Promise<void> {
+  const ref = await env.DB.prepare("SELECT id, email, unsubscribe_token, referral_level FROM subscribers WHERE id = ?").bind(referrerId).first<any>();
+  if (!ref) return;
+  const n = await referralCount(env, ref);
+  const level = n >= REFERRAL_LIFETIME_AT ? 2 : n >= REFERRAL_SEASON_AT ? 1 : 0;
+  if (level <= (Number(ref.referral_level) || 0)) return;
+  const claim = await env.DB.prepare("UPDATE subscribers SET referral_level = ? WHERE id = ? AND referral_level < ?").bind(level, ref.id, level).run();
+  if (!claim.meta.changes) return;
+  const lifetime = level === 2;
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO season_pass (subscriber_id, season, valid_until, stripe_session_id, amount_cents, currency, livemode, wants_whatsapp)
+     VALUES (?, ?, ?, ?, 0, '', 2, 1)`
+  )
+    .bind(ref.id, lifetime ? "lifetime" : SEASON_LABEL, lifetime ? LIFETIME_VALID_UNTIL : SEASON_VALID_UNTIL, `referral-${level}-${ref.id}`)
+    .run();
+  const myAlerts = `${env.SITE_URL}/my-alerts?token=${ref.unsubscribe_token}`;
+  const what = lifetime
+    ? "Priority, WhatsApp alerts included, is now yours for life."
+    : `Priority is now on for every race and ticket you watch until ${SEASON_END_LABEL}, WhatsApp alerts included. Keep sharing: at ${REFERRAL_LIFETIME_AT} friends it's yours for life.`;
+  try {
+    await sendEmail(
+      env,
+      ref.email,
+      lifetime ? "Priority for life - thank you! 🎉" : "You've unlocked Priority 🎉",
+      `<p>${n} friends joined RoxRaceAlerts with your link - thank you!</p><p>${escapeHtml(what)}</p><p>Turn on WhatsApp alerts from <a href="${myAlerts}">My alerts</a>.</p><p>Francesco</p>`,
+      `${n} friends joined RoxRaceAlerts with your link - thank you!\n\n${what}\n\nTurn on WhatsApp alerts from My alerts: ${myAlerts}\n\nFrancesco`,
+      { fromName: "Francesco from RoxRaceAlerts", replyTo: SUPPORT_EMAIL }
+    );
+  } catch (e) {
+    console.error("referral reward email failed:", e);
+  }
+  await pingAdmin(env, `🎁 Referral reward: ${ref.email} brought ${n} friends - ${lifetime ? "Priority for life" : "Season Priority"} switched on.`);
+}
+
+/** "Get Priority + WhatsApp free" card for signed-in, confirmed subscribers: link, share buttons, progress. */
+async function renderInviteCard(env: Env, subscriber: any): Promise<string> {
+  if (!subscriber?.verified) return "";
+  let code: string;
+  try {
+    code = await ensureRefCode(env, subscriber);
+  } catch {
+    return "";
+  }
+  const link = refLink(env, code);
+  const n = await referralCount(env, subscriber);
+  const level = Number(subscriber.referral_level) || 0;
+  const status =
+    level >= 2
+      ? `🎉 ${n} friends joined - Priority is yours for life. Thank you!`
+      : level === 1
+        ? `🎉 Priority unlocked for this season. ${Math.max(0, REFERRAL_LIFETIME_AT - n)} more friend(s) and it's yours for life.`
+        : `${n} of ${REFERRAL_SEASON_AT} friends joined`;
+  const share = `I use RoxRaceAlerts to get alerted the second HYROX tickets go on sale or come back. It's free: ${link}`;
+  return `<div class="card" id="inviteCard">
+    <h2>Get Priority + WhatsApp free</h2>
+    <p>Share your link with your training partners and in your HYROX WhatsApp groups.</p>
+    <ul><li><b>${REFERRAL_SEASON_AT} friends</b> sign up: Priority + WhatsApp for the season</li><li><b>${REFERRAL_LIFETIME_AT} friends</b> sign up: free for life</li></ul>
+    <input type="text" readonly value="${escapeHtml(link)}" onclick="this.select()">
+    <p><button type="button" onclick="navigator.clipboard.writeText('${escapeHtml(link)}');this.textContent='Copied!'">Copy link</button>
+    <a href="https://wa.me/?text=${encodeURIComponent(share)}" target="_blank" rel="noopener"><button type="button">Share on WhatsApp</button></a></p>
+    <p class="hint">${escapeHtml(status)}</p>
+  </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// One-off update email to confirmed subscribers (Priority, WhatsApp, referral link, feedback).
+// Started from the admin's Telegram (/update_test, /update_send); the frequent checks then send
+// it in small batches, at most UPDATE_EMAIL_PER_DAY a day so the alerts themselves keep room in
+// the email provider's daily limit. update_email_sent_at makes it once per subscriber.
+// ---------------------------------------------------------------------------
+const UPDATE_EMAIL_PER_DAY = 45;
+
+async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; html: string; text: string }> {
+  const link = refLink(env, await ensureRefCode(env, s));
+  const linkLabel = link.replace(/^https?:\/\//, "");
+  const myAlerts = `${env.SITE_URL}/my-alerts?token=${s.unsubscribe_token}`;
+  const unsub = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
+  const wa = `https://wa.me/?text=${encodeURIComponent(`I use RoxRaceAlerts to get alerted the second HYROX tickets go on sale or come back. It's free: ${link}`)}`;
+  const intro =
+    "I'm Francesco. I am HYROX Pro athlete, I used my coding skills to build RoxRaceAlerts out of pure frustration as I kept not having a simple free tool to monitors races and tickets and decided to make it available to anyone. Thanks for being one of the first to use it!";
+  const news: [string, string][] = [
+    ["Priority alerts:", "since so many people monitor the same races, we have introduced Priority. With just $3 per race you can receive notifications of some tickets available before others."],
+    ["WhatsApp alerts:", "with Priority you also get WhatsApp notifications."],
+    ["Telegram alerts:", "free for everyone. Get your alerts on Telegram too."],
+    ["Easier interface:", "we made the interface easier."],
+  ];
+  const rewards = [
+    `At least ${REFERRAL_SEASON_AT} friends sign up and use RoxRaceAlerts: Priority + WhatsApp free for the season.`,
+    `Share it in your HYROX WhatsApp groups: if at least ${REFERRAL_LIFETIME_AT} people sign up, you get all these benefits free for life.`,
+  ];
+  const feedback = "Tell me what to improve or what you would like to see. Just reply to this email, it comes straight to me.";
+  const html = `<p>Hi HYROX athlete,</p>
+<p>${escapeHtml(intro)}</p>
+<p><b>What's new</b></p>
+<ul>${news.map(([k, v]) => `<li><b>${k}</b> ${escapeHtml(v)}</li>`).join("")}</ul>
+<p><b>Priority + WhatsApp for free</b></p>
+<p>Share your personal link: <a href="${link}"><b>${escapeHtml(linkLabel)}</b></a></p>
+<ul>${rewards.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>
+<p><a href="${wa}">Share on WhatsApp</a></p>
+<p><b>Feedback</b><br>${escapeHtml(feedback)}</p>
+<p>Francesco</p>
+<p><small><a href="${myAlerts}">Manage my alerts</a> &middot; <a href="${unsub}">Unsubscribe</a></small></p>`;
+  const text = `Hi HYROX athlete,
+
+${intro}
+
+What's new
+${news.map(([k, v]) => `- ${k} ${v}`).join("\n")}
+
+Priority + WhatsApp for free
+Share your personal link: ${link}
+${rewards.map((r) => `- ${r}`).join("\n")}
+
+Feedback
+${feedback}
+
+Francesco
+
+Manage my alerts: ${myAlerts}
+Unsubscribe: ${unsub}`;
+  return { subject: "Priority alerts + WhatsApp alerts", html, text };
+}
+
+async function sendUpdateEmailTo(env: Env, s: any): Promise<void> {
+  const c = await updateEmailContent(env, s);
+  await sendEmail(env, s.email, c.subject, c.html, c.text, { fromName: "Francesco from RoxRaceAlerts", replyTo: SUPPORT_EMAIL });
+}
+
+async function updateEmailState(env: Env): Promise<{ status: string; started_at?: string } | null> {
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'update_email'").first<any>();
+  try {
+    return row?.value ? JSON.parse(row.value) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Confirmed subscribers who existed when the send started and haven't had it yet. */
+async function updateEmailPending(env: Env, startedAt: string): Promise<number> {
+  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE verified = 1 AND update_email_sent_at IS NULL AND created_at <= ?").bind(startedAt).first<any>();
+  return Number(r?.n) || 0;
+}
+
+/** Part of the frequent checks: sends the next batch while a send is running. */
+async function sendUpdateEmails(env: Env): Promise<void> {
+  const state = await updateEmailState(env);
+  if (state?.status !== "sending" || !state.started_at) return;
+  const today = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at > datetime('now', '-1 day')").first<any>();
+  const room = Math.min(15, UPDATE_EMAIL_PER_DAY - (Number(today?.n) || 0));
+  if (room <= 0) return;
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM subscribers WHERE verified = 1 AND update_email_sent_at IS NULL AND created_at <= ? ORDER BY id LIMIT ?"
+  )
+    .bind(state.started_at, room)
+    .all<any>();
+  if (!results?.length) {
+    await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('update_email', ?)").bind(JSON.stringify({ ...state, status: "done", done_at: new Date().toISOString() })).run();
+    const sent = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at IS NOT NULL").first<any>();
+    await pingAdmin(env, `📨 Update email finished: sent to ${Number(sent?.n) || 0} subscribers.`);
+    return;
+  }
+  for (const s of results) {
+    const claim = await env.DB.prepare("UPDATE subscribers SET update_email_sent_at = datetime('now') WHERE id = ? AND update_email_sent_at IS NULL").bind(s.id).run();
+    if (!claim.meta.changes) continue;
+    try {
+      await sendUpdateEmailTo(env, s);
+    } catch (e) {
+      console.error(`update email to ${s.email} failed:`, e); // in email_log; not retried
+    }
+    await pause(600); // the email API allows a couple of requests a second
+  }
+}
+
+/** Admin's Telegram: /update_test sends the email to ADMIN_EMAIL, /update_send asks to start the
+ * send (with a confirm button), /update_status shows progress. */
+async function handleUpdateCommand(env: Env, text: string): Promise<void> {
+  const reply = (t: string, markup?: object) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: t, ...(markup ? { reply_markup: markup } : {}) }),
+    });
+  const cmd = text.split(/[\s@]/)[0].toLowerCase();
+  const state = await updateEmailState(env);
+  if (cmd === "/update_test") {
+    const me = env.ADMIN_EMAIL ? await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(env.ADMIN_EMAIL.toLowerCase()).first<any>() : null;
+    if (!me) {
+      await reply(`${env.ADMIN_EMAIL || "ADMIN_EMAIL"} isn't a subscriber, so there's no personal link to show. Sign up with it first.`);
+      return;
+    }
+    await sendUpdateEmailTo(env, me);
+    await reply(`Test sent to ${me.email}. Send /update_send when it looks right.`);
+    return;
+  }
+  if (cmd === "/update_send") {
+    if (state?.status === "sending") {
+      await reply("It's already sending. /update_status shows progress.");
+      return;
+    }
+    const n = await updateEmailPending(env, new Date().toISOString().replace("T", " ").slice(0, 19));
+    await reply(`Send the update email to ${n} confirmed subscribers? It goes out ${UPDATE_EMAIL_PER_DAY} a day at most.`, {
+      inline_keyboard: [[{ text: `📨 Send to ${n}`, callback_data: "upd:send" }]],
+    });
+    return;
+  }
+  if (cmd === "/update_status") {
+    const sent = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at IS NOT NULL").first<any>();
+    const left = state?.started_at ? await updateEmailPending(env, state.started_at) : 0;
+    await reply(`Update email: ${state?.status || "not started"} · sent ${Number(sent?.n) || 0} · left ${left}`);
+  }
+}
+
+async function handleUpdateButton(env: Env, cb: any): Promise<void> {
+  const answer = (t: string) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cb.id, text: t }),
+    });
+  if (!env.TELEGRAM_CHAT_ID || String(cb.from?.id) !== String(env.TELEGRAM_CHAT_ID) || cb.data !== "upd:send") {
+    await answer("Not allowed.");
+    return;
+  }
+  const state = await updateEmailState(env);
+  if (state?.status === "sending") {
+    await answer("Already sending.");
+    return;
+  }
+  const value = { status: "sending", started_at: new Date().toISOString().replace("T", " ").slice(0, 19) };
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('update_email', ?)").bind(JSON.stringify(value)).run();
+  await answer("Sending started.");
+  await pingAdmin(env, `📨 Update email: sending started (${UPDATE_EMAIL_PER_DAY} a day at most). /update_status shows progress.`);
+}
+
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const ticketValues = form.getAll("ticket").map(String);
@@ -3362,7 +3671,14 @@ async function handleVerify(req: Request, env: Env): Promise<Response> {
     return page("Invalid or expired link", `<div class="card"><p>This confirmation link is invalid or already used.</p></div>`);
   }
   await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = NULL WHERE id = ?").bind(subscriber.id).run();
-  await pingAdmin(env, `✅ Email confirmed: ${subscriber.email}`);
+  await pingAdmin(env, `✅ Email confirmed: ${subscriber.email}${subscriber.referred_by ? " (invited by a friend)" : ""}`);
+  if (subscriber.referred_by) {
+    try {
+      await checkReferralReward(env, Number(subscriber.referred_by));
+    } catch (e) {
+      console.error("referral check failed:", e);
+    }
+  }
   const offers = priorityOpen(env, { ...subscriber, verified: 1 }) ? await priorityCandidates(env, subscriber.id) : [];
   return page(
     "Confirmed",
@@ -3501,6 +3817,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     `${navBar("/my-alerts", subscriber, counts.tickets + counts.races, false, env)}
     ${verifyBanner}
     ${paidBanner}
+    ${await renderInviteCard(env, subscriber)}
     <div class="card">
       <h2>Your watched tickets</h2>
       ${rows.active}
@@ -5826,6 +6143,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     checkInstagramToken(env),
     draftGoingLivePosts(env),
     postPendingStories(env),
+    sendUpdateEmails(env),
   ]);
 }
 
@@ -5891,7 +6209,13 @@ export default {
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
       const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(-story)?\.jpg$/);
       if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2], !!igMedia[3]);
-      if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
+      if (url.pathname === "/" && req.method === "GET") {
+        const resp = await handleSignupPage(req, env);
+        // A friend's referral link: remember it for 30 days, until this visitor signs up.
+        const ref = (url.searchParams.get("ref") || "").toUpperCase();
+        if (REF_CODE_RE.test(ref)) resp.headers.append("Set-Cookie", `${REF_COOKIE}=${ref}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
+        return resp;
+      }
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
       if (url.pathname === "/login" && req.method === "POST") return await handleLogin(req, env);
@@ -5974,6 +6298,24 @@ export default {
           ? await fetch(`https://graph.instagram.com/${me.user_id}/content_publishing_limit?fields=config,quota_usage&access_token=${tok}`).then((r) => r.json())
           : null;
         return jsonResponse({ me, limit });
+      }
+      if (url.pathname === "/admin/update-email" && req.method === "POST") {
+        // Same as the Telegram commands, for staging (no Telegram there): action=preview returns the
+        // email as a subscriber would get it, action=start starts the batched send. Admin only.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        const action = url.searchParams.get("action");
+        if (action === "preview") {
+          const s = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind((url.searchParams.get("email") || "").toLowerCase()).first<any>();
+          if (!s) return jsonResponse({ error: "no such subscriber" }, 404);
+          return jsonResponse(await updateEmailContent(env, s));
+        }
+        if (action === "start") {
+          const value = { status: "sending", started_at: new Date().toISOString().replace("T", " ").slice(0, 19) };
+          await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('update_email', ?)").bind(JSON.stringify(value)).run();
+          await sendUpdateEmails(env);
+          return jsonResponse({ ok: true, left: await updateEmailPending(env, value.started_at) });
+        }
+        return jsonResponse({ error: "action must be preview or start" }, 400);
       }
       if (url.pathname === "/admin/heartbeat-test" && req.method === "POST") {
         // Same write the scheduled handler does, over HTTP: tells "cron never invoked" apart from
