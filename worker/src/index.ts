@@ -3362,7 +3362,7 @@ async function renderInviteCard(env: Env, subscriber: any): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// One-off update email to confirmed subscribers (Priority, WhatsApp, referral link, feedback).
+// One-off update email to every subscriber, confirmed or not (Priority, WhatsApp, referral link, feedback).
 // Started from the admin's Telegram (/update_test, /update_send); the frequent checks then send
 // it in small batches, at most UPDATE_EMAIL_PER_DAY a day so the alerts themselves keep room in
 // the email provider's daily limit. update_email_sent_at makes it once per subscriber.
@@ -3388,6 +3388,9 @@ async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; 
     `Share it in your HYROX WhatsApp groups: if at least ${REFERRAL_LIFETIME_AT} people sign up, you get all these benefits free for life.`,
   ];
   const feedback = "Tell me what to improve or what you would like to see. Just reply to this email, it comes straight to me.";
+  // Never-confirmed subscribers get it too, with their confirm link: until they click it, no alerts go out.
+  const confirmLink = !s.verified && s.verify_token ? `${env.SITE_URL}/verify?token=${s.verify_token}` : "";
+  const confirmNote = "P.S. You haven't confirmed your email yet, so your alerts are not switched on. Confirm here:";
   // Layout for skimming (the words are the admin's own and stay as written): short paragraphs, clear
   // headings, key numbers in bold, the link as plain text (a big link button looked like spam), and a
   // Share on WhatsApp button. Inline styles - email clients
@@ -3409,6 +3412,7 @@ ${h("Priority + WhatsApp for free")}
 ${h("Feedback")}
 <p>${escapeHtml(feedback)}</p>
 <p style="margin-top:24px">Francesco</p>
+${confirmLink ? `<p style="margin-top:20px"><b>${escapeHtml(confirmNote)}</b> <a href="${confirmLink}">${confirmLink}</a></p>` : ""}
 <p style="margin-top:28px;font-size:12px;color:#888"><a href="${myAlerts}" style="color:#888">Manage my alerts</a> &middot; <a href="${unsub}" style="color:#888">Unsubscribe</a></p>
 </div>`;
   const text = `Hi HYROX athlete,
@@ -3426,7 +3430,7 @@ Feedback
 ${feedback}
 
 Francesco
-
+${confirmLink ? `\n${confirmNote} ${confirmLink}\n` : ""}
 Manage my alerts: ${myAlerts}
 Unsubscribe: ${unsub}`;
   return { subject: "Priority alerts + WhatsApp alerts", html, text };
@@ -3446,9 +3450,9 @@ async function updateEmailState(env: Env): Promise<{ status: string; started_at?
   }
 }
 
-/** Confirmed subscribers who existed when the send started and haven't had it yet. */
+/** Subscribers who existed when the send started and haven't had it yet. */
 async function updateEmailPending(env: Env, startedAt: string): Promise<number> {
-  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE verified = 1 AND update_email_sent_at IS NULL AND created_at <= ?").bind(startedAt).first<any>();
+  const r = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at IS NULL AND created_at <= ?").bind(startedAt).first<any>();
   return Number(r?.n) || 0;
 }
 
@@ -3460,7 +3464,7 @@ async function sendUpdateEmails(env: Env): Promise<void> {
   const room = Math.min(15, UPDATE_EMAIL_PER_DAY - (Number(today?.n) || 0));
   if (room <= 0) return;
   const { results } = await env.DB.prepare(
-    "SELECT * FROM subscribers WHERE verified = 1 AND update_email_sent_at IS NULL AND created_at <= ? ORDER BY id LIMIT ?"
+    "SELECT * FROM subscribers WHERE update_email_sent_at IS NULL AND created_at <= ? ORDER BY id LIMIT ?"
   )
     .bind(state.started_at, room)
     .all<any>();
@@ -3509,7 +3513,7 @@ async function handleUpdateCommand(env: Env, text: string): Promise<void> {
       return;
     }
     const n = await updateEmailPending(env, new Date().toISOString().replace("T", " ").slice(0, 19));
-    await reply(`Send the update email to ${n} confirmed subscribers? It goes out ${UPDATE_EMAIL_PER_DAY} a day at most.`, {
+    await reply(`Send the update email to all ${n} subscribers? It goes out ${UPDATE_EMAIL_PER_DAY} a day at most.`, {
       inline_keyboard: [[{ text: `📨 Send to ${n}`, callback_data: "upd:send" }]],
     });
     return;
