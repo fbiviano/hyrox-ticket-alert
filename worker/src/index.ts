@@ -5821,6 +5821,39 @@ ${urls.map((u) => `  <url><loc>${u.loc}</loc><lastmod>${today}</lastmod><changef
   return new Response(xml, { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=3600" } });
 }
 
+// IndexNow: tells Bing (and DuckDuckGo, Yandex, Naver, which share it) which pages changed, so
+// race pages and guides are re-read within hours instead of whenever the crawler returns. The key
+// is public by design: search engines verify it by fetching /<key>.txt from this host.
+const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
+
+/** Every URL the sitemap lists. */
+async function publicUrls(env: Env): Promise<string[]> {
+  const races = await listDirectoryEvents(env);
+  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/about`, `${env.SITE_URL}/partners`];
+}
+
+/** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
+ * host), at most once a day; the API's answer is kept in kv_meta "indexnow_status". */
+async function submitIndexNow(env: Env, force = false): Promise<{ status: number; urls: number } | null> {
+  const host = new URL(env.SITE_URL).hostname;
+  if (!force && host.endsWith("workers.dev")) return null;
+  const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'indexnow_status'").first<any>();
+  if (!force && last?.value) {
+    try {
+      if (Date.now() - Date.parse(JSON.parse(last.value).at) < 24 * 3600_000) return null;
+    } catch {}
+  }
+  const urlList = await publicUrls(env);
+  const resp = await fetch("https://api.indexnow.org/indexnow", {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ host, key: INDEXNOW_KEY, keyLocation: `${env.SITE_URL}/${INDEXNOW_KEY}.txt`, urlList }),
+  });
+  const result = { at: new Date().toISOString(), status: resp.status, urls: urlList.length };
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('indexnow_status', ?)").bind(JSON.stringify(result)).run();
+  return { status: resp.status, urls: urlList.length };
+}
+
 /** Keeps personal pages (sign-in links, alert management) out of search results. Cloudflare may
  * prepend its own content-signal lines to this file. */
 function handleRobots(env: Env): Response {
@@ -7176,6 +7209,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     postPendingStories(env),
     sendUpdateEmails(env),
     runInstagramPlan(env),
+    submitIndexNow(env),
   ]);
 }
 
@@ -7244,6 +7278,12 @@ export default {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
       if (url.pathname === "/sitemap.xml" && req.method === "GET") return await handleSitemap(env);
       if (url.pathname === "/robots.txt" && req.method === "GET") return handleRobots(env);
+      if (url.pathname === `/${INDEXNOW_KEY}.txt` && req.method === "GET") return new Response(INDEXNOW_KEY, { headers: { "content-type": "text/plain" } });
+      if (url.pathname === "/admin/indexnow" && req.method === "POST") {
+        // Submits every public URL to IndexNow now, regardless of host or the daily limit. Admin only.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        return jsonResponse(await submitIndexNow(env, true));
+      }
       const racePage = url.pathname.match(/^\/hyrox\/([a-z0-9-]{1,60})\/?$/);
       if (racePage && req.method === "GET") return await handleRacePage(req, env, racePage[1]);
       if ((url.pathname === "/hyrox" || url.pathname === "/hyrox/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/`, 301);
