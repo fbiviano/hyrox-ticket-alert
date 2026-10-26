@@ -1,4 +1,5 @@
 import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS, FetchBlocked } from "./resolve";
+import { renderCardJpeg, type CardInput } from "./igcard";
 import PostalMime from "postal-mime";
 
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
@@ -2353,6 +2354,14 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   try {
     update = await req.json();
   } catch {
+    return new Response("ok");
+  }
+  if (update?.callback_query) {
+    try {
+      if (String(update.callback_query.data || "").startsWith("ig:")) await handleIgDraftButton(env, update.callback_query);
+    } catch (e) {
+      console.error("Instagram draft button failed:", e);
+    }
     return new Response("ok");
   }
   const msg = update?.message;
@@ -5458,8 +5467,125 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
 }
 
-/** Daily Instagram token health check (and, later, renewal): which account the token belongs to
- * and the posting quota, stored in kv_meta "ig_status" so it can be read without the admin key.
+// ---------------------------------------------------------------------------
+// Instagram "GOING LIVE SOON" posts - the format of our best-performing post (HYROX Basel):
+// race name, when tickets open (in the race's own time zone), race day, call to action.
+// ---------------------------------------------------------------------------
+function titleCase(w: string): string {
+  return w
+    .toLowerCase()
+    .split(/([ -])/)
+    .map((p) => (p.length > 1 || /[a-zà-ÿ]/i.test(p) ? p.charAt(0).toUpperCase() + p.slice(1) : p))
+    .join("");
+}
+
+/** "INTERSPORT HYROX Vienna" -> { name: "HYROX Vienna", city: "Vienna" } (sponsor dropped). */
+function raceNameParts(title: string): { name: string; city: string } {
+  const i = title.toUpperCase().indexOf("HYROX");
+  const rest = (i >= 0 ? title.slice(i + 5) : title).trim();
+  const city = titleCase(rest.replace(/\s+/g, " "));
+  return { name: `HYROX ${city}`.trim(), city };
+}
+
+/** Time-zone label people recognise: "CET", "EST" ... falling back to "GMT+1". */
+function tzLabel(d: Date, tz: string): string {
+  const pick = (loc: string) =>
+    new Intl.DateTimeFormat(loc, { timeZone: tz, timeZoneName: "short" }).formatToParts(d).find((p) => p.type === "timeZoneName")?.value || "";
+  const gb = pick("en-GB");
+  if (gb && !/^GMT|^UTC/.test(gb)) return gb;
+  const us = pick("en-US");
+  return us && !/^GMT|^UTC/.test(us) ? us : gb || "UTC";
+}
+
+interface GoingLivePost {
+  card: CardInput;
+  caption: string;
+}
+
+function goingLivePost(row: { title: string; event_date: string | null; presale_live_at: string; presale_timezone: string | null }): GoingLivePost {
+  const tz = row.presale_timezone || "UTC";
+  const at = new Date(row.presale_live_at);
+  const { name, city } = raceNameParts(row.title);
+  const fmt = (o: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: tz, ...o }).format(at);
+  const shortDate = fmt({ month: "short", day: "numeric" }); // "Nov 11"
+  const longDate = fmt({ month: "long", day: "numeric" }); // "November 11"
+  const time = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false }).format(at); // "12:00"
+  const zone = tzLabel(at, tz);
+  const raceDay = row.event_date
+    ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(row.event_date + "T00:00:00Z"))
+    : "";
+  const tag = city.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]/g, "");
+  return {
+    card: {
+      badge: "GOING LIVE SOON",
+      titleLines: ["HYROX", city.toUpperCase()],
+      line1: `Tickets open ${shortDate} · ${time} ${zone}`,
+      line2: raceDay ? `Race day: ${raceDay}` : undefined,
+      footer1: "Get alerted the second it opens",
+      footer2: "roxracealerts.com",
+    },
+    caption:
+      `🚨 ${name} tickets go live ${longDate} at ${time} ${zone}.
+
+` +
+      (raceDay ? `Race day is ${raceDay} - ` : "") +
+      `set your own reminder, or let us do it for you. RoxRaceAlerts pings you the second sales open, free.
+
+Link in bio.
+
+` +
+      `#hyrox #hyrox${tag} #hyroxcommunity #hyroxticket #hybridathlete`,
+  };
+}
+
+/** Our recent Instagram posts with like/comment counts and insights (reach, views, saves,
+ * shares) where the token allows them. Read-only. */
+async function fetchInstagramMedia(env: Env): Promise<{ count: number; items: any[]; error?: string }> {
+  const tok = encodeURIComponent(await igToken(env));
+  const list: any = await fetch(`https://graph.instagram.com/me/media?fields=id,caption,media_type,media_product_type,timestamp,permalink,like_count,comments_count,media_url,thumbnail_url&limit=50&access_token=${tok}`).then((r) => r.json());
+  const items = Array.isArray(list?.data) ? list.data : [];
+  for (const m of items) {
+    const ins: any = await fetch(`https://graph.instagram.com/${m.id}/insights?metric=reach,views,likes,comments,saved,shares,total_interactions&access_token=${tok}`).then((r) => r.json());
+    m.insights = Array.isArray(ins?.data) ? Object.fromEntries(ins.data.map((d: any) => [d.name, d.values?.[0]?.value ?? d.total_value?.value])) : { error: ins?.error?.message };
+  }
+  return { count: items.length, items, error: list?.error?.message };
+}
+
+/** The Instagram token in use. Long-lived tokens expire after 60 days, so checkInstagramToken renews
+ * it weekly and keeps the renewed one in kv_meta "ig_token" (a Worker can't update its own secrets).
+ * The renewed token only counts while IG_ACCESS_TOKEN is still the secret it came from, so putting
+ * a fresh secret in place always wins. */
+async function igToken(env: Env): Promise<string> {
+  const base = env.IG_ACCESS_TOKEN || "";
+  if (!base) return "";
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'ig_token'").first<any>();
+  try {
+    const saved = row?.value ? JSON.parse(row.value) : null;
+    if (saved?.token && saved.from === base.slice(-12)) return saved.token;
+  } catch {}
+  return base;
+}
+
+/** Renews the Instagram token when the last renewal is over a week old. Instagram only renews
+ * tokens that are at least a day old, so a brand-new secret just fails once and is retried the
+ * next day. Returns an error message, or null. */
+async function renewIgTokenIfDue(env: Env): Promise<string | null> {
+  const base = env.IG_ACCESS_TOKEN || "";
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'ig_token'").first<any>();
+  let saved: any = null;
+  try {
+    saved = row?.value ? JSON.parse(row.value) : null;
+  } catch {}
+  if (saved?.from === base.slice(-12) && Date.now() - Date.parse(saved.renewed_at) < 7 * 86400_000) return null;
+  const r: any = await fetch(`https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${encodeURIComponent(await igToken(env))}`).then((x) => x.json());
+  if (!r?.access_token) return `renewal failed: ${r?.error?.message ?? "no token returned"}`;
+  const value = { token: r.access_token, from: base.slice(-12), renewed_at: new Date().toISOString(), expires_in: r.expires_in };
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_token', ?)").bind(JSON.stringify(value)).run();
+  return null;
+}
+
+/** Daily Instagram token health check and renewal: which account the token belongs to and the
+ * posting quota, stored in kv_meta "ig_status" so it can be read without the admin key.
  * Runs at most once a day; the first run happens on the first scheduler tick after a deploy. */
 async function checkInstagramToken(env: Env): Promise<void> {
   if (!env.IG_ACCESS_TOKEN) return;
@@ -5469,7 +5595,7 @@ async function checkInstagramToken(env: Env): Promise<void> {
       if (Date.now() - Date.parse(JSON.parse(last.value).checked_at) < 24 * 3600_000) return;
     } catch {}
   }
-  const tok = encodeURIComponent(env.IG_ACCESS_TOKEN);
+  const tok = encodeURIComponent(await igToken(env));
   const status: any = { checked_at: new Date().toISOString() };
   try {
     const me: any = await fetch(`https://graph.instagram.com/me?fields=user_id,username,account_type,media_count&access_token=${tok}`).then((r) => r.json());
@@ -5479,10 +5605,183 @@ async function checkInstagramToken(env: Env): Promise<void> {
       const lim: any = await fetch(`https://graph.instagram.com/${me.user_id}/content_publishing_limit?fields=config,quota_usage&access_token=${tok}`).then((r) => r.json());
       status.quota = lim?.data?.[0] ?? lim?.error?.message ?? null;
     }
+    if (!status.error) {
+      const renewError = await renewIgTokenIfDue(env);
+      if (renewError) status.renew_error = renewError;
+    }
   } catch (e) {
     status.error = String(e).slice(0, 200);
   }
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_status', ?)").bind(JSON.stringify(status)).run();
+  // Daily snapshot of our posts and how they did, to learn what works (read with D1, no admin key).
+  if (!status.error) {
+    try {
+      const media = await fetchInstagramMedia(env);
+      await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_media', ?)").bind(JSON.stringify({ at: status.checked_at, ...media })).run();
+    } catch (e) {
+      console.error("ig media snapshot failed:", e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Instagram auto-posts: when HYROX announces when a race's tickets go on sale, a "GOING LIVE SOON"
+// post is drafted and sent to the admin's Telegram with [Post now] / [Skip] buttons. Nothing
+// reaches Instagram without that tap. Drafts live in ig_auto_posts; media_key is a random part of
+// the image URL and of the button data, so staging drafts can never trigger a production post.
+// ---------------------------------------------------------------------------
+
+const IG_DRAFT_EVERY_HOURS = 4; // at most one new draft per 4 hours
+const IG_DRAFT_SWISS_HOURS = [9, 21]; // drafts only arrive between 09:00 and 21:00 Swiss time
+
+function igMediaUrl(env: Env, id: number, key: string): string {
+  return `${env.SITE_URL}/ig-media/${id}-${key}.jpg`;
+}
+
+/** Creates a draft for one directory race and sends it to the admin's Telegram (when configured).
+ * Returns null when that race already has a draft. */
+async function createIgDraft(
+  env: Env,
+  row: { url: string; title: string; event_date: string | null; presale_live_at: string; presale_timezone: string | null }
+): Promise<{ id: number; image_url: string; caption: string; telegram_sent: boolean } | null> {
+  const post = goingLivePost(row);
+  const key = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const ins = await env.DB.prepare(
+    "INSERT OR IGNORE INTO ig_auto_posts (event_url, presale_live_at, card_json, caption, media_key) VALUES (?, ?, ?, ?, ?)"
+  )
+    .bind(row.url, row.presale_live_at, JSON.stringify(post.card), post.caption, key)
+    .run();
+  if (!ins.meta.changes) return null;
+  const id = Number(ins.meta.last_row_id);
+  let sent = false;
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    const form = new FormData();
+    form.set("chat_id", env.TELEGRAM_CHAT_ID);
+    form.set("caption", `📸 Instagram draft: ${raceNameParts(row.title).name}\n\n${post.caption}`.slice(0, 1024));
+    form.set("photo", new Blob([await renderCardJpeg(post.card)], { type: "image/jpeg" }), `going-live-${id}.jpg`);
+    form.set(
+      "reply_markup",
+      JSON.stringify({ inline_keyboard: [[{ text: "✅ Post now", callback_data: `ig:post:${id}:${key}` }, { text: "✖ Skip", callback_data: `ig:skip:${id}:${key}` }]] })
+    );
+    const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: "POST", body: form });
+    sent = resp.ok;
+    if (!resp.ok) {
+      const err = (await resp.text()).slice(0, 300);
+      console.error(`Instagram draft ${id} not sent to Telegram: ${resp.status} ${err}`);
+      await env.DB.prepare("UPDATE ig_auto_posts SET status = 'failed', error = ? WHERE id = ?").bind(`telegram: ${err}`, id).run();
+    }
+  }
+  return { id, image_url: igMediaUrl(env, id, key), caption: post.caption, telegram_sent: sent };
+}
+
+/** Part of the frequent checks: drafts the next "GOING LIVE SOON" post, soonest sale first, for
+ * sales between 6 hours and 21 days away. Needs Instagram and Telegram configured (production). */
+async function draftGoingLivePosts(env: Env): Promise<void> {
+  if (!env.IG_ACCESS_TOKEN || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const hour = Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Zurich", hour: "2-digit", hour12: false }).format(new Date()));
+  if (hour < IG_DRAFT_SWISS_HOURS[0] || hour >= IG_DRAFT_SWISS_HOURS[1]) return;
+  const recent = await env.DB.prepare(`SELECT 1 FROM ig_auto_posts WHERE created_at > datetime('now', '-${IG_DRAFT_EVERY_HOURS} hours') LIMIT 1`).first();
+  if (recent) return;
+  const now = Date.now();
+  const row = await env.DB.prepare(
+    `SELECT d.url, d.title, d.event_date, d.presale_live_at, d.presale_timezone FROM event_directory d
+     WHERE d.presale_is_live = 0 AND d.presale_live_at > ? AND d.presale_live_at < ?
+       AND (d.event_date IS NULL OR d.event_date >= ?)
+       AND NOT EXISTS (SELECT 1 FROM ig_auto_posts p WHERE p.event_url = d.url)
+     ORDER BY d.presale_live_at ASC LIMIT 1`
+  )
+    .bind(new Date(now + 6 * 3600_000).toISOString(), new Date(now + 21 * 86400_000).toISOString(), new Date(now).toISOString().slice(0, 10))
+    .first<any>();
+  if (row) await createIgDraft(env, row);
+}
+
+/** Publishes one image post to our Instagram account: create the media container from a public
+ * JPEG URL, wait until Instagram has fetched the image, then publish. */
+async function publishToInstagram(env: Env, imageUrl: string, caption: string): Promise<{ id: string; permalink?: string }> {
+  const api = "https://graph.instagram.com";
+  const tok = await igToken(env);
+  const get = (path: string) => fetch(`${api}/${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(tok)}`).then((r) => r.json() as Promise<any>);
+  const post = async (path: string, params: Record<string, string>) => {
+    const r: any = await fetch(`${api}/${path}`, { method: "POST", body: new URLSearchParams({ ...params, access_token: tok }) }).then((x) => x.json());
+    if (r?.error) throw new Error(r.error.error_user_msg || r.error.message || JSON.stringify(r.error));
+    return r;
+  };
+  const me = await get("me?fields=user_id");
+  if (!me?.user_id) throw new Error(me?.error?.message || "Instagram token check failed");
+  const container = await post(`${me.user_id}/media`, { image_url: imageUrl, caption });
+  for (let i = 0; i < 10; i++) {
+    const s = await get(`${container.id}?fields=status_code`);
+    if (s?.status_code === "FINISHED") break;
+    if (s?.status_code === "ERROR" || s?.status_code === "EXPIRED") throw new Error(`Instagram couldn't process the image (${s.status_code})`);
+    await pause(2000);
+  }
+  const done = await post(`${me.user_id}/media_publish`, { creation_id: container.id });
+  const info = await get(`${done.id}?fields=permalink`).catch(() => null);
+  return { id: done.id, permalink: info?.permalink };
+}
+
+/** [Post now] / [Skip] on a draft in the admin's Telegram. Only the admin's own taps count. */
+async function handleIgDraftButton(env: Env, cb: any): Promise<void> {
+  const tg = (method: string, body: object) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const answer = (text: string) => tg("answerCallbackQuery", { callback_query_id: cb.id, text });
+  const closeButtons = () =>
+    cb.message ? tg("editMessageReplyMarkup", { chat_id: cb.message.chat.id, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } }) : null;
+  if (!env.TELEGRAM_CHAT_ID || String(cb.from?.id) !== String(env.TELEGRAM_CHAT_ID)) {
+    await answer("Not allowed.");
+    return;
+  }
+  const [, action, idStr, key] = String(cb.data || "").split(":");
+  const row = await env.DB.prepare("SELECT * FROM ig_auto_posts WHERE id = ? AND media_key = ?").bind(Number(idStr), key || "").first<any>();
+  if (!row) {
+    await answer("This draft isn't here any more.");
+    return;
+  }
+  if (row.status !== "pending") {
+    await answer(`Already ${row.status}.`);
+    await closeButtons();
+    return;
+  }
+  if (action === "skip") {
+    await env.DB.prepare("UPDATE ig_auto_posts SET status = 'skipped', decided_at = datetime('now') WHERE id = ? AND status = 'pending'").bind(row.id).run();
+    await answer("Skipped - not posted.");
+    await closeButtons();
+    return;
+  }
+  if (action !== "post") return;
+  if (Date.parse(row.presale_live_at) <= Date.now()) {
+    await env.DB.prepare("UPDATE ig_auto_posts SET status = 'expired', decided_at = datetime('now') WHERE id = ?").bind(row.id).run();
+    await answer("Tickets are already on sale - not posted.");
+    await closeButtons();
+    return;
+  }
+  // Claim it first, so a double tap can't post twice.
+  const claim = await env.DB.prepare("UPDATE ig_auto_posts SET status = 'posting' WHERE id = ? AND status = 'pending'").bind(row.id).run();
+  if (!claim.meta.changes) {
+    await answer("Already being posted.");
+    return;
+  }
+  await answer("Posting to Instagram...");
+  try {
+    const done = await publishToInstagram(env, igMediaUrl(env, row.id, row.media_key), row.caption);
+    await env.DB.prepare("UPDATE ig_auto_posts SET status = 'posted', ig_media_id = ?, error = NULL, decided_at = datetime('now') WHERE id = ?")
+      .bind(done.id, row.id)
+      .run();
+    await closeButtons();
+    await sendTelegram(env, `✅ Posted to Instagram${done.permalink ? `: ${done.permalink}` : "."}`);
+  } catch (e) {
+    const msg = String((e as Error)?.message || e).slice(0, 300);
+    await env.DB.prepare("UPDATE ig_auto_posts SET status = 'pending', error = ? WHERE id = ?").bind(msg, row.id).run();
+    await sendTelegram(env, `⚠️ Instagram post failed: ${msg}\nTap "Post now" again to retry.`);
+  }
+}
+
+/** Public JPEG of a draft, for Instagram to download when publishing. */
+async function handleIgMedia(env: Env, id: number, key: string): Promise<Response> {
+  const row = await env.DB.prepare("SELECT card_json FROM ig_auto_posts WHERE id = ? AND media_key = ?").bind(id, key).first<any>();
+  if (!row) return new Response("Not found", { status: 404 });
+  const jpg = await renderCardJpeg(JSON.parse(row.card_json));
+  return new Response(jpg, { headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=86400" } });
 }
 
 /** The frequent (every ~2 min) job: everything that must notice a change quickly. */
@@ -5494,6 +5793,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     checkAnnouncementReminders(env),
     sendManualVerificationNotices(env),
     checkInstagramToken(env),
+    draftGoingLivePosts(env),
   ]);
 }
 
@@ -5557,6 +5857,8 @@ export default {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
+      const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})\.jpg$/);
+      if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2]);
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
@@ -5600,11 +5902,41 @@ export default {
         const hb = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'alarm_last_run'").first<any>();
         return jsonResponse({ ...body, alarm_last_run: hb?.value ?? null });
       }
+      if (url.pathname.startsWith("/admin/ig/")) {
+        const auth = req.headers.get("Authorization") || "";
+        if (!env.WEBHOOK_SECRET || auth !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+      }
+      if (url.pathname === "/admin/ig/media" && req.method === "POST") {
+        // Read-only: recent posts with counts and, where the token allows it, insights.
+        if (!env.IG_ACCESS_TOKEN) return jsonResponse({ error: "IG_ACCESS_TOKEN not set" }, 400);
+        return jsonResponse(await fetchInstagramMedia(env));
+      }
+      if (url.pathname === "/admin/ig/preview" && req.method === "POST") {
+        // Renders a "GOING LIVE SOON" card for a directory race (or given fields) without posting.
+        const q = url.searchParams;
+        let row: any = q.get("event_url")
+          ? await env.DB.prepare("SELECT title, event_date, presale_live_at, presale_timezone FROM event_directory WHERE url = ?").bind(q.get("event_url")).first<any>()
+          : { title: q.get("title") || "HYROX Kraków", event_date: q.get("race_day"), presale_live_at: q.get("live_at") || new Date(Date.now() + 7 * 86400_000).toISOString(), presale_timezone: q.get("tz") };
+        if (!row?.presale_live_at) return jsonResponse({ error: "no sale time for that race" }, 404);
+        const post = goingLivePost(row);
+        if (q.get("caption") === "1") return jsonResponse(post);
+        const jpg = await renderCardJpeg(post.card);
+        return new Response(jpg, { headers: { "content-type": "image/jpeg", "cache-control": "no-store" } });
+      }
+      if (url.pathname === "/admin/ig/draft" && req.method === "POST") {
+        // Drafts the "GOING LIVE SOON" post for one directory race now (no time window or pacing),
+        // and sends it to Telegram where configured. Nothing is posted to Instagram.
+        const row = await env.DB.prepare("SELECT url, title, event_date, presale_live_at, presale_timezone FROM event_directory WHERE url = ?")
+          .bind(url.searchParams.get("event_url") || "")
+          .first<any>();
+        if (!row?.presale_live_at) return jsonResponse({ error: "no sale time for that race" }, 404);
+        const draft = await createIgDraft(env, row);
+        return draft ? jsonResponse(draft) : jsonResponse({ error: "that race already has a draft" }, 409);
+      }
       if (url.pathname === "/admin/ig/check" && req.method === "POST") {
         // Read-only: which Instagram account the token belongs to and how much posting quota is left.
-        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
         if (!env.IG_ACCESS_TOKEN) return jsonResponse({ error: "IG_ACCESS_TOKEN not set" }, 400);
-        const tok = encodeURIComponent(env.IG_ACCESS_TOKEN);
+        const tok = encodeURIComponent(await igToken(env));
         const me: any = await fetch(`https://graph.instagram.com/me?fields=user_id,username,account_type,media_count&access_token=${tok}`).then((r) => r.json());
         const limit = me?.user_id
           ? await fetch(`https://graph.instagram.com/${me.user_id}/content_publishing_limit?fields=config,quota_usage&access_token=${tok}`).then((r) => r.json())

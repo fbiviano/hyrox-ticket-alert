@@ -463,3 +463,21 @@ CREATE TABLE IF NOT EXISTS kv_meta (
 -- Lookups go there directly: hyrox.com rate-limits Cloudflare, the country shops don't.
 -- (Column added to event_directory by migration on 2026-10-26.)
 -- ALTER TABLE event_directory ADD COLUMN shop_url TEXT;
+
+-- Instagram "GOING LIVE SOON" drafts (one per race). Sent to the admin's Telegram with
+-- [Post now] / [Skip]; nothing is posted without that tap. media_key is random and part of the
+-- public image URL (/ig-media/<id>-<key>.jpg) and of the button data.
+-- status: pending | posting | posted | skipped | expired | failed (Telegram send failed)
+CREATE TABLE IF NOT EXISTS ig_auto_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_url TEXT NOT NULL UNIQUE,
+  presale_live_at TEXT NOT NULL,
+  card_json TEXT NOT NULL,
+  caption TEXT NOT NULL,
+  media_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  ig_media_id TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  decided_at TEXT
+);

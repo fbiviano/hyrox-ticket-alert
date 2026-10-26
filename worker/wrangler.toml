@@ -1,7 +1,16 @@
 name = "roxracealerts"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
+# Node Buffer etc. - needed by jpeg-js (Instagram card rendering).
+compatibility_flags = ["nodejs_compat"]
+
 account_id = "57868dd73e0674a43c6ff3768d120883"
+
+# Fonts for the Instagram card are bundled as binary data.
+[[rules]]
+type = "Data"
+globs = ["**/*.ttf"]
+fallthrough = true
 
 [[d1_databases]]
 binding = "DB"
