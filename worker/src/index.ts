@@ -3383,7 +3383,8 @@ async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; 
   ];
   const feedback = "Tell me what to improve or what you would like to see. Just reply to this email, it comes straight to me.";
   // Layout for skimming (the words are the admin's own and stay as written): short paragraphs, clear
-  // headings, the personal link in a big box, key numbers in bold. Inline styles - email clients
+  // headings, key numbers in bold, the link as plain text (a big link button looked like spam), and a
+  // Share on WhatsApp button. Inline styles - email clients
   // ignore <style> blocks.
   const h = (t: string) => `<h2 style="font-size:18px;margin:28px 0 10px;color:#111">${t}</h2>`;
   const li = (t: string) => `<li style="margin:0 0 10px">${t}</li>`;
@@ -3396,8 +3397,7 @@ ${introB ? `<p>${escapeHtml(introB)}</p>` : ""}
 ${h("What's new")}
 <ul style="padding-left:20px;margin:0">${news.map(([k, v]) => li(`<b>${k}</b> ${escapeHtml(v)}`)).join("")}</ul>
 ${h("Priority + WhatsApp for free")}
-<p style="margin:0 0 8px">Share your personal link:</p>
-<p style="margin:0 0 14px"><a href="${link}" style="display:inline-block;background:#ff6a00;color:#fff;font-weight:bold;font-size:18px;padding:12px 18px;border-radius:8px;text-decoration:none">${escapeHtml(linkLabel)}</a></p>
+<p style="margin:0 0 12px">Share your personal link: <a href="${link}"><b>${escapeHtml(linkLabel)}</b></a></p>
 <ul style="padding-left:20px;margin:0">${rewards.map((r) => li(boldNumbers(r))).join("")}</ul>
 <p style="margin:6px 0 0"><a href="${wa}" style="display:inline-block;background:#25d366;color:#fff;font-weight:bold;padding:10px 16px;border-radius:8px;text-decoration:none">Share on WhatsApp</a></p>
 ${h("Feedback")}
