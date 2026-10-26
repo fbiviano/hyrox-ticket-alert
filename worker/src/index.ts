@@ -3368,10 +3368,18 @@ async function renderInviteCard(env: Env, subscriber: any): Promise<string> {
 // ---------------------------------------------------------------------------
 // One-off update email to every subscriber, confirmed or not (Priority, WhatsApp, referral link, feedback).
 // Started from the admin's Telegram (/update_test, /update_send); the frequent checks then send
-// it in small batches, at most UPDATE_EMAIL_PER_DAY a day so the alerts themselves keep room in
-// the email provider's daily limit. update_email_sent_at makes it once per subscriber.
+// it in small batches, only in the morning (UPDATE_EMAIL_SWISS_HOURS) and at most
+// UPDATE_EMAIL_PER_DAY per Swiss day, so the alerts themselves keep room in the email provider's
+// daily limit. update_email_sent_at makes it once per subscriber.
 // ---------------------------------------------------------------------------
-const UPDATE_EMAIL_PER_DAY = 45;
+const UPDATE_EMAIL_PER_DAY = 50;
+const UPDATE_EMAIL_SWISS_HOURS = [9, 10]; // sends start at 09:00 Swiss time, none after 10:00
+
+/** Minutes Swiss time is ahead of UTC right now (60 in winter, 120 in summer). */
+function zurichOffsetMinutes(now = new Date()): number {
+  const wall = (tz: string) => Date.parse(new Date(now.toLocaleString("en-US", { timeZone: tz })).toISOString());
+  return Math.round((wall("Europe/Zurich") - wall("UTC")) / 60000);
+}
 const UPDATE_EMAIL_SUBJECT = "Priority alerts + WhatsApp alerts";
 
 async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; html: string; text: string }> {
@@ -3465,7 +3473,14 @@ async function updateEmailPending(env: Env, startedAt: string): Promise<number> 
 async function sendUpdateEmails(env: Env): Promise<void> {
   const state = await updateEmailState(env);
   if (state?.status !== "sending" || !state.started_at) return;
-  const today = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at > datetime('now', '-1 day')").first<any>();
+  const offset = zurichOffsetMinutes();
+  const hour = new Date(Date.now() + offset * 60000).getUTCHours();
+  if (hour < UPDATE_EMAIL_SWISS_HOURS[0] || hour >= UPDATE_EMAIL_SWISS_HOURS[1]) return;
+  const today = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM subscribers WHERE date(update_email_sent_at, ?1) = date('now', ?1)"
+  )
+    .bind(`+${offset} minutes`)
+    .first<any>();
   const room = Math.min(15, UPDATE_EMAIL_PER_DAY - (Number(today?.n) || 0));
   if (room <= 0) return;
   const { results } = await env.DB.prepare(
@@ -3518,7 +3533,7 @@ async function handleUpdateCommand(env: Env, text: string): Promise<void> {
       return;
     }
     const n = await updateEmailPending(env, new Date().toISOString().replace("T", " ").slice(0, 19));
-    await reply(`Send the update email to all ${n} subscribers? It goes out ${UPDATE_EMAIL_PER_DAY} a day at most.`, {
+    await reply(`Send the update email to all ${n} subscribers? It goes out from ${UPDATE_EMAIL_SWISS_HOURS[0]}:00 Swiss time, ${UPDATE_EMAIL_PER_DAY} a day at most.`, {
       inline_keyboard: [[{ text: `📨 Send to ${n}`, callback_data: "upd:send" }]],
     });
     return;
@@ -3626,7 +3641,7 @@ async function handleUpdateButton(env: Env, cb: any): Promise<void> {
   const value = { status: "sending", started_at: new Date().toISOString().replace("T", " ").slice(0, 19) };
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('update_email', ?)").bind(JSON.stringify(value)).run();
   await answer("Sending started.");
-  await pingAdmin(env, `📨 Update email: sending started (${UPDATE_EMAIL_PER_DAY} a day at most). /update_status shows progress.`);
+  await pingAdmin(env, `📨 Update email: sending started (from ${UPDATE_EMAIL_SWISS_HOURS[0]}:00 Swiss time, ${UPDATE_EMAIL_PER_DAY} a day at most). /update_status shows progress.`);
 }
 
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
