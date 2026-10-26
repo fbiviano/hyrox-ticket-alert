@@ -533,6 +533,14 @@ body.wide{max-width:980px}
 .main-col{flex:0 0 640px;max-width:640px;min-width:0}
 .sidebar{flex:0 0 300px;max-width:300px;display:flex;flex-direction:column;gap:16px}
 .sidebar .event-row{flex-direction:column;align-items:flex-start;gap:4px}
+.side-compact .card{margin:0;padding:16px 18px}
+.side-compact h2{font-size:1rem;margin:0 0 8px}
+.side-compact p,.side-compact li{font-size:0.88rem;line-height:1.45}
+.side-compact ul{padding-left:18px;margin:6px 0}
+.side-compact input[type=text],.side-compact input[type=tel]{font-size:0.82rem;padding:6px 8px;margin:4px 0}
+.side-compact label{font-size:0.8rem;margin:4px 0}
+.side-compact .consent,.side-compact .hint,.side-compact small{font-size:0.74rem;line-height:1.35;margin:6px 0 0}
+.side-compact button{font-size:0.85rem;padding:7px 12px;margin:2px 4px 2px 0}
 .hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
@@ -3827,22 +3835,28 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     `${navBar("/my-alerts", subscriber, counts.tickets + counts.races, false, env)}
     ${verifyBanner}
     ${paidBanner}
-    ${await renderInviteCard(env, subscriber)}
-    <div class="card">
-      <h2>Your watched tickets</h2>
-      ${rows.active}
-      ${saleSections.join("\n")}
-    </div>
-    ${rows.purchased ? `<div class="card"><h2>Purchased</h2>${rows.purchased}</div>` : ""}
-    ${pastEventsSection(rows.past, saleRows.past)}
-    ${renderWhatsAppCard(env, subscriber)}
-    ${renderTelegramCard(env, subscriber)}
-    <div class="card">
-      <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
-    </div>
-    <div class="card">
-      <p><a href="/unsubscribe?token=${escapeHtml(subscriber.unsubscribe_token)}">Unsubscribe from everything</a></p>
-    </div>`
+    <div class="layout">
+      <div class="main-col">
+        <div class="card">
+          <h2>Your watched tickets</h2>
+          ${rows.active}
+          ${saleSections.join("\n")}
+        </div>
+        ${rows.purchased ? `<div class="card"><h2>Purchased</h2>${rows.purchased}</div>` : ""}
+        ${pastEventsSection(rows.past, saleRows.past)}
+        <div class="card">
+          <p>Want to track another ticket? <a href="/">Search on the homepage</a>.</p>
+          <p><a href="/unsubscribe?token=${escapeHtml(subscriber.unsubscribe_token)}">Unsubscribe from everything</a></p>
+        </div>
+      </div>
+      <div class="sidebar side-compact">
+        ${await renderInviteCard(env, subscriber)}
+        ${renderWhatsAppCard(env, subscriber)}
+        ${renderTelegramCard(env, subscriber)}
+      </div>
+    </div>`,
+    {},
+    true
   );
 }
 
