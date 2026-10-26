@@ -1356,7 +1356,6 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
 
   if (subscriber) {
     const counts = await getWatchCounts(subscriber.id, env);
-    const inviteCard = await renderInviteCard(env, subscriber);
     return page(
       "RoxRaceAlerts",
       `${navBar("/", subscriber, counts.tickets + counts.races, false, env)}
@@ -1385,7 +1384,6 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           </div>
         </div>
         <div class="sidebar">
-          ${inviteCard}
           ${sideOnSaleCard}
           ${sponsorsCard}
           ${announcements}
