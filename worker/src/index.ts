@@ -116,6 +116,11 @@ function clearSessionCookieHeader(): string {
   return `${SESSION_COOKIE}=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
 
+/** Line in subscriber emails pointing to our Instagram, where upcoming ticket dates are posted. */
+const IG_PROFILE_URL = "https://www.instagram.com/roxracealerts/";
+const IG_FOLLOW_HTML = `<p><small>📸 Upcoming ticket dates on Instagram: <a href="${IG_PROFILE_URL}">@roxracealerts</a></small></p>`;
+const IG_FOLLOW_TEXT = `\n\nUpcoming ticket dates on Instagram: ${IG_PROFILE_URL}`;
+
 async function sendEmail(env: Env, to: string, subject: string, html: string, text: string) {
   if (env.EMAIL_DRY_RUN === "1") {
     // Staging: behave as if sent (so every flow runs like production) but never mail anyone.
@@ -404,8 +409,8 @@ async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName
       env,
       row.email,
       `Ticket available: ${ticketName}`,
-      `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p>${up.html}<p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
-      `${eventName}\n${ticketName} is now available.\n${link}${up.text}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
+      `<p><b>${escapeHtml(eventName)}</b><br>${escapeHtml(ticketName)} is now available.</p><p><a href="${link}">${link}</a></p>${up.html}${IG_FOLLOW_HTML}<p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; <a href="${unsubLink}">Unsubscribe from everything</a></small></p>`,
+      `${eventName}\n${ticketName} is now available.\n${link}${up.text}${IG_FOLLOW_TEXT}\n\nManage my alerts: ${myAlertsLink}\nUnsubscribe from everything: ${unsubLink}`
     );
     await notifyAdminTelegram(env, row.email, `🎟️ ${eventName}\n${ticketName} is now available.\n${link}`);
     return true;
@@ -3203,8 +3208,8 @@ async function sendManualVerificationNotices(env: Env): Promise<void> {
         env,
         s.email,
         "Your RoxRaceAlerts alerts are now active",
-        `<p>You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.</p><p>You're watching:</p><ul>${raceHtml}${ticketHtml}</ul><p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; Didn't sign up, or don't want these? <a href="${unsubLink}">Unsubscribe and delete my address</a>.</small></p>`,
-        `You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.\n\nYou're watching:\n${raceText}${raceText && ticketText ? "\n" : ""}${ticketText}\n\nManage my alerts: ${myAlertsLink}\nDidn't sign up, or don't want these? Unsubscribe and delete my address: ${unsubLink}`
+        `<p>You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.</p><p>You're watching:</p><ul>${raceHtml}${ticketHtml}</ul>${IG_FOLLOW_HTML}<p><small><a href="${myAlertsLink}">Manage my alerts</a> &middot; Didn't sign up, or don't want these? <a href="${unsubLink}">Unsubscribe and delete my address</a>.</small></p>`,
+        `You signed up at roxracealerts.com for HYROX ticket alerts but hadn't clicked the confirmation link, so no alerts were being sent to you. We've switched them on so you don't miss a sale - nothing else for you to do.\n\nYou're watching:\n${raceText}${raceText && ticketText ? "\n" : ""}${ticketText}${IG_FOLLOW_TEXT}\n\nManage my alerts: ${myAlertsLink}\nDidn't sign up, or don't want these? Unsubscribe and delete my address: ${unsubLink}`
       );
     } catch (e) {
       console.error(`Failed to send activation notice to ${s.email}:`, e);
@@ -3824,8 +3829,8 @@ async function sendSaleWatchAlert(env: Env, row: { event_title: string; event_ur
       env,
       watcher.email,
       `Tickets on sale now: ${row.event_title}`,
-      `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p>${up.html}<p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-      `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.${up.text}\n\nManage my alerts: ${myAlertsLink}`
+      `<p><b>${escapeHtml(row.event_title)}</b> tickets are now on sale!</p><p><a href="${row.event_url}">${row.event_url}</a></p><p>Come back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.</p>${up.html}${IG_FOLLOW_HTML}<p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+      `${row.event_title} tickets are now on sale!\n${row.event_url}\n\nCome back to RoxRaceAlerts to pick specific tickets to watch for sold-out alerts too.${up.text}${IG_FOLLOW_TEXT}\n\nManage my alerts: ${myAlertsLink}`
     );
     await notifyAdminTelegram(env, watcher.email, `🎟️ ${row.event_title} tickets are now on sale!\n${row.event_url}`);
   } catch (e) {
@@ -4058,8 +4063,8 @@ async function notifySaleWatchers(
         // update ... check the post" with just the event page as the link,
         // which read as wrong to anyone who'd never seen an Instagram post.
         source === "newsletter" ? `HYROX update on ${eventTitle} tickets` : `Instagram update on ${eventTitle} tickets`,
-        `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-        `${eventTitle}: ${bannerText}\n${postUrl}\n\n${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.\n\nManage my alerts: ${myAlertsLink}`
+        `<p><b>${escapeHtml(eventTitle)}</b>: ${escapeHtml(bannerText)}</p><p><a href="${escapeHtml(postUrl)}">${escapeHtml(postUrl)}</a></p><p><small>${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.</small></p>${IG_FOLLOW_HTML}<p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle}: ${bannerText}\n${postUrl}\n\n${source === "newsletter" ? "From an official HYROX newsletter. " : ""}This may not be the full public sale yet - check ${source === "newsletter" ? "the event page" : "the post"} for details. We'll still alert you the moment the shop itself is live.${IG_FOLLOW_TEXT}\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `📣 ${eventTitle}: ${bannerText}\n${postUrl}`);
     } catch (e) {
@@ -4096,8 +4101,8 @@ async function sendCountdownReminder(
         env,
         watcher.email,
         `${eventTitle} tickets: ${label}`,
-        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(eventUrl)}">${escapeHtml(eventUrl)}</a></p><p><small>This is a best-effort estimate from an official HYROX announcement, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p><p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
-        `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.\n\nManage my alerts: ${myAlertsLink}`
+        `<p><b>${escapeHtml(eventTitle)}</b> ${escapeHtml(label)} (expected around ${escapeHtml(liveAtLabel)}).</p><p><a href="${escapeHtml(eventUrl)}">${escapeHtml(eventUrl)}</a></p><p><small>This is a best-effort estimate from an official HYROX announcement, not a guarantee - we'll still alert you the moment the actual shop is live.</small></p>${IG_FOLLOW_HTML}<p><small><a href="${myAlertsLink}">Manage my alerts</a></small></p>`,
+        `${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}\n\nThis is a best-effort estimate, not a guarantee - we'll still alert you the moment the actual shop is live.${IG_FOLLOW_TEXT}\n\nManage my alerts: ${myAlertsLink}`
       );
       await notifyAdminTelegram(env, watcher.email, `⏰ ${eventTitle} ${label} (expected around ${liveAtLabel}).\n${eventUrl}`);
     } catch (e) {
