@@ -432,16 +432,39 @@ async function sendTicketAlert(env: Env, row: any, eventName: string, ticketName
   }
 }
 
-function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false): Response {
+/** What search engines get told about a page. ownH1: the body carries the H1 itself (the brand
+ * line at the top is then plain text), so the main heading can say what the page is about. */
+interface PageSeo {
+  description?: string;
+  canonical?: string;
+  jsonLd?: object[];
+  ownH1?: boolean;
+}
+
+function page(title: string, body: string, extraHeaders: Record<string, string> = {}, wide = false, seo: PageSeo = {}): Response {
+  const seoHead = [
+    seo.description ? `<meta name="description" content="${escapeHtml(seo.description)}">` : "",
+    seo.canonical ? `<link rel="canonical" href="${escapeHtml(seo.canonical)}">` : "",
+    `<meta property="og:site_name" content="RoxRaceAlerts"><meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}">`,
+    seo.description ? `<meta property="og:description" content="${escapeHtml(seo.description)}">` : "",
+    seo.canonical ? `<meta property="og:url" content="${escapeHtml(seo.canonical)}">` : "",
+    ...(seo.jsonLd || []).map((o) => `<script type="application/ld+json">${JSON.stringify(o).replace(/</g, "\\u003c")}</script>`),
+  ]
+    .filter(Boolean)
+    .join("\n");
   return new Response(
     `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>${escapeHtml(title)}</title>
+${seoHead}
 <style>
 body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#1a1a1a;background:#fafafa}
 h1{font-size:1.5rem}
+.brand{font-size:1.5rem;font-weight:700;margin:0.67em 0}
 h2{font-size:1.1rem;margin-top:0}
+.faq h3{font-size:1rem;margin:16px 0 4px}
+.faq p{margin:0;color:#444;font-size:0.95rem}
 .card{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:24px;margin-top:16px}
 label{display:block;margin:10px 0;font-size:0.95rem}
 input[type=email],input[type=text],input[type=tel]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
@@ -545,7 +568,7 @@ body.wide{max-width:980px}
 .side-compact label{font-size:0.8rem;margin:4px 0}
 .side-compact .consent,.side-compact .hint,.side-compact small{font-size:0.74rem;line-height:1.35;margin:6px 0 0}
 .side-compact button{font-size:0.85rem;padding:7px 12px;margin:2px 4px 2px 0}
-.hero h2{font-size:1.6rem;margin:0 0 6px}
+.hero h1,.hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
 .sponsors{display:flex;flex-direction:column;gap:8px;margin-top:10px}
@@ -571,7 +594,7 @@ body.wide{max-width:980px}
 @media (min-width:1420px){.rail{display:flex;flex-direction:column;gap:12px;position:fixed;top:24px;width:170px;max-height:calc(100vh - 48px);overflow-y:auto;z-index:5}.rail-left{left:calc((100vw - 1020px)/2 - 185px)}#sponsorsCard{display:none}}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
-<body${wide ? ' class="wide"' : ""}><h1>RoxRaceAlerts</h1>${body}
+<body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
 <p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
 </body></html>`,
     {
@@ -1319,6 +1342,9 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const subscriber = await getSessionSubscriber(req, env);
   const announcements = await renderAnnouncementsBanner(env);
   const { card: sponsorsCard, rails: sponsorRails } = await renderSponsors(req, env, previewPartners);
+  const events = await listDirectoryEvents(env);
+  const seo = homeSeo(env);
+  const faq = homeFaqHtml();
 
   const searchBox = `<div class="row">
       <div class="urlWrap">
@@ -1332,12 +1358,13 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
 
   const browseSection = `<details class="browse" id="browseEvents" open>
       <summary class="browse-toggle">On sale now &amp; not on sale yet <span class="chev">&#9656;</span></summary>
-      <div id="eventList" class="event-list"><p>Loading...</p></div>
+      ${eventSummaryLine(events)}
+      <div id="eventList" class="event-list">${eventListHtml(events)}</div>
     </details>`;
 
   const hero = `<div class="hero">
-    <h2>Get HYROX race alerts when tickets become available</h2>
-    <p class="hero-sub">Free alerts for the races you pick: pre-sales, public sales going live, and tickets becoming available again for sold-out races. Any HYROX race, worldwide.</p>
+    <h1>HYROX ticket alerts: know the second tickets go on sale or come back</h1>
+    <p class="hero-sub">We watch every HYROX ticket shop worldwide and alert you when a race goes on sale, a pre-sale opens, or a sold-out ticket becomes available again. Email and Telegram alerts are free; Priority alerts you first, with WhatsApp.</p>
   </div>`;
 
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
@@ -1394,6 +1421,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
             </form>${priorityFlag}${gridFlag}
             ${browseSection}
           </div>
+          ${faq}
         </div>
         <div class="sidebar">
           ${sideOnSaleCard}
@@ -1403,12 +1431,13 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
       </div>
       ${sponsorRails}${RESOLVE_SCRIPT}`,
       {},
-      true
+      true,
+      seo
     );
   }
 
   return page(
-    "Get notified when sold-out HYROX tickets become available",
+    HOME_TITLE,
     `${navBar("/", null, 0, true)}
     <div class="layout">
       <div class="main-col">
@@ -1438,6 +1467,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           </form>${priorityFlag}${gridFlag}
           ${browseSection}
         </div>
+        ${faq}
       </div>
       <div class="sidebar">
         ${sideOnSaleCard}
@@ -1447,7 +1477,8 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
     </div>
     ${sponsorRails}${RESOLVE_SCRIPT}`,
     {},
-    true
+    true,
+    seo
   );
 }
 
@@ -5214,14 +5245,7 @@ async function handleSearchEvents(req: Request, env: Env): Promise<Response> {
  * refreshEventDirectorySaleStatus(). Undated entries (date not parsed yet)
  * sort last rather than being hidden, since they're still real events. */
 async function handleListEvents(env: Env): Promise<Response> {
-  const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
-     WHERE event_date IS NULL OR event_date >= ?
-     ORDER BY event_date IS NULL, event_date, title`
-  )
-    .bind(todayIso())
-    .all<any>();
-  return jsonResponse({ results: results || [] });
+  return jsonResponse({ results: await listDirectoryEvents(env) });
 }
 
 /** Manual trigger for the indexing job (same bearer-secret pattern as
@@ -5302,7 +5326,140 @@ async function renderAnnouncementsBanner(env: Env): Promise<string> {
     </div>`
     )
     .join("");
-  return `<div class="card"><h2>Recent ticket-sale news</h2>${rows}</div>`;
+  return `<div class="card"><h2>Latest HYROX ticket news</h2>${rows}</div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Search engines: the homepage carries the race list, a plain-text summary and a FAQ in its HTML
+// (not only via script), plus description / canonical / schema.org data. Audit of 2026-10-27:
+// Google's AI described the site as an "Instagram monitoring tool" because the static HTML held
+// little else than the Instagram news box.
+// ---------------------------------------------------------------------------
+interface DirectoryEvent {
+  url: string;
+  title: string;
+  event_date: string | null;
+  on_sale: number;
+  on_sale_since: string | null;
+  presale_note: string | null;
+  presale_live_at: string | null;
+  presale_timezone: string | null;
+  presale_is_live: number;
+}
+
+/** Upcoming races in the directory, soonest first (the /events feed and the homepage HTML). */
+async function listDirectoryEvents(env: Env): Promise<DirectoryEvent[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
+     WHERE event_date IS NULL OR event_date >= ?
+     ORDER BY event_date IS NULL, event_date, title`
+  )
+    .bind(todayIso())
+    .all<DirectoryEvent>();
+  return results || [];
+}
+
+const HOME_TITLE = "HYROX Ticket Alerts – Free On-Sale & Sold-Out Notifications";
+const HOME_DESCRIPTION =
+  "Free alerts the second HYROX tickets go on sale or a sold-out spot comes back. Every HYROX race worldwide, by email or Telegram. Priority alerts from $3 once, no subscription.";
+
+/** The race list as HTML, same shape the page script renders, so the page reads the same with
+ * and without script. The script replaces it once the live feed has loaded. */
+function eventListHtml(events: DirectoryEvent[]): string {
+  const row = (ev: DirectoryEvent, badge: string, cls: string, subtitle = "") =>
+    `<div class="event-row" data-url="${escapeHtml(ev.url)}"><div><span>Race: ${escapeHtml(ev.event_date || "date TBA")} &mdash; ${escapeHtml(ev.title)}</span>${
+      subtitle ? `<div class="event-subtitle">${escapeHtml(subtitle)}</div>` : ""
+    }</div><div class="event-right"><span class="event-badge ${cls}">${badge}</span><span class="row-chev">&#8250;</span></div></div>`;
+  const group = (title: string, rows: string[]) =>
+    rows.length ? `<div class="event-group"><h3>${title} (${rows.length})</h3><div class="event-group-rows">${rows.join("")}</div></div>` : "";
+  const on = events.filter((e) => e.on_sale).map((e) => row(e, "On sale", "on"));
+  const soon = events
+    .filter((e) => !e.on_sale && e.presale_live_at)
+    .map((e) => row(e, "Public sale (soon live)", "soon", `on ${formatInTimezone(e.presale_live_at!, e.presale_timezone)}`));
+  const waiting = events.filter((e) => !e.on_sale && !e.presale_live_at).map((e) => row(e, "Not on sale", "off"));
+  return group("On sale now", on) + group("Sale date announced", soon) + group("Not on sale yet", waiting);
+}
+
+function eventSummaryLine(events: DirectoryEvent[]): string {
+  const on = events.filter((e) => e.on_sale).length;
+  const soon = events.filter((e) => !e.on_sale && e.presale_live_at).length;
+  return `<p class="hint">Tracking ${events.length} upcoming HYROX races: ${on} on sale now, ${soon} with a sale date announced, ${events.length - on - soon} not on sale yet. Updated around the clock.</p>`;
+}
+
+const HOME_FAQ: [string, string][] = [
+  [
+    "Does \"sold out\" mean a HYROX race is gone for good?",
+    "No. Sold-out HYROX tickets come back regularly when people's plans change or the organiser releases extra spots, usually without any announcement. RoxRaceAlerts watches the ticket shop and alerts you the moment your ticket type is available again.",
+  ],
+  [
+    "How do HYROX ticket alerts work?",
+    "Pick a race and the tickets you want (Singles, Doubles, Relay, Pro, spectator...). We check the official HYROX ticket shops around the clock and email you the second a sale opens or a sold-out ticket is back. Telegram alerts are free too; Priority members also get WhatsApp.",
+  ],
+  [
+    "Is RoxRaceAlerts free?",
+    "Yes. Email and Telegram alerts are free for every race. Priority is optional: a one-off payment per race or per season gets you alerted before everyone else, with a WhatsApp notification. There is no subscription.",
+  ],
+  [
+    "When do HYROX tickets go on sale?",
+    "Each race has its own sale date, usually announced a few weeks in advance. The list on this page shows every upcoming race with its status: on sale, sale date announced, or not on sale yet. Watch a race and you get an alert the moment its sale opens.",
+  ],
+  [
+    "Is RoxRaceAlerts official HYROX?",
+    "No. RoxRaceAlerts is an independent alert service built by a HYROX athlete and is not affiliated with HYROX or its ticketing provider. We never sell or reserve tickets: when you get an alert, you buy on the official HYROX shop as usual.",
+  ],
+  [
+    "Which HYROX races are covered?",
+    "Every HYROX race worldwide, including pre-sales, public sales and sold-out ticket returns. New races are added as soon as HYROX announces them.",
+  ],
+];
+
+function homeFaqHtml(): string {
+  return `<div class="card faq"><h2>HYROX ticket alerts: common questions</h2>${HOME_FAQ.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>`;
+}
+
+function homeSeo(env: Env): PageSeo {
+  return {
+    description: HOME_DESCRIPTION,
+    canonical: `${env.SITE_URL}/`,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        name: "RoxRaceAlerts",
+        url: env.SITE_URL,
+        logo: `${env.SITE_URL}/favicon.svg`,
+        sameAs: [IG_PROFILE_URL],
+      },
+      { "@context": "https://schema.org", "@type": "WebSite", name: "RoxRaceAlerts", url: env.SITE_URL, description: HOME_DESCRIPTION },
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        mainEntity: HOME_FAQ.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })),
+      },
+    ],
+  };
+}
+
+function handleSitemap(env: Env): Response {
+  const today = todayIso();
+  const urls = [
+    { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
+    { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
+    { loc: `${env.SITE_URL}/terms`, changefreq: "yearly", priority: "0.2" },
+  ];
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map((u) => `  <url><loc>${u.loc}</loc><lastmod>${today}</lastmod><changefreq>${u.changefreq}</changefreq><priority>${u.priority}</priority></url>`).join("\n")}
+</urlset>`;
+  return new Response(xml, { headers: { "content-type": "application/xml; charset=utf-8", "cache-control": "public, max-age=3600" } });
+}
+
+/** Keeps personal pages (sign-in links, alert management) out of search results. Cloudflare may
+ * prepend its own content-signal lines to this file. */
+function handleRobots(env: Env): Response {
+  const body = ["User-agent: *", "Allow: /", "Disallow: /admin/", "Disallow: /my-alerts", "Disallow: /verify", "Disallow: /unsubscribe", "Disallow: /watching", "", `Sitemap: ${env.SITE_URL}/sitemap.xml`, ""].join("\n");
+  return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=3600" } });
 }
 
 async function handleFeedbackPage(req: Request, env: Env): Promise<Response> {
@@ -6713,7 +6870,14 @@ export default {
     ctx.waitUntil(ensureScheduler(env));
     const url = new URL(req.url);
     try {
+      // One address for search engines: www. and plain http both go to the canonical origin.
+      const site = new URL(env.SITE_URL);
+      if (req.method === "GET" && (url.hostname === `www.${site.hostname}` || (url.hostname === site.hostname && url.protocol !== site.protocol))) {
+        return Response.redirect(`${site.origin}${url.pathname}${url.search}`, 301);
+      }
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
+      if (url.pathname === "/sitemap.xml" && req.method === "GET") return handleSitemap(env);
+      if (url.pathname === "/robots.txt" && req.method === "GET") return handleRobots(env);
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
       const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(?:-(story|\d{1,2}))?\.jpg$/);
