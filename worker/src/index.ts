@@ -28,6 +28,7 @@ export interface Env {
   TELEGRAM_CHAT_ID?: string;
   EMAIL_DRY_RUN?: string; // "1" on staging: emails are logged, never sent
   SCHEDULER: DurableObjectNamespace; // CheckScheduler: alarm-driven fallback for the frequent checks
+  IG_ACCESS_TOKEN?: string; // Instagram API (Instagram Login) token for @roxracealerts, long-lived (60 days)
   SCHEDULER_AUTOSTART?: string; // "1" = any request arms the alarm scheduler (production)
   TICKET_GRID?: string; // "1" = category-by-day ticket picker; unset = the plain list (until confirmed)
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
@@ -5457,6 +5458,33 @@ async function handleIgDismiss(req: Request, env: Env): Promise<Response> {
   return Response.redirect(`${env.SITE_URL}/admin/ig-posts?token=${encodeURIComponent(token)}`, 303);
 }
 
+/** Daily Instagram token health check (and, later, renewal): which account the token belongs to
+ * and the posting quota, stored in kv_meta "ig_status" so it can be read without the admin key.
+ * Runs at most once a day; the first run happens on the first scheduler tick after a deploy. */
+async function checkInstagramToken(env: Env): Promise<void> {
+  if (!env.IG_ACCESS_TOKEN) return;
+  const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'ig_status'").first<any>();
+  if (last?.value) {
+    try {
+      if (Date.now() - Date.parse(JSON.parse(last.value).checked_at) < 24 * 3600_000) return;
+    } catch {}
+  }
+  const tok = encodeURIComponent(env.IG_ACCESS_TOKEN);
+  const status: any = { checked_at: new Date().toISOString() };
+  try {
+    const me: any = await fetch(`https://graph.instagram.com/me?fields=user_id,username,account_type,media_count&access_token=${tok}`).then((r) => r.json());
+    if (me?.error) status.error = `${me.error.code ?? ""} ${me.error.message ?? ""}`.trim();
+    else {
+      Object.assign(status, { user_id: me.user_id, username: me.username, account_type: me.account_type, media_count: me.media_count });
+      const lim: any = await fetch(`https://graph.instagram.com/${me.user_id}/content_publishing_limit?fields=config,quota_usage&access_token=${tok}`).then((r) => r.json());
+      status.quota = lim?.data?.[0] ?? lim?.error?.message ?? null;
+    }
+  } catch (e) {
+    status.error = String(e).slice(0, 200);
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('ig_status', ?)").bind(JSON.stringify(status)).run();
+}
+
 /** The frequent (every ~2 min) job: everything that must notice a change quickly. */
 async function runFrequentChecks(env: Env): Promise<void> {
   await Promise.allSettled([
@@ -5465,6 +5493,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     refreshEventDirectorySaleStatus(env),
     checkAnnouncementReminders(env),
     sendManualVerificationNotices(env),
+    checkInstagramToken(env),
   ]);
 }
 
@@ -5570,6 +5599,17 @@ export default {
         const body: any = await r.json();
         const hb = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'alarm_last_run'").first<any>();
         return jsonResponse({ ...body, alarm_last_run: hb?.value ?? null });
+      }
+      if (url.pathname === "/admin/ig/check" && req.method === "POST") {
+        // Read-only: which Instagram account the token belongs to and how much posting quota is left.
+        if ((req.headers.get("Authorization") || "") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        if (!env.IG_ACCESS_TOKEN) return jsonResponse({ error: "IG_ACCESS_TOKEN not set" }, 400);
+        const tok = encodeURIComponent(env.IG_ACCESS_TOKEN);
+        const me: any = await fetch(`https://graph.instagram.com/me?fields=user_id,username,account_type,media_count&access_token=${tok}`).then((r) => r.json());
+        const limit = me?.user_id
+          ? await fetch(`https://graph.instagram.com/${me.user_id}/content_publishing_limit?fields=config,quota_usage&access_token=${tok}`).then((r) => r.json())
+          : null;
+        return jsonResponse({ me, limit });
       }
       if (url.pathname === "/admin/heartbeat-test" && req.method === "POST") {
         // Same write the scheduled handler does, over HTTP: tells "cron never invoked" apart from
