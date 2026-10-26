@@ -601,7 +601,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/feedback">Propose a feature or leave feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -5628,12 +5628,189 @@ function homeSeo(env: Env): PageSeo {
   };
 }
 
+// ---------------------------------------------------------------------------
+// About and guide pages: the founder story (search engines and AI answers weigh "who is behind
+// this site") and evergreen guides for the questions athletes search for. The sale-dates and
+// ticket-types guides fill themselves from the directory data.
+// ---------------------------------------------------------------------------
+const GUIDE_SLUGS = ["sold-out-hyrox-tickets", "hyrox-ticket-sale-dates", "hyrox-ticket-types"] as const;
+
+function articleSeo(env: Env, path: string, title: string, description: string, faq: [string, string][] = []): PageSeo {
+  return {
+    description,
+    canonical: `${env.SITE_URL}${path}`,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        headline: title,
+        description,
+        url: `${env.SITE_URL}${path}`,
+        author: { "@type": "Person", name: "Francesco", description: "HYROX Pro athlete, builder of RoxRaceAlerts" },
+        publisher: { "@type": "Organization", name: "RoxRaceAlerts", url: env.SITE_URL },
+        dateModified: todayIso(),
+      },
+      ...(faq.length ? [{ "@context": "https://schema.org", "@type": "FAQPage", mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) }] : []),
+    ],
+  };
+}
+
+const ARTICLE_CTA = `<div class="card"><h2>Never miss a HYROX ticket again</h2><p>Free alerts the second a race goes on sale or a sold-out ticket comes back, for every HYROX race worldwide. Email, Telegram, and WhatsApp with Priority.</p><p><a href="/"><button type="button">Set a free alert</button></a></p></div>`;
+
+async function handleAboutPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const races = await listDirectoryEvents(env);
+  const subs = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE verified = 1").first<any>();
+  const title = "About RoxRaceAlerts: built by a HYROX Pro athlete";
+  const description = "RoxRaceAlerts was built by Francesco, a HYROX Pro athlete, after missing one ticket drop too many. Free alerts for every HYROX race worldwide; independent, not affiliated with HYROX.";
+  return page(
+    title,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
+    <div class="hero"><h1>About RoxRaceAlerts</h1><p class="hero-sub">Built by a HYROX athlete who kept missing tickets.</p></div>
+    <div class="card">
+      <p>Hi, I'm Francesco. I race HYROX in the Pro division, and like everyone else I kept refreshing ticket shops, missing drops, and finding races sold out before I even knew they had opened. There was no simple, free tool that watched the races and tickets for me, so I used my coding skills to build one, out of pure frustration, and decided to make it available to anyone.</p>
+      <p>RoxRaceAlerts checks the official HYROX ticket shops around the clock, for every race worldwide (${races.length} upcoming races right now), and alerts you the second a race goes on sale, a pre-sale opens, or a sold-out ticket type becomes available again. Email and Telegram alerts are free, always. Priority, a one-off payment per race or season, gets you alerted before everyone else, with a WhatsApp notification. ${Number(subs?.n) > 50 ? `More than ${Math.floor(Number(subs.n) / 10) * 10} athletes already use it.` : ""}</p>
+      <h2>What it is not</h2>
+      <p>RoxRaceAlerts is independent and not affiliated with HYROX or its ticketing provider. We never sell, resell or reserve tickets: when you get an alert, you buy on the official HYROX shop like everyone else, just earlier.</p>
+      <h2>Get in touch</h2>
+      <p>Ideas, complaints, a race we're missing: write to <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> or <a href="/feedback">leave feedback</a>. Gyms and brands: see <a href="/partners">partner with us</a>. Follow <a href="${IG_PROFILE_URL}" rel="noopener">@roxracealerts on Instagram</a> for upcoming ticket dates.</p>
+    </div>
+    ${ARTICLE_CTA}`,
+    {},
+    false,
+    { ...articleSeo(env, "/about", title, description), jsonLd: [{ "@context": "https://schema.org", "@type": "AboutPage", name: title, url: `${env.SITE_URL}/about`, description }] }
+  );
+}
+
+async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const nav = navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env);
+  const races = await listDirectoryEvents(env);
+  const raceLink = (e: DirectoryEvent) => `<a href="/hyrox/${e.slug}">HYROX ${escapeHtml(shortRaceName(e.title).city)}</a>`;
+  const otherGuides = (current: string) =>
+    `<div class="card race-links"><h2>More guides</h2>${GUIDE_SLUGS.filter((s) => s !== current)
+      .map((s) => `<a href="/guides/${s}">${GUIDE_TITLES[s]}</a>`)
+      .join("")}<a href="/about">About RoxRaceAlerts</a></div>`;
+
+  if (slug === "sold-out-hyrox-tickets") {
+    const title = GUIDE_TITLES[slug];
+    const description = "Sold-out HYROX tickets come back more often than you think. How returns happen, how to catch one, what to avoid, and how free alerts do the waiting for you.";
+    const faq: [string, string][] = [
+      ["Do sold-out HYROX tickets come back?", "Yes, regularly. Tickets return when athletes cancel or transfer, when payment reservations expire, and when the organiser releases held or extra spots. There is usually no announcement, and a returned spot can be gone within minutes."],
+      ["Does HYROX have an official waitlist?", "Some sold-out event pages offer a notification list run by the ticketing provider; it depends on the race and region. It costs nothing to join, but it does not reserve anything: you still need to be fast when spots appear."],
+      ["Can I buy HYROX tickets second-hand?", "Be careful. HYROX tickets are personal and transfers go through the official ticketing provider, where offered. Facebook groups and unofficial resellers are where most ticket scams happen; never pay a stranger up front."],
+      ["How fast do I need to be?", "Popular races and categories (Doubles, Pro) can sell out in minutes at launch and returned spots often go within the hour. An alert the moment a spot appears is the difference."],
+    ];
+    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">Sold out is not the end. Here is how returned spots work and how to catch one.</p></div>
+    <div class="card">
+      <h2>Why sold-out HYROX tickets come back</h2>
+      <p>Every HYROX race is sold through an official ticket shop per region. Once a ticket type (say Doubles Mixed on Saturday) shows sold out, three things keep putting spots back:</p>
+      <ul><li><b>Cancellations and transfers.</b> Injuries, travel plans and partner changes mean athletes give tickets back right up to race week.</li>
+      <li><b>Expired reservations.</b> At launch, many tickets sit in carts that are never paid for; those return to the shop minutes to hours later.</li>
+      <li><b>Extra capacity.</b> Organisers sometimes add waves or release held allocations, without an announcement.</li></ul>
+      <h2>How to actually get one</h2>
+      <ol><li><b>Watch the exact ticket type.</b> A returned spot is one category on one day. Set your alert on the specific tickets you would buy, not just the race.</li>
+      <li><b>Get alerted instantly, not daily.</b> Returned spots rarely last an hour. RoxRaceAlerts checks the shop around the clock and emails or messages you the moment your ticket is available.</li>
+      <li><b>Be ready to pay.</b> Have your account on the HYROX shop logged in and your card ready; the alert links straight to the shop.</li>
+      <li><b>Keep the alert on until you have the ticket.</b> If you miss one return, there is usually another.</li></ol>
+      <h2>What to avoid</h2>
+      <p>Paying strangers in Facebook groups or chats is how most people lose money. Only use the official shop and, where offered, its official transfer feature.</p>
+    </div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    ${ARTICLE_CTA}${otherGuides(slug)}`;
+    return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
+  }
+
+  if (slug === "hyrox-ticket-sale-dates") {
+    const title = GUIDE_TITLES[slug];
+    const announced = races.filter((e) => !e.on_sale && e.presale_live_at);
+    const onSale = races.filter((e) => e.on_sale);
+    const notYet = races.filter((e) => !e.on_sale && !e.presale_live_at);
+    const description = `When HYROX tickets go on sale, how the pre-sale and public sale work, and every announced sale date: ${announced.length} upcoming sale${announced.length === 1 ? "" : "s"} announced, ${onSale.length} races on sale now. Updated automatically.`;
+    const faq: [string, string][] = [
+      ["When do HYROX tickets go on sale?", "Each race has its own date, usually announced two to six weeks before. Sales open at a fixed local time, often late morning, first for pre-sale groups and then to the public. The list on this page shows every announced date and is updated automatically."],
+      ["What is the HYROX pre-sale?", "Many races open a few hours or days early for a limited group, such as newsletter subscribers, members of partner gyms, or athletes who raced before. Pre-sale allocations are small and can sell out before the public sale."],
+      ["Is there a ballot or lottery?", "No. HYROX tickets are first come, first served once a sale opens, which is why popular races sell out in minutes and why an alert at the exact moment matters."],
+    ];
+    const list = (items: DirectoryEvent[], right: (e: DirectoryEvent) => string) =>
+      items.length ? `<ul class="status-list">${items.map((e) => `<li><span>${raceLink(e)}</span><span>${right(e)}</span></li>`).join("")}</ul>` : "<p>None right now.</p>";
+    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">Every announced sale date in one place, updated automatically from the official shops.</p></div>
+    <div class="card"><h2>Sale dates announced (${announced.length})</h2>${list(announced, (e) => escapeHtml(formatInTimezone(e.presale_live_at!, e.presale_timezone)))}</div>
+    <div class="card"><h2>How a HYROX ticket sale works</h2>
+      <ol><li><b>Announcement.</b> HYROX announces the sale date, usually on Instagram, in the newsletter and on the event page, two to six weeks ahead.</li>
+      <li><b>Pre-sale.</b> A small allocation opens early for newsletter subscribers, partner gyms or returning athletes.</li>
+      <li><b>Public sale.</b> Everything else opens at the announced local time, first come, first served. Doubles and Pro categories at big-city races can be gone within minutes.</li>
+      <li><b>Returns.</b> In the weeks after, sold-out tickets come back as plans change; see <a href="/guides/sold-out-hyrox-tickets">how to catch a sold-out ticket</a>.</li></ol>
+      <p>Set a free alert on a race and RoxRaceAlerts emails you the moment its pre-sale or public sale opens, so you don't have to remember the time or the time zone.</p></div>
+    <div class="card"><h2>On sale now (${onSale.length})</h2>${list(onSale, (e) => `Race ${escapeHtml(e.event_date || "TBA")}`)}</div>
+    <div class="card"><h2>Not on sale yet (${notYet.length})</h2>${list(notYet, (e) => `Race ${escapeHtml(e.event_date || "TBA")}`)}</div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    ${ARTICLE_CTA}${otherGuides(slug)}`;
+    return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
+  }
+
+  if (slug === "hyrox-ticket-types") {
+    const title = GUIDE_TITLES[slug];
+    // Which categories sell out most, from the tickets athletes are watching.
+    const { results: cats } = await env.DB.prepare(
+      `SELECT CASE WHEN upper(ticket_name) LIKE '%RELAY%' THEN 'Relay' WHEN upper(ticket_name) LIKE '%DOUBLES%' THEN 'Doubles' WHEN upper(ticket_name) LIKE '%PRO%' THEN 'Pro' WHEN upper(ticket_name) LIKE '%ADAPTIVE%' THEN 'Adaptive' WHEN upper(ticket_name) LIKE '%SPECTATOR%' THEN 'Spectator' ELSE 'Open (Singles)' END AS cat,
+              SUM(last_status = 'sold_out') AS sold, COUNT(*) AS n
+       FROM community_tickets WHERE event_date IS NULL OR event_date >= ? GROUP BY cat ORDER BY sold DESC`
+    )
+      .bind(todayIso())
+      .all<any>();
+    const description = "HYROX ticket types explained: Open (Singles), Pro, Doubles, Relay, Adaptive, Youngstars and spectator tickets, who they are for, and which ones sell out first.";
+    const faq: [string, string][] = [
+      ["What is the difference between HYROX Open and Pro?", "Same course, heavier weights. Pro uses heavier sled push and pull, higher wall balls, heavier farmers carry, sandbag lunges and kettlebells. Open is the standard division most athletes race; Pro is for experienced athletes chasing a competitive time."],
+      ["How do HYROX Doubles tickets work?", "Doubles is two athletes sharing the workout stations while both run every 1 km. Each athlete needs a ticket; the shop usually sells a Doubles ticket plus an 'Athlete 2' partner ticket, and Doubles categories (Men, Women, Mixed, Pro) are among the first to sell out."],
+      ["Which HYROX tickets sell out first?", "Typically Doubles and the Saturday slots at big-city races, then Open Men and Women on the most popular days. Relay and weekday slots last longer. Sold-out tickets come back regularly, so a free alert on the one you want is worth setting."],
+      ["Do spectators need a ticket?", "Yes, at most races spectators need a ticket, often with free entry for young children. Spectator tickets are usually plentiful but can sell out at the biggest events."],
+    ];
+    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">Who each ticket is for, and which ones disappear first.</p></div>
+    <div class="card">
+      <h2>The HYROX ticket types</h2>
+      <ul><li><b>Open (Singles), Men and Women.</b> The standard race: 8 km of running and 8 workout stations, standard weights. The most common ticket.</li>
+      <li><b>Pro.</b> Same format with heavier weights and higher wall balls. For experienced, competitive athletes; also the division used for elite qualification.</li>
+      <li><b>Doubles (Men, Women, Mixed, Pro Doubles).</b> Two athletes: both run every 1 km, then split the work at each station. Each needs a ticket, usually sold as a ticket plus a partner ("Athlete 2") ticket.</li>
+      <li><b>Relay (Men, Women, Mixed).</b> A team of four; each member runs 1 km and does one station, twice. The most accessible way in and the slowest to sell out.</li>
+      <li><b>Adaptive.</b> Divisions for athletes with physical disabilities, with adapted stations.</li>
+      <li><b>Youngstars.</b> Separate races for kids and teens, usually on their own day or event.</li>
+      <li><b>Spectator.</b> Entry for supporters; often free for young children.</li></ul>
+      <p>Most tickets exist once per race day (Friday, Saturday, Sunday...), so "HYROX Doubles Mixed | Saturday" and "| Sunday" are separate tickets with separate availability.</p>
+    </div>
+    ${
+      cats?.length
+        ? `<div class="card"><h2>What sells out most</h2><p class="hint">Ticket types athletes are watching on RoxRaceAlerts right now, and how many of them are sold out.</p><ul class="status-list">${cats
+            .map((c: any) => `<li><span>${escapeHtml(c.cat)}</span><span>${c.sold} of ${c.n} sold out</span></li>`)
+            .join("")}</ul></div>`
+        : ""
+    }
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    ${ARTICLE_CTA}${otherGuides(slug)}`;
+    return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
+  }
+
+  const r = page("Guide not found", `<div class="card"><p>No such guide. <a href="/guides/sold-out-hyrox-tickets">How to get sold-out HYROX tickets</a></p></div>`);
+  return new Response(r.body, { status: 404, headers: r.headers });
+}
+
+const GUIDE_TITLES: Record<(typeof GUIDE_SLUGS)[number], string> = {
+  "sold-out-hyrox-tickets": "How to get HYROX tickets when they're sold out",
+  "hyrox-ticket-sale-dates": "When do HYROX tickets go on sale? Every announced date",
+  "hyrox-ticket-types": "HYROX ticket types explained: Open, Pro, Doubles, Relay",
+};
+
 async function handleSitemap(env: Env): Promise<Response> {
   const today = todayIso();
   const races = await listDirectoryEvents(env);
   const urls = [
     { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
     ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
+    ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
+    { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
     { loc: `${env.SITE_URL}/terms`, changefreq: "yearly", priority: "0.2" },
   ];
@@ -7070,6 +7247,10 @@ export default {
       const racePage = url.pathname.match(/^\/hyrox\/([a-z0-9-]{1,60})\/?$/);
       if (racePage && req.method === "GET") return await handleRacePage(req, env, racePage[1]);
       if ((url.pathname === "/hyrox" || url.pathname === "/hyrox/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/`, 301);
+      if (url.pathname === "/about" && req.method === "GET") return await handleAboutPage(req, env);
+      const guide = url.pathname.match(/^\/guides\/([a-z0-9-]{1,60})\/?$/);
+      if (guide && req.method === "GET") return await handleGuidePage(req, env, guide[1]);
+      if ((url.pathname === "/guides" || url.pathname === "/guides/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/guides/${GUIDE_SLUGS[0]}`, 301);
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
       const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(?:-(story|\d{1,2}))?\.jpg$/);
