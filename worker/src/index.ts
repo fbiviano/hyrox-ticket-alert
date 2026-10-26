@@ -30,6 +30,7 @@ export interface Env {
   EMAIL_DRY_RUN?: string; // "1" on staging: emails are logged, never sent
   SCHEDULER: DurableObjectNamespace; // CheckScheduler: alarm-driven fallback for the frequent checks
   IG_ACCESS_TOKEN?: string; // Instagram API (Instagram Login) token for @roxracealerts, long-lived (60 days)
+  RESEND_WEBHOOK_SECRET?: string; // signing secret (whsec_...) of the Resend webhook -> /resend/webhook (delivered/opened/...)
   SCHEDULER_AUTOSTART?: string; // "1" = any request arms the alarm scheduler (production)
   TICKET_GRID?: string; // "1" = category-by-day ticket picker; unset = the plain list (until confirmed)
   TELEGRAM_BOT_USERNAME?: string; // public handle of the bot, for the t.me deep link
@@ -128,6 +129,7 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
     return;
   }
   let error: string | null = null;
+  let resendId: string | null = null;
   try {
     const resp = await fetch("https://api.resend.com/emails", {
       method: "POST",
@@ -150,6 +152,8 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
       error = `${resp.status} ${body}`.slice(0, 300);
       throw new Error(`Resend send failed: ${resp.status} ${body}`);
     }
+    // Resend's id for this email - its webhook events (delivered, opened, ...) refer to it.
+    resendId = ((await resp.json().catch(() => null)) as any)?.id ?? null;
   } catch (e) {
     if (!error) error = String(e).slice(0, 300);
     throw e;
@@ -157,8 +161,8 @@ async function sendEmail(env: Env, to: string, subject: string, html: string, te
     // Every attempt is logged (see email_log in schema.sql) - and a logging
     // failure must never turn a delivered alert into a failed one.
     try {
-      await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error) VALUES (?, ?, ?, ?)")
-        .bind(to, subject, error ? 0 : 1, error)
+      await env.DB.prepare("INSERT INTO email_log (to_address, subject, ok, error, resend_id) VALUES (?, ?, ?, ?, ?)")
+        .bind(to, subject, error ? 0 : 1, error, resendId)
         .run();
     } catch (logErr) {
       console.error("Failed to write email_log:", logErr);
@@ -3368,6 +3372,7 @@ async function renderInviteCard(env: Env, subscriber: any): Promise<string> {
 // the email provider's daily limit. update_email_sent_at makes it once per subscriber.
 // ---------------------------------------------------------------------------
 const UPDATE_EMAIL_PER_DAY = 45;
+const UPDATE_EMAIL_SUBJECT = "Priority alerts + WhatsApp alerts";
 
 async function updateEmailContent(env: Env, s: any): Promise<{ subject: string; html: string; text: string }> {
   const link = refLink(env, await ensureRefCode(env, s));
@@ -3433,7 +3438,7 @@ Francesco
 ${confirmLink ? `\n${confirmNote} ${confirmLink}\n` : ""}
 Manage my alerts: ${myAlerts}
 Unsubscribe: ${unsub}`;
-  return { subject: "Priority alerts + WhatsApp alerts", html, text };
+  return { subject: UPDATE_EMAIL_SUBJECT, html, text };
 }
 
 async function sendUpdateEmailTo(env: Env, s: any): Promise<void> {
@@ -3521,8 +3526,85 @@ async function handleUpdateCommand(env: Env, text: string): Promise<void> {
   if (cmd === "/update_status") {
     const sent = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE update_email_sent_at IS NOT NULL").first<any>();
     const left = state?.started_at ? await updateEmailPending(env, state.started_at) : 0;
-    await reply(`Update email: ${state?.status || "not started"} · sent ${Number(sent?.n) || 0} · left ${left}`);
+    await reply(`Update email: ${state?.status || "not started"} · sent ${Number(sent?.n) || 0} · left ${left}\n\n${await updateEmailStats(env, state?.started_at)}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Email analytics: Resend reports what happened to each email (delivered, opened, clicked,
+// bounced, marked as spam) to /resend/webhook. Opens need "open tracking" on in Resend and are
+// approximate (Apple Mail opens everything; some clients block the pixel).
+// ---------------------------------------------------------------------------
+
+/** Resend signs webhooks the Svix way: HMAC-SHA256 of "id.timestamp.body" with the whsec_ key. */
+async function verifyResendWebhook(req: Request, body: string, secret: string): Promise<boolean> {
+  const id = req.headers.get("svix-id");
+  const ts = req.headers.get("svix-timestamp");
+  const sigs = req.headers.get("svix-signature");
+  if (!id || !ts || !sigs || Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    Uint8Array.from(atob(secret.replace(/^whsec_/, "")), (c) => c.charCodeAt(0)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${id}.${ts}.${body}`)));
+  const expected = btoa(String.fromCharCode(...mac));
+  return sigs.split(" ").some((s) => {
+    const [version, sig] = s.split(",");
+    return version === "v1" && !!sig && sameSecret(sig, expected);
+  });
+}
+
+async function handleResendWebhook(req: Request, env: Env): Promise<Response> {
+  if (!env.RESEND_WEBHOOK_SECRET) return new Response("Not configured", { status: 503 });
+  const body = await req.text();
+  if (!(await verifyResendWebhook(req, body, env.RESEND_WEBHOOK_SECRET))) return new Response("Forbidden", { status: 403 });
+  let evt: any;
+  try {
+    evt = JSON.parse(body);
+  } catch {
+    return new Response("ok");
+  }
+  const type = String(evt?.type || "").replace(/^email\./, "");
+  const emailId = String(evt?.data?.email_id || "");
+  if (type && emailId) {
+    // First event of each type per email: "opened" counts people, not repeat opens.
+    await env.DB.prepare("INSERT OR IGNORE INTO email_events (resend_id, type, created_at) VALUES (?, ?, ?)")
+      .bind(emailId, type, String(evt.created_at || new Date().toISOString()))
+      .run();
+  }
+  return new Response("ok");
+}
+
+/** Numbers for the update email: what Resend reported, plus what the email led to. */
+async function updateEmailStats(env: Env, startedAt?: string): Promise<string> {
+  const ev = await env.DB.prepare(
+    `SELECT e.type, COUNT(DISTINCT e.resend_id) AS n FROM email_events e
+     JOIN email_log l ON l.resend_id = e.resend_id WHERE l.subject = ? GROUP BY e.type`
+  )
+    .bind(UPDATE_EMAIL_SUBJECT)
+    .all<any>();
+  const by = Object.fromEntries((ev.results || []).map((r: any) => [r.type, Number(r.n) || 0]));
+  const tracked = await env.DB.prepare("SELECT COUNT(*) AS n FROM email_log WHERE subject = ? AND resend_id IS NOT NULL").bind(UPDATE_EMAIL_SUBJECT).first<any>();
+  const t = Number(tracked?.n) || 0;
+  const pct = (n: number) => (t ? ` (${Math.round((100 * n) / t)}%)` : "");
+  const since = startedAt || "9999";
+  const friends = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE referred_by IS NOT NULL AND created_at >= ?").bind(since).first<any>();
+  const confirmed = await env.DB.prepare("SELECT COUNT(*) AS n FROM subscribers WHERE referred_by IS NOT NULL AND verified = 1 AND created_at >= ?").bind(since).first<any>();
+  const bought = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM race_priority WHERE livemode = 1 AND created_at >= ?1) + (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 1 AND created_at >= ?1)
+       + (SELECT COUNT(*) FROM season_pass WHERE livemode = 1 AND created_at >= ?1) AS n`
+  )
+    .bind(since)
+    .first<any>();
+  return [
+    `📊 Tracked emails: ${t}${t ? "" : " (tracking starts with the next batch)"}`,
+    `Delivered ${by.delivered || 0}${pct(by.delivered || 0)} · Opened ${by.opened || 0}${pct(by.opened || 0)} · Clicked ${by.clicked || 0}${pct(by.clicked || 0)}`,
+    `Bounced ${by.bounced || 0} · Marked spam ${by.complained || 0}`,
+    `Since the send: ${Number(friends?.n) || 0} friends signed up via links (${Number(confirmed?.n) || 0} confirmed) · ${Number(bought?.n) || 0} Priority bought`,
+  ].join("\n");
 }
 
 async function handleUpdateButton(env: Env, cb: any): Promise<void> {
@@ -6269,6 +6351,7 @@ export default {
       if (url.pathname === "/whatsapp/waitlist" && req.method === "POST") return await handleWhatsAppWaitlist(req, env);
       if (url.pathname === "/telegram/webhook" && req.method === "POST") return await handleTelegramWebhook(req, env);
       if (url.pathname === "/stripe/webhook" && req.method === "POST") return await handleStripeWebhook(req, env);
+      if (url.pathname === "/resend/webhook" && req.method === "POST") return await handleResendWebhook(req, env);
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
       if (url.pathname === "/terms" && req.method === "GET") return handleTermsPage(env);

@@ -495,3 +495,15 @@ CREATE TABLE IF NOT EXISTS ig_auto_posts (
 -- ALTER TABLE subscribers ADD COLUMN referred_by INTEGER;
 -- ALTER TABLE subscribers ADD COLUMN referral_level INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE subscribers ADD COLUMN update_email_sent_at TEXT;
+
+-- Email analytics (2026-10-26): email_log.resend_id = Resend's id for the email; email_events =
+-- first event of each type Resend reported for it (delivered, opened, clicked, bounced,
+-- complained, ...) via /resend/webhook.
+-- ALTER TABLE email_log ADD COLUMN resend_id TEXT;
+-- CREATE INDEX IF NOT EXISTS idx_email_log_resend ON email_log(resend_id);
+CREATE TABLE IF NOT EXISTS email_events (
+  resend_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (resend_id, type)
+);
