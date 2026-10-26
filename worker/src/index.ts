@@ -6414,15 +6414,18 @@ async function weeklyPost(env: Env, today: string): Promise<{ slides: Slide[]; c
   const hotRows = (hot || []).map((r: any) => ({ left: shortRaceName(r.event_name).city, right: `${r.n} sold out` }));
   if (!saleRows.length && !races.length && !hotRows.length) return null;
 
-  const slides: Slide[] = [
-    {
-      kind: "card",
-      card: { badge: "THIS WEEK", titleLines: ["HYROX", "TICKETS"], line1: `Week of ${dayLabel(today)}`, line2: "Sales opening, races & sell-outs", footer1: "Swipe for this week's list →", footer2: "roxracealerts.com" },
-    },
-  ];
+  // The information goes on the images, starting with the first one: people look at the slides
+  // and rarely read the caption (admin feedback on the first carousel, 2026-10-26).
+  const slides: Slide[] = [];
+  if (races.length) slides.push({ kind: "list", list: { badge: "THIS WEEK", titleLines: ["HYROX RACES", "THIS WEEK"], rows: races.map((r) => ({ left: r.city, right: dayLabel(r.date) })), ...IG_FOOTER } });
   if (saleRows.length) slides.push({ kind: "list", list: { badge: "SALES OPENING", titleLines: ["TICKETS", "GO LIVE"], rows: saleRows.map(({ left, right }) => ({ left, right })), ...IG_FOOTER } });
-  if (races.length) slides.push({ kind: "list", list: { badge: "RACE WEEK", titleLines: ["RACING", "THIS WEEK"], rows: races.map((r) => ({ left: r.city, right: dayLabel(r.date) })), ...IG_FOOTER } });
   if (hotRows.length) slides.push({ kind: "list", list: { badge: "SELLING FAST", titleLines: ["SOLD-OUT", "TICKETS"], rows: hotRows, footer1: "We alert you when spots come back", footer2: "roxracealerts.com" } });
+  // Point to the next slides from the first one.
+  const first = slides[0];
+  if (first?.kind === "list" && slides.length > 1) {
+    const next = slides.slice(1).map((s) => (s.kind === "list" ? s.list.badge : ""));
+    first.list.footer1 = next.includes("SALES OPENING") ? "Swipe: tickets going live this week →" : "Swipe: what's selling fast →";
+  }
   slides.push(IG_CTA_SLIDE);
 
   const parts = [`This week in HYROX tickets 🗓️`];
