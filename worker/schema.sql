@@ -479,5 +479,9 @@ CREATE TABLE IF NOT EXISTS ig_auto_posts (
   error TEXT,
   ig_media_id TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  decided_at TEXT
+  decided_at TEXT,
+  -- After posting, the same card goes up as a story (no link sticker - the API can't add one).
+  story_status TEXT, -- NULL (not yet) | posting | posted | failed
+  story_media_id TEXT,
+  story_error TEXT
 );

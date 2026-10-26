@@ -5634,8 +5634,8 @@ async function checkInstagramToken(env: Env): Promise<void> {
 const IG_DRAFT_EVERY_HOURS = 4; // at most one new draft per 4 hours
 const IG_DRAFT_SWISS_HOURS = [9, 21]; // drafts only arrive between 09:00 and 21:00 Swiss time
 
-function igMediaUrl(env: Env, id: number, key: string): string {
-  return `${env.SITE_URL}/ig-media/${id}-${key}.jpg`;
+function igMediaUrl(env: Env, id: number, key: string, story = false): string {
+  return `${env.SITE_URL}/ig-media/${id}-${key}${story ? "-story" : ""}.jpg`;
 }
 
 /** Creates a draft for one directory race and sends it to the admin's Telegram (when configured).
@@ -5695,9 +5695,10 @@ async function draftGoingLivePosts(env: Env): Promise<void> {
   if (row) await createIgDraft(env, row);
 }
 
-/** Publishes one image post to our Instagram account: create the media container from a public
- * JPEG URL, wait until Instagram has fetched the image, then publish. */
-async function publishToInstagram(env: Env, imageUrl: string, caption: string): Promise<{ id: string; permalink?: string }> {
+/** Publishes one image post (or story, when caption is null) to our Instagram account: create the
+ * media container from a public JPEG URL, wait until Instagram has fetched the image, then publish.
+ * Stories can't carry a link sticker through the API - that has to be added in the app. */
+async function publishToInstagram(env: Env, imageUrl: string, caption: string | null): Promise<{ id: string; permalink?: string }> {
   const api = "https://graph.instagram.com";
   const tok = await igToken(env);
   const get = (path: string) => fetch(`${api}/${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(tok)}`).then((r) => r.json() as Promise<any>);
@@ -5708,7 +5709,7 @@ async function publishToInstagram(env: Env, imageUrl: string, caption: string): 
   };
   const me = await get("me?fields=user_id");
   if (!me?.user_id) throw new Error(me?.error?.message || "Instagram token check failed");
-  const container = await post(`${me.user_id}/media`, { image_url: imageUrl, caption });
+  const container = await post(`${me.user_id}/media`, caption === null ? { image_url: imageUrl, media_type: "STORIES" } : { image_url: imageUrl, caption });
   for (let i = 0; i < 10; i++) {
     const s = await get(`${container.id}?fields=status_code`);
     if (s?.status_code === "FINISHED") break;
@@ -5776,11 +5777,48 @@ async function handleIgDraftButton(env: Env, cb: any): Promise<void> {
   }
 }
 
-/** Public JPEG of a draft, for Instagram to download when publishing. */
-async function handleIgMedia(env: Env, id: number, key: string): Promise<Response> {
+/** Part of the frequent checks: once a draft is posted, also post it as a story (no link - the
+ * API can't add link stickers), then send the story image to the admin's Telegram so a version
+ * with a link sticker can be posted from the app. One story per run; failures aren't retried. */
+async function postPendingStories(env: Env): Promise<void> {
+  if (!env.IG_ACCESS_TOKEN) return;
+  const row = await env.DB.prepare(
+    "SELECT * FROM ig_auto_posts WHERE status = 'posted' AND story_status IS NULL AND presale_live_at > ? ORDER BY id LIMIT 1"
+  )
+    .bind(new Date().toISOString())
+    .first<any>();
+  if (!row) return;
+  const claim = await env.DB.prepare("UPDATE ig_auto_posts SET story_status = 'posting' WHERE id = ? AND story_status IS NULL").bind(row.id).run();
+  if (!claim.meta.changes) return;
+  const storyUrl = igMediaUrl(env, row.id, row.media_key, true);
+  let note: string;
+  try {
+    const done = await publishToInstagram(env, storyUrl, null);
+    await env.DB.prepare("UPDATE ig_auto_posts SET story_status = 'posted', story_media_id = ? WHERE id = ?").bind(done.id, row.id).run();
+    note = "Posted to your story automatically (without a link - Instagram doesn't allow links through the API).";
+  } catch (e) {
+    const msg = String((e as Error)?.message || e).slice(0, 300);
+    await env.DB.prepare("UPDATE ig_auto_posts SET story_status = 'failed', story_error = ? WHERE id = ?").bind(msg, row.id).run();
+    note = `⚠️ The automatic story failed: ${msg}`;
+  }
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const name = raceNameParts(JSON.parse(row.card_json).titleLines?.join(" ") || "").name;
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: env.TELEGRAM_CHAT_ID,
+      photo: storyUrl,
+      caption: `📲 Story: ${name}\n${note}\n\nFor a clickable version: save this image, add it to your story in Instagram, tap the sticker icon, choose Link and enter roxracealerts.com.`,
+    }),
+  }).catch((e) => console.error("story image to Telegram failed:", e));
+}
+
+/** Public JPEG of a draft (feed or story format), for Instagram to download when publishing. */
+async function handleIgMedia(env: Env, id: number, key: string, story: boolean): Promise<Response> {
   const row = await env.DB.prepare("SELECT card_json FROM ig_auto_posts WHERE id = ? AND media_key = ?").bind(id, key).first<any>();
   if (!row) return new Response("Not found", { status: 404 });
-  const jpg = await renderCardJpeg(JSON.parse(row.card_json));
+  const jpg = await renderCardJpeg(JSON.parse(row.card_json), story ? "story" : "square");
   return new Response(jpg, { headers: { "content-type": "image/jpeg", "cache-control": "public, max-age=86400" } });
 }
 
@@ -5794,6 +5832,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     sendManualVerificationNotices(env),
     checkInstagramToken(env),
     draftGoingLivePosts(env),
+    postPendingStories(env),
   ]);
 }
 
@@ -5857,8 +5896,8 @@ export default {
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
-      const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})\.jpg$/);
-      if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2]);
+      const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(-story)?\.jpg$/);
+      if (igMedia && req.method === "GET") return await handleIgMedia(env, Number(igMedia[1]), igMedia[2], !!igMedia[3]);
       if (url.pathname === "/" && req.method === "GET") return await handleSignupPage(req, env);
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
       if (url.pathname === "/subscribe" && req.method === "POST") return await handleSubscribe(req, env);
