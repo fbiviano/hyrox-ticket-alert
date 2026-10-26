@@ -660,11 +660,10 @@ const RESOLVE_SCRIPT = `<script>
   }
 
   // --- Ticket picker: big races list 100+ ticket types because every ticket exists once per day.
-  // Top level = race days; inside each day the tickets are grouped by category. Small categories
-  // are open straight away, big ones (e.g. Charity) are closed but visible with their count. ---
+  // Top level = race days; inside each day the tickets are grouped by category. Everything is
+  // shown open - nothing hidden behind a click. ---
   var DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   var CATS = ['Singles', 'Doubles', 'Relay', 'Adaptive', 'Charity', 'Spectators & extras'];
-  var OPEN_UP_TO = 6; // categories with more entries than this start closed
   function parseTicket(t) {
     var segs = t.name.split('|').map(function(x) { return x.trim(); });
     var last = segs[segs.length - 1].toLowerCase();
@@ -697,7 +696,6 @@ const RESOLVE_SCRIPT = `<script>
     }
     var parsed = data.tickets.map(parseTicket);
     var html = '<p><b>' + esc(data.event_name) + '</b></p>';
-    // Partner slots ("... ATHLETE 2") sort right after their main ticket.
     // Open before Pro; partner slots ("... ATHLETE 2") right after their main ticket.
     var nameKey = function(p) { return (p.pro ? '1' : '0') + p.base.replace(' ATHLETE 2', '') + (p.base.indexOf('ATHLETE 2') >= 0 ? '~' : ''); };
     var byName = function(a, b) { return nameKey(a) < nameKey(b) ? -1 : 1; };
@@ -715,24 +713,14 @@ const RESOLVE_SCRIPT = `<script>
       CATS.forEach(function(c) {
         var rows = inDay.filter(function(p) { return p.cat === c; }).sort(byName);
         if (!rows.length) return;
-        var big = rows.length > OPEN_UP_TO;
-        html += '<div class="tcatsec"><p class="tcathead">' + esc(c) + (big ? ' (' + rows.length + ') <a href="#" class="ttoggle">Show</a>' : '') + '</p>' +
-          '<div class="tcatbody"' + (big ? ' style="display:none"' : '') + '>' + rows.map(ticketLine).join('') + '</div></div>';
+        html += '<div class="tcatsec"><p class="tcathead">' + esc(c) + '</p>' +
+          '<div class="tcatbody">' + rows.map(ticketLine).join('') + '</div></div>';
       });
       html += '</div>';
     });
     return html;
   }
   function afterPickerRender() {}
-  out.addEventListener('click', function(e) {
-    var a = e.target.closest ? e.target.closest('.ttoggle') : null;
-    if (!a) return;
-    e.preventDefault();
-    var body = a.closest('.tcatsec').querySelector('.tcatbody');
-    var open = body.style.display === 'none';
-    body.style.display = open ? '' : 'none';
-    a.textContent = open ? 'Hide' : 'Show';
-  });
 
   async function doFind(url) {
     url = url.trim();
