@@ -537,6 +537,11 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .event-group-rows{max-height:280px;overflow-y:auto;border:1px solid #eee;border-radius:8px}
 .event-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #eee;cursor:pointer;font-size:0.9rem}
 .event-row:last-child{border-bottom:0}
+.row-link{font-size:0.75rem;color:#777;margin-left:6px}
+.status-list{list-style:none;padding:0;margin:0}
+.status-list li{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #eee;font-size:0.95rem}
+.status-list li:last-child{border-bottom:0}
+.race-links a{display:inline-block;margin:4px 12px 4px 0;font-size:0.9rem}
 .event-row:hover{background:#f7f7f7}
 .event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0}
 .event-badge.on{background:#e6f4ea;color:#1e7e34}
@@ -682,6 +687,9 @@ const RESOLVE_SCRIPT = `<script>
   var out = document.getElementById('resolveResult');
   var suggestions = document.getElementById('suggestions');
   var clearX = document.getElementById('clearFindX');
+  // Race pages link here with ?event=<hyrox.com url>: open that race's ticket picker straight away.
+  var presetEvent = new URLSearchParams(location.search).get('event');
+  if (presetEvent && input) { input.value = presetEvent; setTimeout(function() { doFind(presetEvent); }, 0); }
   var browseDetails = document.getElementById('browseEvents');
   var submitBtn = document.querySelector('.submit-step');
   var signedIn = !!document.getElementById('navSignedIn');
@@ -908,7 +916,7 @@ const RESOLVE_SCRIPT = `<script>
   function attachRowClicks(container) {
     if (!container) return;
     container.addEventListener('click', function(e) {
-      if (e.target.closest && e.target.closest('.row-monitor')) return;
+      if (e.target.closest && (e.target.closest('.row-monitor') || e.target.closest('.row-link'))) return;
       var row = e.target.closest ? e.target.closest('.event-row') : null;
       if (!row) return;
       var url = row.getAttribute('data-url');
@@ -1054,7 +1062,8 @@ const RESOLVE_SCRIPT = `<script>
           var dateLabel = 'Race: ' + (ev.event_date || 'date TBA');
           var badge = '<span class="event-badge ' + entry.badgeClass + '">' + esc(entry.badge) + '</span>';
           var subtitle = entry.subtitle ? '<div class="event-subtitle">' + esc(entry.subtitle) + '</div>' : '';
-          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + subtitle + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
+          var detailsLink = ev.slug ? ' <a class="row-link" href="/hyrox/' + esc(ev.slug) + '">Details</a>' : '';
+          return '<div class="event-row" data-url="' + esc(ev.url) + '"><div><span>' + esc(dateLabel) + ' &mdash; ' + esc(ev.title) + '</span>' + detailsLink + subtitle + '</div><div class="event-right">' + badge + '<span class="row-chev">&#8250;</span></div></div>';
         }
         var URGENT_MS = 48 * 60 * 60 * 1000;
         function isUrgent(ev) {
@@ -5346,18 +5355,195 @@ interface DirectoryEvent {
   presale_live_at: string | null;
   presale_timezone: string | null;
   presale_is_live: number;
+  shop_url: string | null;
+  slug?: string; // its page: /hyrox/<slug>
 }
 
-/** Upcoming races in the directory, soonest first (the /events feed and the homepage HTML). */
+/** Upcoming races in the directory, soonest first, each with its page slug (the /events feed,
+ * the homepage HTML, the race pages and the sitemap). */
 async function listDirectoryEvents(env: Env): Promise<DirectoryEvent[]> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live FROM event_directory
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
     .bind(todayIso())
     .all<DirectoryEvent>();
-  return results || [];
+  return assignSlugs(results || []);
+}
+
+/** URL part of a race page: the city ("COMMANDO HYROX Mexico City" -> "mexico-city"). */
+function citySlug(title: string): string {
+  return shortRaceName(title)
+    .city.toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/** Two editions of one city (Helsinki in December and again in April): the soonest keeps the plain
+ * slug, later ones get the year appended. Expects the soonest-first order of listDirectoryEvents. */
+function assignSlugs(events: DirectoryEvent[]): DirectoryEvent[] {
+  const taken = new Set<string>();
+  for (const ev of events) {
+    const base = citySlug(ev.title) || "race";
+    let slug = base;
+    if (taken.has(slug)) slug = `${base}-${(ev.event_date || "").slice(0, 4) || "next"}`;
+    for (let n = 2; taken.has(slug); n++) slug = `${base}-${(ev.event_date || "").slice(0, 4) || "next"}-${n}`;
+    taken.add(slug);
+    ev.slug = slug;
+  }
+  return events;
+}
+
+// ---------------------------------------------------------------------------
+// Race pages (/hyrox/<city>): one page per upcoming race - dates, ticket status, the tickets we
+// track, the alert form and a race-specific FAQ. These are the pages that can rank for
+// "hyrox <city> tickets"; the competitor that owns those searches has exactly this.
+// ---------------------------------------------------------------------------
+async function handleRacePage(req: Request, env: Env, slug: string): Promise<Response> {
+  const events = await listDirectoryEvents(env);
+  const ev = events.find((e) => e.slug === slug);
+  if (!ev) {
+    const r = page("Race not found", `<div class="card"><p>We don't know an upcoming HYROX race at that address. <a href="/">See all upcoming HYROX races</a>.</p></div>`);
+    return new Response(r.body, { status: 404, headers: r.headers });
+  }
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const { name, city } = shortRaceName(ev.title);
+  const year = (ev.event_date || "").slice(0, 4);
+  const raceDay = ev.event_date
+    ? new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`))
+    : "date to be announced";
+  const saleWhen = ev.presale_live_at ? formatInTimezone(ev.presale_live_at, ev.presale_timezone) : "";
+  const status = ev.on_sale
+    ? { badge: "On sale now", cls: "on", short: "on sale now", sentence: `${name} tickets are on sale now on the official HYROX shop.` }
+    : ev.presale_is_live
+      ? { badge: "Pre-sale live", cls: "on", short: "pre-sale live", sentence: `A pre-sale for ${name} is live now${ev.presale_note ? `: ${truncate(ev.presale_note, 120)}` : "."}` }
+      : ev.presale_live_at
+        ? { badge: "Sale date announced", cls: "soon", short: "sale date announced", sentence: `${name} tickets go on sale ${saleWhen}.` }
+        : { badge: "Not on sale yet", cls: "off", short: "not on sale yet", sentence: `${name} tickets are not on sale yet. HYROX usually announces the sale date a few weeks ahead.` };
+
+  // Ticket types we track for this race (someone watches them), with their last known status.
+  const shopPath = ev.shop_url ? ev.shop_url.split("?")[0] : "";
+  const { results: trackedRows } = await env.DB.prepare(
+    // Prefix match written with substr: D1 rejects LIKE patterns as long as a shop URL.
+    "SELECT ticket_name, last_status FROM community_tickets WHERE (event_date IS NULL OR event_date >= ?1) AND (instr(event_name, ?2) > 0 OR substr(shop_url, 1, length(?3)) = ?3) ORDER BY ticket_name"
+  )
+    .bind(todayIso(), `HYROX ${city}`, shopPath || "\u0000")
+    .all<any>();
+  const tracked = new Map<string, string>();
+  for (const t of trackedRows || []) if (!tracked.has(t.ticket_name)) tracked.set(t.ticket_name, t.last_status);
+  const soldOut = [...tracked].filter(([, s]) => s === "sold_out").map(([n]) => n);
+  const ticketsHtml = tracked.size
+    ? `<div class="card"><h2>Ticket availability at ${escapeHtml(name)}</h2>
+      <p class="hint">Ticket types athletes are watching here, with the last status we saw in the shop. Sold out is not the end: we alert watchers the moment one comes back.</p>
+      <ul class="status-list">${[...tracked]
+        .map(([n, s]) => `<li><span>${escapeHtml(n)}</span><span class="event-badge ${s === "sold_out" ? "off" : "on"}">${s === "sold_out" ? "Sold out" : "Available"}</span></li>`)
+        .join("")}</ul></div>`
+    : "";
+
+  const official = `<a href="${escapeHtml(ev.url)}" rel="noopener">hyrox.com</a>`;
+  const cta = ev.on_sale
+    ? `<p><a href="/?event=${encodeURIComponent(ev.url)}"><button type="button">Watch sold-out ${escapeHtml(city)} tickets – free</button></a></p>
+       <p class="hint">Pick the ticket types you want (Singles, Doubles, Relay, Pro...) and we email you the moment one is available again. Buying happens on ${official}.</p>`
+    : `<form method="POST" action="/watch-sale">
+        <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
+        <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}"><input type="hidden" name="priority" value="0">
+        ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
+        <button type="submit">Alert me when ${escapeHtml(city)} tickets go on sale – free</button>
+        <p class="consent">One email the moment the sale opens. Unsubscribe any time. Priority (alerted first, WhatsApp) can be added afterwards.</p>
+      </form>`;
+
+  const faq: [string, string][] = [
+    [
+      `When do HYROX ${city} ${year} tickets go on sale?`,
+      ev.on_sale
+        ? `They are on sale now. Buy on the official HYROX shop; if your ticket type is sold out, set a free alert here and we tell you when it comes back.`
+        : ev.presale_live_at
+          ? `The public sale opens ${saleWhen}. Popular races sell out within minutes, so set a free alert and be ready at that time.`
+          : `HYROX hasn't announced the sale date yet. Sale dates are usually announced a few weeks ahead; set a free alert and you get an email the moment tickets open.`,
+    ],
+    [
+      `Is HYROX ${city} ${year} sold out?`,
+      soldOut.length
+        ? `${soldOut.length} of the ${tracked.size} ticket types we track here are currently sold out (${soldOut.slice(0, 4).join(", ")}${soldOut.length > 4 ? "..." : ""}). Sold-out HYROX tickets come back regularly when people's plans change, and we alert watchers the moment they do.`
+        : ev.on_sale
+          ? `Not that we have seen: the ticket types we track are available. Sold-out tickets usually come back at some point, so a free alert is worth setting if yours is gone.`
+          : `Tickets aren't on sale yet, so nothing is sold out. Once the sale opens, this page shows which ticket types are available or sold out.`,
+    ],
+    [
+      `How do I get a HYROX ${city} ticket if it's sold out?`,
+      `Set a free alert for the ticket type you want. We check the official HYROX shop around the clock and email you (or message you on Telegram) the moment a spot is available again - then you buy it on hyrox.com as usual. Priority alerts you before everyone else.`,
+    ],
+    [
+      `Where do I buy HYROX ${city} tickets?`,
+      `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
+    ],
+  ];
+  const others = events.filter((e) => e !== ev).slice(0, 10);
+  const title = `HYROX ${city} ${year} tickets: ${status.short} | RoxRaceAlerts`;
+  const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
+  const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
+  const seo: PageSeo = {
+    description,
+    canonical: pageUrl,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "SportsEvent",
+        name: `${name} ${year}`.trim(),
+        ...(ev.event_date ? { startDate: ev.event_date } : {}),
+        eventStatus: "https://schema.org/EventScheduled",
+        location: { "@type": "Place", name: name, address: { "@type": "PostalAddress", addressLocality: city } },
+        organizer: { "@type": "Organization", name: "HYROX", url: "https://hyrox.com" },
+        url: ev.url,
+        offers: {
+          "@type": "Offer",
+          url: ev.url,
+          ...(ev.on_sale ? { availability: "https://schema.org/InStock" } : ev.presale_live_at ? { availability: "https://schema.org/PreOrder", validFrom: ev.presale_live_at } : {}),
+        },
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "HYROX races", item: `${env.SITE_URL}/` },
+          { "@type": "ListItem", position: 2, name: `HYROX ${city}`, item: pageUrl },
+        ],
+      },
+      { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+    ],
+  };
+  return page(
+    title,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
+    <div class="hero">
+      <h1>HYROX ${escapeHtml(city)} ${year} tickets</h1>
+      <p class="hero-sub">${escapeHtml(status.sentence)}</p>
+    </div>
+    <div class="card">
+      <h2>Ticket status</h2>
+      <ul class="status-list">
+        <li><span>Status</span><span class="event-badge ${status.cls}">${status.badge}</span></li>
+        <li><span>Race day</span><span>${escapeHtml(raceDay)}</span></li>
+        ${saleWhen && !ev.on_sale ? `<li><span>Tickets go on sale</span><span>${escapeHtml(saleWhen)}</span></li>` : ""}
+        <li><span>Official event page</span><span>${official}</span></li>
+      </ul>
+      ${cta}
+    </div>
+    ${ticketsHtml}
+    <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card race-links"><h2>Other upcoming HYROX races</h2>
+      ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
+      <p><a href="/">All ${events.length} upcoming HYROX races</a></p>
+    </div>`,
+    {},
+    false,
+    seo
+  );
 }
 
 const HOME_TITLE = "HYROX Ticket Alerts – Free On-Sale & Sold-Out Notifications";
@@ -5369,8 +5555,8 @@ const HOME_DESCRIPTION =
 function eventListHtml(events: DirectoryEvent[]): string {
   const row = (ev: DirectoryEvent, badge: string, cls: string, subtitle = "") =>
     `<div class="event-row" data-url="${escapeHtml(ev.url)}"><div><span>Race: ${escapeHtml(ev.event_date || "date TBA")} &mdash; ${escapeHtml(ev.title)}</span>${
-      subtitle ? `<div class="event-subtitle">${escapeHtml(subtitle)}</div>` : ""
-    }</div><div class="event-right"><span class="event-badge ${cls}">${badge}</span><span class="row-chev">&#8250;</span></div></div>`;
+      ev.slug ? ` <a class="row-link" href="/hyrox/${ev.slug}">Details</a>` : ""
+    }${subtitle ? `<div class="event-subtitle">${escapeHtml(subtitle)}</div>` : ""}</div><div class="event-right"><span class="event-badge ${cls}">${badge}</span><span class="row-chev">&#8250;</span></div></div>`;
   const group = (title: string, rows: string[]) =>
     rows.length ? `<div class="event-group"><h3>${title} (${rows.length})</h3><div class="event-group-rows">${rows.join("")}</div></div>` : "";
   const on = events.filter((e) => e.on_sale).map((e) => row(e, "On sale", "on"));
@@ -5442,10 +5628,12 @@ function homeSeo(env: Env): PageSeo {
   };
 }
 
-function handleSitemap(env: Env): Response {
+async function handleSitemap(env: Env): Promise<Response> {
   const today = todayIso();
+  const races = await listDirectoryEvents(env);
   const urls = [
     { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
+    ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
     { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
     { loc: `${env.SITE_URL}/terms`, changefreq: "yearly", priority: "0.2" },
   ];
@@ -6877,8 +7065,11 @@ export default {
         return Response.redirect(`${site.origin}${url.pathname}${url.search}`, 301);
       }
       if (url.pathname === "/favicon.svg" && req.method === "GET") return handleFavicon();
-      if (url.pathname === "/sitemap.xml" && req.method === "GET") return handleSitemap(env);
+      if (url.pathname === "/sitemap.xml" && req.method === "GET") return await handleSitemap(env);
       if (url.pathname === "/robots.txt" && req.method === "GET") return handleRobots(env);
+      const racePage = url.pathname.match(/^\/hyrox\/([a-z0-9-]{1,60})\/?$/);
+      if (racePage && req.method === "GET") return await handleRacePage(req, env, racePage[1]);
+      if ((url.pathname === "/hyrox" || url.pathname === "/hyrox/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/`, 301);
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
       const igMedia = url.pathname.match(/^\/ig-media\/(\d{1,9})-([0-9a-f]{16})(?:-(story|\d{1,2}))?\.jpg$/);
