@@ -5860,7 +5860,7 @@ async function submitIndexNow(env: Env, force = false): Promise<{ status: number
   }
   const result = { at: new Date().toISOString(), status, urls: urlList.length, tried };
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('indexnow_status', ?)").bind(JSON.stringify(result)).run();
-  return { status: resp.status, urls: urlList.length };
+  return { status, urls: urlList.length };
 }
 
 /** Keeps personal pages (sign-in links, alert management) out of search results. Cloudflare may
