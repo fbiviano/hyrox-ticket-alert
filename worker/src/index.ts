@@ -5477,7 +5477,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
 
   const faq: [string, string][] = [
     [
-      `When do HYROX ${city} ${year} tickets go on sale?`,
+      `HYROX ${city} ${year} ticket release date: when do tickets go on sale?`,
       ev.on_sale
         ? `They are on sale now. Buy on the official HYROX shop; if your ticket type is sold out, set a free alert here and we tell you when it comes back.`
         : ev.presale_live_at
@@ -5497,6 +5497,14 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       `Set a free alert for the ticket type you want. We check the official HYROX shop around the clock and email you (or message you on Telegram) the moment a spot is available again - then you buy it on hyrox.com as usual. Priority alerts you before everyone else.`,
     ],
     [
+      `Is there a HYROX ${city} waitlist?`,
+      `Some sold-out HYROX races offer an official notification list on the event page, depending on the region; joining it doesn't reserve a spot. A free RoxRaceAlerts alert works like a waitlist for the exact ticket type you want: we tell you the second one is back in the shop.`,
+    ],
+    [
+      `Can I buy HYROX ${city} resale tickets?`,
+      `Only through the official HYROX shop and its transfer or resale option, where HYROX offers one for this race. Avoid paying strangers in Facebook groups or chats - that's where ticket scams happen. Returned tickets reappear in the official shop, and an alert gets you there first.`,
+    ],
+    [
       `Where do I buy HYROX ${city} tickets?`,
       `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
     ],
@@ -5507,7 +5515,10 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     supporters.length ? `<div class="sponsors">${supporterTiles(supporters)}</div>` : `<p class="hint">No supporting gym listed for ${escapeHtml(city)} yet.</p>`
   }<p class="hint">Gym or club in ${escapeHtml(city)}? Put the live ticket widget on your website and get a free tile here: <a href="/supporters?race=${ev.slug}">how it works</a>.</p>
     <textarea readonly rows="3" style="width:100%;padding:8px;font-family:monospace;font-size:0.8rem;border:1px solid #ddd;border-radius:6px;box-sizing:border-box" onclick="this.select()">${escapeHtml(widgetSnippet(env, ev.slug!, city))}</textarea></div>`;
-  const title = `HYROX ${city} ${year} tickets: ${status.short} | RoxRaceAlerts`;
+  // Search phrase first, then the brand (what people type: "<city> tickets sold out", "release
+  // date", "waitlist"); each part only where it's true for this race.
+  const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Release Date & Alerts" : "Release Date & Waitlist";
+  const title = `HYROX ${city} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
   const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
   const seo: PageSeo = {
@@ -5545,7 +5556,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     title,
     `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
     <div class="hero">
-      <h1>HYROX ${escapeHtml(city)} ${year} tickets</h1>
+      <h1>HYROX ${escapeHtml(city)} ${year} tickets: ${escapeHtml(status.short)}</h1>
       <p class="hero-sub">${escapeHtml(status.sentence)}</p>
     </div>
     <div class="card">
@@ -5724,7 +5735,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
 
   if (slug === "sold-out-hyrox-tickets") {
     const title = GUIDE_TITLES[slug];
-    const description = "Sold-out HYROX tickets come back more often than you think. How returns happen, how to catch one, what to avoid, and how free alerts do the waiting for you.";
+    const description = "Sold-out HYROX tickets come back more often than you think. How returns, the waitlist and resale work, how to catch a spot, and how free alerts do the waiting for you.";
     const faq: [string, string][] = [
       ["Do sold-out HYROX tickets come back?", "Yes, regularly. Tickets return when athletes cancel or transfer, when payment reservations expire, and when the organiser releases held or extra spots. There is usually no announcement, and a returned spot can be gone within minutes."],
       ["Does HYROX have an official waitlist?", "Some sold-out event pages offer a notification list run by the ticketing provider; it depends on the race and region. It costs nothing to join, but it does not reserve anything: you still need to be fast when spots appear."],
@@ -5825,8 +5836,8 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
 }
 
 const GUIDE_TITLES: Record<(typeof GUIDE_SLUGS)[number], string> = {
-  "sold-out-hyrox-tickets": "How to get HYROX tickets when they're sold out",
-  "hyrox-ticket-sale-dates": "When do HYROX tickets go on sale? Every announced date",
+  "sold-out-hyrox-tickets": "How to get HYROX tickets after they sell out: waitlist, resale & alerts",
+  "hyrox-ticket-sale-dates": `HYROX ticket release dates 20${SEASON_LABEL}: when do tickets go on sale?`,
   "hyrox-ticket-types": "HYROX ticket types explained: Open, Pro, Doubles, Relay",
 };
 
