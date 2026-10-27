@@ -1374,7 +1374,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
     </details>`;
 
   const hero = `<div class="hero">
-    <h1>HYROX ticket alerts: know the second tickets go on sale or come back</h1>
+    <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
     <p class="hero-sub">We watch every HYROX ticket shop worldwide and alert you when a race goes on sale, a pre-sale opens, or a sold-out ticket becomes available again. Email and Telegram alerts are free; Priority alerts you first, with WhatsApp.</p>
   </div>`;
 
@@ -5571,9 +5571,11 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   );
 }
 
-const HOME_TITLE = "HYROX Ticket Alerts – Free On-Sale & Sold-Out Notifications";
+// "HYROX race alerts" (the brand words, and what the old heading said) and "ticket alerts" both
+// stay in the title and H1: the 2026-10-27 rewrite dropped the first and the brand search slipped.
+const HOME_TITLE = "HYROX Race Alerts & Ticket Alerts (Free) | RoxRaceAlerts";
 const HOME_DESCRIPTION =
-  "Free alerts the second HYROX tickets go on sale or a sold-out spot comes back. Every HYROX race worldwide, by email or Telegram. Priority alerts from $3 once, no subscription.";
+  "Free HYROX race alerts: get notified the second tickets go on sale or a sold-out spot comes back. Every HYROX race worldwide, by email or Telegram. Priority from $3, no subscription.";
 
 /** The race list as HTML, same shape the page script renders, so the page reads the same with
  * and without script. The script replaces it once the live feed has loaded. */
