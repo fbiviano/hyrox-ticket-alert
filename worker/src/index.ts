@@ -5840,16 +5840,25 @@ async function submitIndexNow(env: Env, force = false): Promise<{ status: number
   const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'indexnow_status'").first<any>();
   if (!force && last?.value) {
     try {
-      if (Date.now() - Date.parse(JSON.parse(last.value).at) < 24 * 3600_000) return null;
+      const prev = JSON.parse(last.value);
+      // Daily when the last submission was accepted; hourly retries after a refusal.
+      const wait = prev.status >= 200 && prev.status < 300 ? 24 * 3600_000 : 3600_000;
+      if (Date.now() - Date.parse(prev.at) < wait) return null;
     } catch {}
   }
   const urlList = await publicUrls(env);
-  const resp = await fetch("https://api.indexnow.org/indexnow", {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ host, key: INDEXNOW_KEY, keyLocation: `${env.SITE_URL}/${INDEXNOW_KEY}.txt`, urlList }),
-  });
-  const result = { at: new Date().toISOString(), status: resp.status, urls: urlList.length };
+  const body = JSON.stringify({ host, key: INDEXNOW_KEY, keyLocation: `${env.SITE_URL}/${INDEXNOW_KEY}.txt`, urlList });
+  // Bing's own endpoint first: api.indexnow.org rate-limits Cloudflare's shared egress addresses
+  // (429) while accepting the same request from elsewhere. Either endpoint shares with all engines.
+  let status = 0;
+  const tried: string[] = [];
+  for (const endpoint of ["https://www.bing.com/indexnow", "https://api.indexnow.org/indexnow"]) {
+    const resp = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json; charset=utf-8" }, body });
+    status = resp.status;
+    tried.push(`${new URL(endpoint).hostname}:${status}`);
+    if (status >= 200 && status < 300) break;
+  }
+  const result = { at: new Date().toISOString(), status, urls: urlList.length, tried };
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('indexnow_status', ?)").bind(JSON.stringify(result)).run();
   return { status: resp.status, urls: urlList.length };
 }
