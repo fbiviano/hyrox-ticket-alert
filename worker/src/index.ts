@@ -48,6 +48,8 @@ export interface Env {
   WHATSAPP_APP_SECRET?: string; // verifies Meta's webhook signatures
   WHATSAPP_APP_ID?: string; // the Meta app's id (not secret)
   WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
+  GSC_KEY?: string; // Google service-account key (JSON) with read access to Search Console - SEO report
+  BING_API_KEY?: string; // Bing Webmaster Tools API key - SEO report
 }
 
 interface TrackedTicket {
@@ -2447,6 +2449,10 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   try {
     if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/update_/i.test(text)) {
       await handleUpdateCommand(env, text);
+      return new Response("ok");
+    }
+    if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/seo(@\w+)?$/i.test(text)) {
+      await sendTelegram(env, await seoReport(env));
       return new Response("ok");
     }
     const upper = text.toUpperCase();
@@ -6077,6 +6083,182 @@ async function submitIndexNow(env: Env, force = false): Promise<{ status: number
   return { status, urls: urlList.length };
 }
 
+// ---------------------------------------------------------------------------
+// SEO report (Telegram): every Monday from 09:00 Swiss, Google Search Console + Bing numbers for
+// the last 7 days against the 7 before; on other days only a warning when a tracked search drops
+// 3+ places. /seo sends the report on demand. Search Console data lags ~3 days, so the week ends
+// 3 days ago.
+// ---------------------------------------------------------------------------
+const SEO_SITE = "roxracealerts.com";
+const SEO_TRACKED = ["hyrox race alerts", "hyrox alerts", "hyrox ticket alerts", "roxracealerts", "hyrox tickets", "hyrox tickets sold out", "hyrox waitlist", "hyrox ticket release"];
+
+type GscRow = { keys?: string[]; clicks: number; impressions: number; position: number };
+const isoDaysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10);
+const SEO_WEEK = () => ({ cur: { start: isoDaysAgo(9), end: isoDaysAgo(3) }, prev: { start: isoDaysAgo(16), end: isoDaysAgo(10) } });
+
+/** OAuth token for the service account in GSC_KEY (signed JWT exchanged at Google). */
+async function googleAccessToken(env: Env): Promise<string> {
+  const key = JSON.parse(env.GSC_KEY!);
+  const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const part = (o: object) => b64url(new TextEncoder().encode(JSON.stringify(o)));
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${part({ alg: "RS256", typ: "JWT" })}.${part({
+    iss: key.client_email,
+    scope: "https://www.googleapis.com/auth/webmasters.readonly",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const der = Uint8Array.from(atob(String(key.private_key).replace(/-----[^-]+-----/g, "").replace(/\s+/g, "")), (c) => c.charCodeAt(0));
+  const signer = await crypto.subtle.importKey("pkcs8", der, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", signer, new TextEncoder().encode(unsigned)));
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${b64url(sig)}` }),
+  });
+  const j: any = await resp.json().catch(() => ({}));
+  if (!j.access_token) throw new Error(`Google sign-in failed (${resp.status}): ${JSON.stringify(j).slice(0, 150)}`);
+  return j.access_token;
+}
+
+async function gscQuery(token: string, range: { start: string; end: string }, dimensions: string[], rowLimit = 1000): Promise<GscRow[]> {
+  const resp = await fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(`sc-domain:${SEO_SITE}`)}/searchAnalytics/query`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ startDate: range.start, endDate: range.end, dimensions, rowLimit }),
+  });
+  const j: any = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(`Search Console ${resp.status}: ${String(j?.error?.message || "").slice(0, 150)}`);
+  return j.rows || [];
+}
+
+/** Queries of this week and the week before, keyed by query. */
+async function gscWeeks(token: string) {
+  const { cur, prev } = SEO_WEEK();
+  const [now, before] = await Promise.all([gscQuery(token, cur, ["query"]), gscQuery(token, prev, ["query"])]);
+  const map = (rows: GscRow[]) => new Map(rows.map((r) => [String(r.keys?.[0] || "").toLowerCase(), r]));
+  return { cur, prev, now: map(now), before: map(before) };
+}
+
+const place = (p: number) => p.toFixed(1);
+/** Arrow for a position change (a lower number is better). */
+const moved = (now: number, before?: number) =>
+  before === undefined ? " (new)" : Math.abs(now - before) < 0.5 ? " (=)" : now < before ? ` (↑ from ${place(before)})` : ` (↓ from ${place(before)})`;
+
+/** Tracked searches that fell 3+ places, or were seen last week and not this week. */
+function trackedDrops(w: { now: Map<string, GscRow>; before: Map<string, GscRow> }): string[] {
+  const out: string[] = [];
+  for (const q of SEO_TRACKED) {
+    const a = w.now.get(q);
+    const b = w.before.get(q);
+    if (!b) continue;
+    if (!a && b.impressions >= 3) out.push(`${q}: was place ${place(b.position)}, not shown this week`);
+    else if (a && a.position - b.position >= 3) out.push(`${q}: place ${place(a.position)}, was ${place(b.position)}`);
+  }
+  return out;
+}
+
+async function seoReport(env: Env): Promise<string> {
+  const lines: string[] = [];
+  if (!env.GSC_KEY) lines.push("Google: not connected.");
+  else {
+    try {
+      const token = await googleAccessToken(env);
+      const w = await gscWeeks(token);
+      const [[t], [tb], pages] = await Promise.all([
+        gscQuery(token, w.cur, []),
+        gscQuery(token, w.prev, []),
+        gscQuery(token, w.cur, ["page"], 5),
+      ]);
+      const diff = (a = 0, b = 0) => `${a - b >= 0 ? "+" : ""}${a - b}`;
+      lines.push(`🔎 Google, ${dayLabel(w.cur.start)} – ${dayLabel(w.cur.end)}`);
+      lines.push(`Clicks: ${t?.clicks ?? 0} (${diff(t?.clicks, tb?.clicks)}) · shown: ${t?.impressions ?? 0} (${diff(t?.impressions, tb?.impressions)}) · average place: ${t ? place(t.position) : "-"}${t ? moved(t.position, tb?.position) : ""}`);
+      lines.push("", "Searches we track:");
+      for (const q of SEO_TRACKED) {
+        const r = w.now.get(q);
+        lines.push(r ? `• ${q}: place ${place(r.position)}${moved(r.position, w.before.get(q)?.position)} · shown ${r.impressions} · clicks ${r.clicks}` : `• ${q}: not shown`);
+      }
+      const top = [...w.now.entries()].sort((a, b) => b[1].impressions - a[1].impressions);
+      lines.push("", "Most shown for:");
+      for (const [q, r] of top.slice(0, 8)) lines.push(`• ${q}: place ${place(r.position)}${moved(r.position, w.before.get(q)?.position)} · shown ${r.impressions} · clicks ${r.clicks}`);
+      if (!top.length) lines.push("• nothing yet");
+      const fresh = top.filter(([q]) => !w.before.has(q) && !SEO_TRACKED.includes(q)).slice(0, 5);
+      if (fresh.length) {
+        lines.push("", "New searches finding us (ideas for pages/wording):");
+        for (const [q, r] of fresh) lines.push(`• ${q}: place ${place(r.position)} · shown ${r.impressions}`);
+      }
+      const drops = [...w.now.entries()]
+        .filter(([q, r]) => (w.before.get(q)?.impressions ?? 0) >= 5 && r.impressions >= 5 && r.position - w.before.get(q)!.position >= 3)
+        .map(([q, r]) => `• ${q}: place ${place(r.position)}, was ${place(w.before.get(q)!.position)}`);
+      if (drops.length) lines.push("", "⚠️ Dropped 3+ places:", ...drops.slice(0, 5));
+      if (pages.length) {
+        lines.push("", "Top pages:");
+        for (const p of pages) lines.push(`• ${String(p.keys?.[0] || "").replace(/^https?:\/\/[^/]+/, "") || "/"}: clicks ${p.clicks} · shown ${p.impressions}`);
+      }
+    } catch (e) {
+      lines.push(`Google: couldn't read the data - ${String((e as Error)?.message || e)}`);
+    }
+  }
+  lines.push("", await bingSummary(env));
+  return lines.join("\n").slice(0, 4000);
+}
+
+/** Bing Webmaster Tools: searches of the last 7 days (Bing keeps them per week). */
+async function bingSummary(env: Env): Promise<string> {
+  if (!env.BING_API_KEY) return "Bing: not connected.";
+  try {
+    const resp = await fetch(`https://ssl.bing.com/webmaster/api.svc/json/GetQueryStats?siteUrl=${encodeURIComponent(`https://${SEO_SITE}/`)}&apikey=${env.BING_API_KEY}`);
+    const j: any = await resp.json().catch(() => null);
+    if (!resp.ok || !Array.isArray(j?.d)) return `Bing: couldn't read the data (${resp.status}).`;
+    const since = Date.now() - 8 * 86400_000;
+    const byQuery = new Map<string, { shown: number; clicks: number }>();
+    for (const r of j.d) {
+      const at = Number(/\d+/.exec(String(r.Date))?.[0]);
+      if (!(at >= since)) continue;
+      const q = String(r.Query || "").toLowerCase();
+      const cur = byQuery.get(q) || { shown: 0, clicks: 0 };
+      cur.shown += Number(r.Impressions) || 0;
+      cur.clicks += Number(r.Clicks) || 0;
+      byQuery.set(q, cur);
+    }
+    const rows = [...byQuery.entries()].sort((a, b) => b[1].shown - a[1].shown);
+    if (!rows.length) return "🅱️ Bing: no searches showed us this week yet.";
+    const sum = rows.reduce((s, [, r]) => ({ shown: s.shown + r.shown, clicks: s.clicks + r.clicks }), { shown: 0, clicks: 0 });
+    return [`🅱️ Bing: clicks ${sum.clicks} · shown ${sum.shown}`, ...rows.slice(0, 5).map(([q, r]) => `• ${q}: shown ${r.shown} · clicks ${r.clicks}`)].join("\n");
+  } catch (e) {
+    return `Bing: couldn't read the data - ${String((e as Error)?.message || e)}`;
+  }
+}
+
+/** Part of the frequent checks: the Monday report, and a daily look for drops on tracked searches
+ * (each drop is reported at most once a week). Once a day from 09:00 Swiss. */
+async function runSeoChecks(env: Env): Promise<void> {
+  if (!env.GSC_KEY || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  const { date, weekday, hour } = swissNow();
+  if (hour < 9) return;
+  const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'seo_check'").first<any>();
+  if (last?.value === date) return;
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('seo_check', ?)").bind(date).run();
+  if (weekday === 1) {
+    await sendTelegram(env, await seoReport(env));
+    return;
+  }
+  try {
+    const drops = trackedDrops(await gscWeeks(await googleAccessToken(env)));
+    const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'seo_drop_alerted'").first<any>();
+    const alerted: Record<string, string> = row?.value ? JSON.parse(row.value) : {};
+    const weekAgo = isoDaysAgo(7);
+    const fresh = drops.filter((d) => !(alerted[d.split(":")[0]] > weekAgo));
+    if (!fresh.length) return;
+    for (const d of fresh) alerted[d.split(":")[0]] = date;
+    await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('seo_drop_alerted', ?)").bind(JSON.stringify(alerted)).run();
+    await sendTelegram(env, ["⚠️ Google: a search we track dropped", ...fresh.map((d) => `• ${d}`), "", "/seo shows the full report."].join("\n"));
+  } catch (e) {
+    console.error("SEO drop check failed:", e);
+  }
+}
+
 /** Keeps personal pages (sign-in links, alert management) out of search results. Cloudflare may
  * prepend its own content-signal lines to this file. */
 function handleRobots(env: Env): Response {
@@ -7433,6 +7615,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     sendUpdateEmails(env),
     runInstagramPlan(env),
     submitIndexNow(env),
+    runSeoChecks(env),
   ]);
 }
 
@@ -7575,6 +7758,13 @@ export default {
         const body: any = await r.json();
         const hb = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'alarm_last_run'").first<any>();
         return jsonResponse({ ...body, alarm_last_run: hb?.value ?? null });
+      }
+      if (url.pathname === "/admin/seo-report" && req.method === "POST") {
+        // The SEO report as text (send=1 also sends it to Telegram) - for testing the connection.
+        if (!env.WEBHOOK_SECRET || req.headers.get("Authorization") !== `Bearer ${env.WEBHOOK_SECRET}`) return new Response("Unauthorized", { status: 401 });
+        const report = await seoReport(env);
+        if (url.searchParams.get("send") === "1") await sendTelegram(env, report);
+        return new Response(report, { headers: { "content-type": "text/plain; charset=utf-8" } });
       }
       if (url.pathname.startsWith("/admin/ig/")) {
         const auth = req.headers.get("Authorization") || "";
