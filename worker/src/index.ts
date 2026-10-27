@@ -601,7 +601,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -1355,6 +1355,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const events = await listDirectoryEvents(env);
   const seo = homeSeo(env);
   const faq = homeFaqHtml();
+  const supportersCard = await renderSupportersCard(env);
 
   const searchBox = `<div class="row">
       <div class="urlWrap">
@@ -1436,6 +1437,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
         <div class="sidebar">
           ${sideOnSaleCard}
           ${sponsorsCard}
+          ${supportersCard}
           ${announcements}
         </div>
       </div>
@@ -1482,6 +1484,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
       <div class="sidebar">
         ${sideOnSaleCard}
         ${sponsorsCard}
+        ${supportersCard}
         ${announcements}
       </div>
     </div>
@@ -1534,7 +1537,7 @@ async function renderSponsors(req: Request, env: Env, preview = false): Promise<
     const all =
       (
         await env.DB.prepare(
-          "SELECT id, name, kind, tagline, location, logo_url, is_example FROM sponsors WHERE active = 1 ORDER BY sort_order, id LIMIT ?"
+          "SELECT id, name, kind, tagline, location, logo_url, is_example FROM sponsors WHERE active = 1 AND kind != 'supporter' ORDER BY sort_order, id LIMIT ?"
         )
           .bind(SPONSOR_SLOTS + 4)
           .all<any>()
@@ -1606,7 +1609,7 @@ async function renderSponsors(req: Request, env: Env, preview = false): Promise<
  * follow by email instead of linking to it. Not a secret. */
 const PARTNER_PAYMENT_URL = "";
 const PARTNER_MAX_LOGO_BYTES = 256 * 1024;
-const PARTNER_KINDS: Record<string, string> = { gym: "Gym or training club", brand: "Brand or business", coach: "Coach or creator" };
+const PARTNER_KINDS: Record<string, string> = { gym: "Gym or training club", brand: "Brand or business", coach: "Coach or creator", supporter: "Supporter (free tile for the widget)" };
 
 /** Image type from the file's own first bytes, never from the filename or the
  * browser-supplied type. SVG is deliberately not accepted: it can carry
@@ -1828,6 +1831,21 @@ async function handlePartnersAdminPage(req: Request, env: Env): Promise<Response
      ORDER BY a.status = 'pending' DESC, a.id DESC LIMIT 50`
   ).all<any>();
 
+  // Supporter requests: has the widget been seen on their site (its page is the Referer of
+  // the widget's data requests) in the last 30 days?
+  const { results: hits } = await env.DB.prepare("SELECT host, SUM(hits) AS n FROM widget_hits WHERE day >= date('now', '-30 days') GROUP BY host").all<any>();
+  const seen = new Map<string, number>((hits || []).map((h: any) => [h.host, Number(h.n)]));
+  const widgetNote = (a: any) => {
+    if (a.kind !== "supporter") return "";
+    let host = "";
+    try {
+      host = new URL(a.link).hostname.replace(/^www\./, "");
+    } catch {}
+    const n = seen.get(host) || 0;
+    return n
+      ? `<p><b style="color:#1e7e34">✓ Widget seen on ${escapeHtml(host)}</b> <small>(${n} views in 30 days)</small>${a.race_slug ? ` &middot; tile on <a href="/hyrox/${escapeHtml(a.race_slug)}">/hyrox/${escapeHtml(a.race_slug)}</a>` : ""}</p>`
+      : `<p><b style="color:#b00">Widget not seen on ${escapeHtml(host || a.link)} yet</b>${a.race_slug ? ` &middot; tile would go on /hyrox/${escapeHtml(a.race_slug)}` : ""}</p>`;
+  };
   const btn = (id: number, action: string, label: string, extra = "") =>
     `<button type="submit" name="action" value="${action}" style="margin-top:8px;margin-right:6px;${extra}">${label}</button>`;
   const rows = (results || [])
@@ -1841,6 +1859,7 @@ async function handlePartnersAdminPage(req: Request, env: Env): Promise<Response
         <p><b>${escapeHtml(a.name)}</b> <small>${escapeHtml(PARTNER_KINDS[a.kind] || a.kind)} &middot; ${pending ? "waiting for review" : "approved, waiting for payment"} &middot; ${escapeHtml(a.created_at)}</small>${a.placement === "top" ? ` <b style="color:#9a6700">wants the TOP spot</b>` : ""}</p>
         <p><a href="${escapeHtml(a.link)}" target="_blank" rel="noopener">${escapeHtml(a.link)}</a>${a.location ? `<br><small>${escapeHtml(a.location)}</small>` : ""}${a.tagline ? `<br>"${escapeHtml(a.tagline)}"` : ""}<br><small>${escapeHtml(a.email)}</small></p>
         ${a.message ? `<p><small>${escapeHtml(a.message).replace(/\n/g, "<br>")}</small></p>` : ""}
+        ${widgetNote(a)}
         <form method="POST" action="/admin/partners/decide" style="clear:both">
           <input type="hidden" name="token" value="${escapeHtml(token)}">
           <input type="hidden" name="id" value="${a.id}">
@@ -1892,10 +1911,10 @@ async function handlePartnersDecide(req: Request, env: Env): Promise<Response> {
 
   if (a.status === "pending" && (action === "live" || action === "pay")) {
     const created = await env.DB.prepare(
-      `INSERT INTO sponsors (name, kind, tagline, location, url, logo_url, active, sort_order)
-       VALUES (?, ?, ?, ?, ?, NULL, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sponsors))`
+      `INSERT INTO sponsors (name, kind, tagline, location, url, logo_url, active, sort_order, race_slug)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM sponsors), ?)`
     )
-      .bind(a.name, a.kind === "brand" ? "brand" : "gym", a.tagline, a.location, a.link, action === "live" ? 1 : 0)
+      .bind(a.name, a.kind === "brand" ? "brand" : a.kind === "supporter" ? "supporter" : "gym", a.tagline, a.location, a.link, action === "live" ? 1 : 0, a.race_slug || null)
       .run();
     const sponsorId = created.meta.last_row_id;
     if (a.logo_b64) await env.DB.prepare("UPDATE sponsors SET logo_url = ? WHERE id = ?").bind(`/partner-logo/${sponsorId}`, sponsorId).run();
@@ -5483,6 +5502,11 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     ],
   ];
   const others = events.filter((e) => e !== ev).slice(0, 10);
+  const supporters = await listSupporters(env, ev.slug);
+  const supportersHtml = `<div class="card"><h2>Gyms supporting HYROX ${escapeHtml(city)} athletes</h2>${
+    supporters.length ? `<div class="sponsors">${supporterTiles(supporters)}</div>` : `<p class="hint">No supporting gym listed for ${escapeHtml(city)} yet.</p>`
+  }<p class="hint">Gym or club in ${escapeHtml(city)}? Put the live ticket widget on your website and get a free tile here: <a href="/supporters?race=${ev.slug}">how it works</a>.</p>
+    <textarea readonly rows="3" style="width:100%;padding:8px;font-family:monospace;font-size:0.8rem;border:1px solid #ddd;border-radius:6px;box-sizing:border-box" onclick="this.select()">${escapeHtml(widgetSnippet(env, ev.slug!, city))}</textarea></div>`;
   const title = `HYROX ${city} ${year} tickets: ${status.short} | RoxRaceAlerts`;
   const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
@@ -5536,6 +5560,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     </div>
     ${ticketsHtml}
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    ${supportersHtml}
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
       ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
       <p><a href="/">All ${events.length} upcoming HYROX races</a></p>
@@ -5803,6 +5828,181 @@ const GUIDE_TITLES: Record<(typeof GUIDE_SLUGS)[number], string> = {
   "hyrox-ticket-types": "HYROX ticket types explained: Open, Pro, Doubles, Relay",
 };
 
+// ---------------------------------------------------------------------------
+// Supporters: a gym puts our live ticket widget on its website (a plain link to the race page,
+// upgraded by widget.js into a small card showing the race's ticket status), and gets a free
+// Supporter tile in return - on its city's race page, on the homepage and on /supporters -
+// linking to the gym. The widget's data requests carry the gym's page as Referer, which is how
+// we see the embed is really there (widget_hits). Supporters never use up the paid partner spots.
+// ---------------------------------------------------------------------------
+function widgetSnippet(env: Env, slug: string, city: string): string {
+  return `<a href="${env.SITE_URL}/hyrox/${slug}" data-rra="${slug}">HYROX ${city} tickets: free alerts</a>\n<script async src="${env.SITE_URL}/widget.js"></script>`;
+}
+
+/** The script a gym's page loads: turns every <a data-rra="slug"> into a live card. The link
+ * itself stays a normal link (that is what search engines count), the script only dresses it. */
+function handleWidgetScript(env: Env): Response {
+  const js = `(function(){
+  var origin=${JSON.stringify(env.SITE_URL)};
+  var els=document.querySelectorAll('a[data-rra]');
+  Array.prototype.forEach.call(els,function(a){
+    var slug=a.getAttribute('data-rra')||'next';
+    fetch(origin+'/widget-data/'+encodeURIComponent(slug)).then(function(r){return r.json()}).then(function(d){
+      if(!d||d.error)return;
+      a.href=d.url+'?src=widget';a.target='_blank';a.rel='noopener';
+      a.style.cssText='display:block;max-width:360px;padding:14px 16px;border:1px solid #e2e2e2;border-radius:12px;background:#fff;color:#1a1a1a;text-decoration:none;font-family:-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.35;box-sizing:border-box';
+      var badge='<span style="display:inline-block;font-size:12px;padding:2px 9px;border-radius:10px;background:'+(d.cls==='on'?'#e6f4ea':d.cls==='soon'?'#e6eeff':'#f1f1f1')+';color:'+(d.cls==='on'?'#1e7e34':d.cls==='soon'?'#2851b8':'#777')+'">'+d.badge+'</span>';
+      a.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><b style="font-size:15px">'+d.title+'</b>'+badge+'</div>'
+        +(d.line?'<div style="font-size:13px;color:#444;margin-top:6px">'+d.line+'</div>':'')
+        +'<div style="font-size:12px;color:#777;margin-top:8px">Free ticket alerts &rarr; roxracealerts.com</div>';
+    }).catch(function(){});
+  });
+})();`;
+  return new Response(js, { headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=3600", "access-control-allow-origin": "*" } });
+}
+
+const esc = (s: string) => escapeHtml(s);
+
+/** JSON for the widget: one race, or "next" = the soonest announced sale. Counts the embed. */
+async function handleWidgetData(req: Request, env: Env, slug: string): Promise<Response> {
+  const events = await listDirectoryEvents(env);
+  const ev = slug === "next" ? events.find((e) => !e.on_sale && e.presale_live_at) || events.find((e) => e.on_sale) : events.find((e) => e.slug === slug);
+  const headers = { "content-type": "application/json", "cache-control": "public, max-age=300", "access-control-allow-origin": "*" };
+  if (!ev) return new Response(JSON.stringify({ error: "unknown race" }), { status: 404, headers });
+  // Remember which site shows the widget (its page is the Referer).
+  try {
+    const ref = req.headers.get("Referer");
+    const host = ref ? new URL(ref).hostname.replace(/^www\./, "") : "";
+    const own = new URL(env.SITE_URL).hostname.replace(/^www\./, "");
+    if (host && host !== own) {
+      await env.DB.prepare("INSERT INTO widget_hits (host, slug, day, hits) VALUES (?, ?, ?, 1) ON CONFLICT(host, slug, day) DO UPDATE SET hits = hits + 1")
+        .bind(host.slice(0, 120), ev.slug, dayKey())
+        .run();
+    }
+  } catch (e) {
+    console.error("widget hit not counted:", e);
+  }
+  const { city } = shortRaceName(ev.title);
+  const year = (ev.event_date || "").slice(0, 4);
+  const raceDay = ev.event_date ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`)) : "";
+  const data = ev.on_sale
+    ? { badge: "On sale now", cls: "on", line: raceDay ? `Race day ${raceDay}` : "" }
+    : ev.presale_live_at
+      ? { badge: "Sale announced", cls: "soon", line: `Tickets go on sale ${formatInTimezone(ev.presale_live_at, ev.presale_timezone)}` }
+      : { badge: "Not on sale yet", cls: "off", line: raceDay ? `Race day ${raceDay}` : "" };
+  return new Response(JSON.stringify({ title: esc(`HYROX ${city} ${year}`.trim()), url: `${env.SITE_URL}/hyrox/${ev.slug}`, badge: data.badge, cls: data.cls, line: esc(data.line) }), { headers });
+}
+
+/** Active supporters, optionally for one race. */
+async function listSupporters(env: Env, slug?: string): Promise<any[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT id, name, tagline, location, race_slug FROM sponsors WHERE active = 1 AND kind = 'supporter' ${slug ? "AND race_slug = ?" : ""} ORDER BY sort_order, id LIMIT 30`
+  )
+    .bind(...(slug ? [slug] : []))
+    .all<any>();
+  return results || [];
+}
+
+function supporterTiles(rows: any[]): string {
+  return rows
+    .map(
+      (s) =>
+        `<a class="sponsor" href="/out/${s.id}" target="_blank" rel="noopener"><span class="sp-ico">${escapeHtml(String(s.name).trim().charAt(0).toUpperCase())}</span><span class="sp-body"><b>${escapeHtml(s.name)}</b>${
+          s.location ? `<small class="sp-loc">${escapeHtml(s.location)}</small>` : ""
+        }${s.tagline ? `<small>${escapeHtml(s.tagline)}</small>` : ""}</span></a>`
+    )
+    .join("");
+}
+
+/** Homepage sidebar card (shown only once there is at least one supporter). */
+async function renderSupportersCard(env: Env): Promise<string> {
+  const rows = await listSupporters(env);
+  if (!rows.length) return "";
+  return `<div class="card"><h2>Supporting gyms</h2><div class="sponsors">${supporterTiles(rows.slice(0, 8))}</div><p class="hint"><a href="/supporters">Gym or club? Get your free tile</a></p></div>`;
+}
+
+async function handleSupportersPage(req: Request, env: Env, error = "", v: Record<string, string> = {}, status = 200): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const races = await listDirectoryEvents(env);
+  const supporters = await listSupporters(env);
+  const pick = v.race || "next";
+  const pickedRace = races.find((r) => r.slug === pick);
+  const options = [`<option value="next"${pick === "next" ? " selected" : ""}>Next ticket sale (any race)</option>`]
+    .concat(races.map((r) => `<option value="${r.slug}"${pick === r.slug ? " selected" : ""}>HYROX ${escapeHtml(shortRaceName(r.title).city)}${r.event_date ? ` (${r.event_date})` : ""}</option>`))
+    .join("");
+  const snippet = pickedRace ? widgetSnippet(env, pickedRace.slug!, shortRaceName(pickedRace.title).city) : `<a href="${env.SITE_URL}/" data-rra="next">HYROX tickets: free alerts</a>\n<script async src="${env.SITE_URL}/widget.js"></script>`;
+  const fieldStyle = "width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px;font-family:inherit";
+  const title = "For gyms: free HYROX ticket widget and a Supporter tile";
+  const description = "Put live HYROX ticket status on your gym's website (free widget) and get a free Supporter tile on RoxRaceAlerts linking to your gym: on your city's race page and the homepage.";
+  const r = page(
+    title,
+    `${navBar("/", subscriber, 0, !subscriber, env)}
+    <div class="hero"><h1>For gyms and clubs: a free ticket widget, and a free tile in return</h1>
+      <p class="hero-sub">Your members keep asking when HYROX tickets drop. Put the answer on your website, and we put your gym in front of HYROX athletes.</p></div>
+    <div class="card">
+      <h2>How it works</h2>
+      <ol>
+        <li><b>Paste the widget on your website</b> (any page: events, HYROX, community). It shows live ticket status for your city's race and links to free alerts. Two lines of code, no account.</li>
+        <li><b>Tell us below.</b> Once we see the widget on your site, your gym gets a <b>Supporter tile</b>: on the HYROX race page of your city, on the RoxRaceAlerts homepage and on this page, each linking to your website.</li>
+        <li><b>That's it.</b> No cost, no contract. Athletes looking for a place to train for that race find you; your members never miss a ticket.</li>
+      </ol>
+      <h2>1. The widget</h2>
+      <form method="GET" action="/supporters"><label>Show the race for<select name="race" style="${fieldStyle}" onchange="this.form.submit()">${options}</select></label></form>
+      <p>Copy this into your page where you want the box to appear:</p>
+      <textarea readonly rows="3" style="${fieldStyle};font-family:monospace;font-size:0.85rem" onclick="this.select()">${escapeHtml(snippet)}</textarea>
+      <p class="hint">Preview of what visitors see:</p>
+      <div style="padding:12px;background:#f7f7f7;border-radius:8px">${snippet.replace("<script", "<script data-preview").replace(/data-rra/, "data-rra")}</div>
+    </div>
+    <div class="card">
+      <h2>2. Get your Supporter tile</h2>
+      ${error ? `<p style="color:#b00"><b>${escapeHtml(error)}</b></p>` : ""}
+      <form method="POST" action="/supporters">
+        <label>Gym or club name<input type="text" name="name" required maxlength="60" value="${escapeHtml(v.name || "")}"></label>
+        <label>Website where the widget is (https://...)<input type="text" name="link" required maxlength="300" value="${escapeHtml(v.link || "")}"></label>
+        <label>Your race<select name="race" style="${fieldStyle}">${options.replace('value="next"', 'value=""').replace("Next ticket sale (any race)", "Not tied to one race")}</select></label>
+        <label>City and country<input type="text" name="location" maxlength="100" value="${escapeHtml(v.location || "")}" placeholder="e.g. Birmingham, UK"></label>
+        <label>One line about your gym (optional, max 80 characters)<input type="text" name="tagline" maxlength="80" value="${escapeHtml(v.tagline || "")}" placeholder="e.g. HYROX prep classes and team training"></label>
+        <label>Your email<input type="email" name="email" required maxlength="200" value="${escapeHtml(v.email || "")}"></label>
+        <div style="position:absolute;left:-9999px" aria-hidden="true"><label>Leave this empty <input type="text" name="company_site" tabindex="-1" autocomplete="off"></label></div>
+        <p class="consent">We check that the widget is on your site, then switch your tile on and email you. Your email is only used for that.</p>
+        <button type="submit">Request my free Supporter tile</button>
+      </form>
+    </div>
+    ${supporters.length ? `<div class="card"><h2>Supporting gyms</h2><div class="sponsors">${supporterTiles(supporters)}</div></div>` : ""}
+    <div class="card"><p>Want more than a tile? See the <a href="/partners">partner spots</a>.</p></div>`,
+    {},
+    false,
+    { description, canonical: `${env.SITE_URL}/supporters`, ownH1: true }
+  );
+  return status === 200 ? r : new Response(r.body, { status, headers: r.headers });
+}
+
+/** Stores a supporter request as a partner application (kind 'supporter'); reviewed on /admin/partners. */
+async function handleSupportersRequest(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const clip = (x: unknown, n: number) => String(x ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+  if (clip(form.get("company_site"), 200)) return page("Thanks", `<div class="card"><p>Thanks - we've got your request.</p></div>`);
+  const v = { name: clip(form.get("name"), 60), link: clip(form.get("link"), 300), race: clip(form.get("race"), 60), location: clip(form.get("location"), 100), tagline: clip(form.get("tagline"), 80), email: clip(form.get("email"), 200).toLowerCase() };
+  const link = normalizePartnerLink(v.link);
+  if (!v.name) return handleSupportersPage(req, env, "Please enter your gym or club name.", v, 400);
+  if (!link || /instagram\.com/.test(link)) return handleSupportersPage(req, env, "Please enter the website address where the widget is (not an Instagram handle).", v, 400);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.email)) return handleSupportersPage(req, env, "Please enter a valid email address.", v, 400);
+  const races = await listDirectoryEvents(env);
+  const raceSlug = races.some((r) => r.slug === v.race) ? v.race : null;
+  const today = await env.DB.prepare("SELECT COUNT(*) AS n FROM partner_applications WHERE created_at >= datetime('now', '-1 day')").first<any>();
+  if (Number(today?.n) >= 40) return handleSupportersPage(req, env, "Too many requests today - please try again tomorrow.", v, 429);
+  await env.DB.prepare(
+    "INSERT INTO partner_applications (name, kind, placement, link, tagline, location, email, message, race_slug) VALUES (?, 'supporter', 'any', ?, ?, ?, ?, '', ?)"
+  )
+    .bind(v.name, link, v.tagline || null, v.location || null, v.email, raceSlug)
+    .run();
+  await pingAdmin(env, `🏋️ Supporter request: ${v.name} (${link})${raceSlug ? ` for /hyrox/${raceSlug}` : ""} - review on /admin/partners`);
+  return page(
+    "Thanks",
+    `<div class="card"><p>Thanks! We'll check that the widget is live on <b>${escapeHtml(link)}</b> and switch your Supporter tile on, usually within a day. We'll email <b>${escapeHtml(v.email)}</b>.</p><p><a href="/">Back to RoxRaceAlerts</a></p></div>`
+  );
+}
+
 async function handleSitemap(env: Env): Promise<Response> {
   const today = todayIso();
   const races = await listDirectoryEvents(env);
@@ -5811,6 +6011,7 @@ async function handleSitemap(env: Env): Promise<Response> {
     ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
     ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
     { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
+    { loc: `${env.SITE_URL}/supporters`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
     { loc: `${env.SITE_URL}/terms`, changefreq: "yearly", priority: "0.2" },
   ];
@@ -5829,7 +6030,7 @@ const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
 /** Every URL the sitemap lists. */
 async function publicUrls(env: Env): Promise<string[]> {
   const races = await listDirectoryEvents(env);
-  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/about`, `${env.SITE_URL}/partners`];
+  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
 }
 
 /** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
@@ -7297,6 +7498,11 @@ export default {
       if (racePage && req.method === "GET") return await handleRacePage(req, env, racePage[1]);
       if ((url.pathname === "/hyrox" || url.pathname === "/hyrox/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/`, 301);
       if (url.pathname === "/about" && req.method === "GET") return await handleAboutPage(req, env);
+      if (url.pathname === "/supporters" && req.method === "GET") return await handleSupportersPage(req, env, "", { race: url.searchParams.get("race") || "next" });
+      if (url.pathname === "/supporters" && req.method === "POST") return await handleSupportersRequest(req, env);
+      if (url.pathname === "/widget.js" && req.method === "GET") return handleWidgetScript(env);
+      const widgetData = url.pathname.match(/^\/widget-data\/([a-z0-9-]{1,60})$/);
+      if (widgetData && req.method === "GET") return await handleWidgetData(req, env, widgetData[1]);
       const guide = url.pathname.match(/^\/guides\/([a-z0-9-]{1,60})\/?$/);
       if (guide && req.method === "GET") return await handleGuidePage(req, env, guide[1]);
       if ((url.pathname === "/guides" || url.pathname === "/guides/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/guides/${GUIDE_SLUGS[0]}`, 301);

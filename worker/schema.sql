@@ -511,3 +511,16 @@ CREATE TABLE IF NOT EXISTS email_events (
 -- Traffic source (2026-10-26): ?src=ig on a link (e.g. the Instagram bio) is remembered for
 -- 30 days and stored on sign-up, so the Sunday Instagram report can count sign-ups from it.
 -- ALTER TABLE subscribers ADD COLUMN source TEXT;
+
+-- Supporters (2026-10-27): gyms that show our ticket widget get a free tile. sponsors.kind =
+-- 'supporter' (never counted against paid spots); race_slug = the race page the tile sits on.
+-- widget_hits counts the widget's data requests per embedding site (Referer host) and day.
+-- ALTER TABLE sponsors ADD COLUMN race_slug TEXT;
+-- ALTER TABLE partner_applications ADD COLUMN race_slug TEXT;
+CREATE TABLE IF NOT EXISTS widget_hits (
+  host TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  day TEXT NOT NULL,
+  hits INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (host, slug, day)
+);
