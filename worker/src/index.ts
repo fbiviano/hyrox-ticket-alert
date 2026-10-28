@@ -1377,7 +1377,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
 
   const hero = `<div class="hero">
     <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
-    <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back. Want them first? Priority with WhatsApp, from $3.</p>
+    <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back.</p>
   </div>`;
 
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
