@@ -603,7 +603,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a> &middot; <a href="/privacy">Privacy</a><br>RoxRaceAlerts is operated by ${SELLER_ADDRESS} &middot; <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -2661,6 +2661,7 @@ async function priorityCandidates(env: Env, subscriberId: number, eventUrl?: str
 // enabling live payments. TODO before launch: confirm both with the business owner.
 const SELLER_NAME = "MetaOne AG, Switzerland";
 const SUPPORT_EMAIL = "support@roxracealerts.com";
+const SELLER_ADDRESS = "MetaOne AG, c/o F10 (Switzerland) AG, Pfingstweidstrasse 110, 8005 Z&uuml;rich, Switzerland";
 
 function handleTermsPage(env: Env): Response {
   return page(
@@ -2684,6 +2685,37 @@ function handleTermsPage(env: Env): Response {
         <li>If we fail to alert you before free subscribers, full refund on request.</li>
       </ul>
       <p>Email <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> from the address you signed up with; refunds go back to the original payment method.</p>
+      <p><a href="/">Back to RoxRaceAlerts</a></p>
+    </div>`
+  );
+}
+
+/** Privacy policy, incl. how people opt in to each alert channel (Meta asks for this before
+ * allowing a WhatsApp Business number). */
+function handlePrivacyPage(): Response {
+  return page(
+    "Privacy",
+    `<div class="card">
+      <h1>Privacy</h1>
+      <p>RoxRaceAlerts is operated by ${SELLER_ADDRESS}. Contact: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.</p>
+      <h2>How you sign up (opt-in)</h2>
+      <ul>
+        <li><b>Email:</b> you enter your email and pick the races or tickets to watch, then confirm with the link we email you. Only then do alerts start.</li>
+        <li><b>Telegram:</b> only if you connect it yourself on My alerts and press Start in our bot. Send /stop to turn it off.</li>
+        <li><b>WhatsApp:</b> only if you add your number (at checkout or on My alerts) and reply START to our first message. Reply STOP any time to turn it off.</li>
+      </ul>
+      <p>We only message you about the races and tickets you chose to watch, plus the occasional product update. Every email has an unsubscribe link.</p>
+      <h2>What we store</h2>
+      <ul>
+        <li>Your email address and what you watch.</li>
+        <li>If you connect them: your Telegram chat ID and your WhatsApp number.</li>
+        <li>If you buy Priority: what you bought. Payments are handled by Stripe; we never see your card details.</li>
+        <li>Basic email delivery data (delivered, opened), so we can tell whether alerts arrive.</li>
+      </ul>
+      <h2>Who processes it for us</h2>
+      <p>Cloudflare (hosting and database), Resend (email), Stripe (payments), Telegram and Meta/WhatsApp (only if you connect them). We don't sell or share your data with anyone else.</p>
+      <h2>Your choices</h2>
+      <p>Unsubscribe at any time from any email, or ask us at <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> to see or delete your data. We keep it until you unsubscribe or ask us to delete it.</p>
       <p><a href="/">Back to RoxRaceAlerts</a></p>
     </div>`
   );
@@ -6033,6 +6065,7 @@ async function handleSitemap(env: Env): Promise<Response> {
     { loc: `${env.SITE_URL}/supporters`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
     { loc: `${env.SITE_URL}/terms`, changefreq: "yearly", priority: "0.2" },
+    { loc: `${env.SITE_URL}/privacy`, changefreq: "yearly", priority: "0.2" },
   ];
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
@@ -7745,6 +7778,7 @@ export default {
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
       if (url.pathname === "/terms" && req.method === "GET") return handleTermsPage(env);
+      if (url.pathname === "/privacy" && req.method === "GET") return handlePrivacyPage();
       if (url.pathname === "/priority/thanks" && req.method === "GET") return handlePriorityThanks();
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
