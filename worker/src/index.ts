@@ -5523,6 +5523,14 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
           : `HYROX hasn't announced the sale date yet. Sale dates are usually announced a few weeks ahead; set a free alert and you get an email the moment tickets open.`,
     ],
     [
+      `Is there a HYROX ${city} ${year} presale?`,
+      ev.presale_is_live
+        ? `Yes, a pre-sale is live now${ev.presale_note ? `: ${truncate(ev.presale_note, 120)}` : "."} Pre-sale spots usually go fast; buy on the official HYROX shop.`
+        : ev.on_sale
+          ? `The pre-sale is over and tickets are on general sale now on the official HYROX shop.`
+          : `HYROX often opens a pre-sale (for example for newsletter or community members) shortly before the public sale. Set a free alert and we email you the moment a pre-sale or the public sale opens.`,
+    ],
+    [
       `Is HYROX ${city} ${year} sold out?`,
       soldOut.length
         ? `${soldOut.length} of the ${tracked.size} ticket types we track here are currently sold out (${soldOut.slice(0, 4).join(", ")}${soldOut.length > 4 ? "..." : ""}). Sold-out HYROX tickets come back regularly when people's plans change, and we alert watchers the moment they do.`
@@ -5543,6 +5551,10 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       `Only through the official HYROX shop and its transfer or resale option, where HYROX offers one for this race. Avoid paying strangers in Facebook groups or chats - that's where ticket scams happen. Returned tickets reappear in the official shop, and an alert gets you there first.`,
     ],
     [
+      `Are there HYROX ${city} spectator tickets?`,
+      `At most HYROX races spectators need a ticket, often with free entry for young children. They are sold on the official HYROX shop next to the race tickets. Spectator tickets can sell out at the biggest events; you can set a free alert for them like for any other ticket type.`,
+    ],
+    [
       `Where do I buy HYROX ${city} tickets?`,
       `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
     ],
@@ -5555,7 +5567,8 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     <textarea readonly rows="3" style="width:100%;padding:8px;font-family:monospace;font-size:0.8rem;border:1px solid #ddd;border-radius:6px;box-sizing:border-box" onclick="this.select()">${escapeHtml(widgetSnippet(env, ev.slug!, city))}</textarea></div>`;
   // Search phrase first, then the brand (what people type: "<city> tickets sold out", "release
   // date", "waitlist"); each part only where it's true for this race.
-  const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Release Date & Alerts" : "Release Date & Waitlist";
+  // "presale" added 2026-11-02: Search Console showed "<city> 2027 tickets presale" finding race pages.
+  const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Presale, Release Date & Alerts" : "Presale, Release Date & Waitlist";
   const title = `HYROX ${city} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
   const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
@@ -6241,9 +6254,12 @@ async function seoReport(env: Env): Promise<string> {
 async function bingSummary(env: Env): Promise<string> {
   if (!env.BING_API_KEY) return "Bing: not connected.";
   try {
-    const resp = await fetch(`https://ssl.bing.com/webmaster/api.svc/json/GetQueryStats?siteUrl=${encodeURIComponent(`https://${SEO_SITE}/`)}&apikey=${env.BING_API_KEY}`);
-    const j: any = await resp.json().catch(() => null);
-    if (!resp.ok || !Array.isArray(j?.d)) return `Bing: couldn't read the data (${resp.status}).`;
+    // The key is trimmed: a saved key file can carry a trailing newline/space, which Bing rejects with a 400.
+    const resp = await fetch(`https://ssl.bing.com/webmaster/api.svc/json/GetQueryStats?siteUrl=${encodeURIComponent(`https://${SEO_SITE}/`)}&apikey=${encodeURIComponent(env.BING_API_KEY.trim())}`);
+    const raw = await resp.text();
+    let j: any = null;
+    try { j = JSON.parse(raw); } catch {}
+    if (!resp.ok || !Array.isArray(j?.d)) return `Bing: couldn't read the data (${resp.status}${raw ? `: ${truncate(raw.replace(/\s+/g, " "), 150)}` : ""}).`;
     const since = Date.now() - 8 * 86400_000;
     const byQuery = new Map<string, { shown: number; clicks: number }>();
     for (const r of j.d) {
