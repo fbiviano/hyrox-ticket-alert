@@ -5503,8 +5503,8 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
 
   const official = `<a href="${escapeHtml(ev.url)}" rel="noopener">hyrox.com</a>`;
   // Same Free / Priority choice as on the homepage; handleWatchSale takes priority=1/season to checkout.
-  const offerPriority =
-    priorityOfferedTo(env, subscriber) && !(subscriber && (await ownsRacePriority(env, subscriber.id, ev.url)));
+  const hasPriority = !!subscriber && (await ownsRacePriority(env, subscriber.id, ev.url));
+  const offerPriority = priorityOfferedTo(env, subscriber) && !hasPriority;
   const showSeason = !!subscriber && (await watchedRaceCount(env, subscriber.id)) >= 1;
   const saleButtons = offerPriority
     ? priorityChoiceHtml(
@@ -5523,7 +5523,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
         <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}">
         ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
         ${saleButtons}
-        <p class="consent">One email the moment the sale opens. Unsubscribe any time.</p>
+        <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first, also on WhatsApp. " : ""}One email the moment the sale opens. Unsubscribe any time.</p>
       </form>`;
 
   const faq: [string, string][] = [
