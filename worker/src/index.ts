@@ -2440,6 +2440,7 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
       const data = String(update.callback_query.data || "");
       if (data.startsWith("ig:")) await handleIgDraftButton(env, update.callback_query);
       else if (data.startsWith("upd:")) await handleUpdateButton(env, update.callback_query);
+      else if (data.startsWith("nud:")) await handleNudgeButton(env, update.callback_query);
     } catch (e) {
       console.error("Telegram button failed:", e);
     }
@@ -2453,6 +2454,10 @@ async function handleTelegramWebhook(req: Request, env: Env): Promise<Response> 
   try {
     if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/update_/i.test(text)) {
       await handleUpdateCommand(env, text);
+      return new Response("ok");
+    }
+    if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/nudge_/i.test(text)) {
+      await handleNudgeCommand(env, text);
       return new Response("ok");
     }
     if (env.TELEGRAM_CHAT_ID && chatId === String(env.TELEGRAM_CHAT_ID) && /^\/seo(@\w+)?$/i.test(text)) {
@@ -3773,6 +3778,189 @@ async function handleUpdateButton(env: Env, cb: any): Promise<void> {
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('update_email', ?)").bind(JSON.stringify(value)).run();
   await answer("Sending started.");
   await pingAdmin(env, `📨 Update email: sending started (from ${UPDATE_EMAIL_SWISS_HOURS[0]}:00 Swiss time, ${UPDATE_EMAIL_PER_DAY} a day at most). /update_status shows progress.`);
+}
+
+// ---------------------------------------------------------------------------
+// Priority nudge (2026-11-02): one email per free user who watches something, at least a day after
+// they started watching - "many people are monitoring these tickets, Priority is alerted first".
+// Switched on from the admin's Telegram (/nudge_test, /nudge_start, /nudge_stop, /nudge_status);
+// once on it keeps going for new watchers. nudge_sent makes it once per person. Mornings only and
+// NUDGE_PER_DAY at most, like the update email, so alerts keep room in the email provider's limit.
+// ---------------------------------------------------------------------------
+const NUDGE_SUBJECT = "Many people are watching the same HYROX tickets";
+const NUDGE_PER_DAY = 40;
+
+/** Free, confirmed users with a live watch started at least a day ago who haven't had the nudge. */
+const NUDGE_CANDIDATES_SQL = `SELECT s.* FROM subscribers s
+  WHERE s.verified = 1
+    AND NOT EXISTS(SELECT 1 FROM nudge_sent n WHERE n.subscriber_id = s.id)
+    AND NOT EXISTS(SELECT 1 FROM race_priority r WHERE r.subscriber_id = s.id)
+    AND NOT EXISTS(SELECT 1 FROM ticket_priority t WHERE t.subscriber_id = s.id)
+    AND NOT EXISTS(SELECT 1 FROM season_pass p WHERE p.subscriber_id = s.id AND p.valid_until >= date('now'))
+    AND (EXISTS(SELECT 1 FROM subscriptions x WHERE x.subscriber_id = s.id AND x.purchased_at IS NULL
+                AND (x.event_date IS NULL OR x.event_date >= date('now')) AND x.created_at <= datetime('now', '-1 day'))
+      OR EXISTS(SELECT 1 FROM sale_watchers y JOIN sale_watch w ON w.event_url = y.event_url
+                WHERE y.subscriber_id = s.id AND w.resolved = 0 AND (w.event_date IS NULL OR w.event_date >= date('now'))
+                  AND y.created_at <= datetime('now', '-1 day')))
+  ORDER BY s.id`;
+
+async function ensureNudgeTable(env: Env): Promise<void> {
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS nudge_sent (subscriber_id INTEGER PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT (datetime('now')))").run();
+}
+
+/** The email for one person: their most-watched race and tickets, with real watcher numbers. */
+async function nudgeEmailContent(env: Env, s: any): Promise<{ subject: string; html: string; text: string } | null> {
+  const ticketRace = await env.DB.prepare(
+    `SELECT x.event_name, group_concat(x.ticket_name, '||') AS tickets,
+            (SELECT COUNT(DISTINCT o.subscriber_id) FROM subscriptions o WHERE o.event_name = x.event_name AND o.purchased_at IS NULL) AS watchers
+     FROM subscriptions x WHERE x.subscriber_id = ? AND x.purchased_at IS NULL AND (x.event_date IS NULL OR x.event_date >= date('now'))
+     GROUP BY x.event_name ORDER BY watchers DESC LIMIT 1`
+  )
+    .bind(s.id)
+    .first<any>();
+  const saleRace = ticketRace
+    ? null
+    : await env.DB.prepare(
+        `SELECT w.event_title, (SELECT COUNT(*) FROM sale_watchers o WHERE o.event_url = w.event_url) AS watchers
+         FROM sale_watchers y JOIN sale_watch w ON w.event_url = y.event_url
+         WHERE y.subscriber_id = ? AND w.resolved = 0 AND (w.event_date IS NULL OR w.event_date >= date('now'))
+         ORDER BY watchers DESC LIMIT 1`
+      )
+        .bind(s.id)
+        .first<any>();
+  if (!ticketRace && !saleRace) return null;
+  const race = shortRaceName(String(ticketRace?.event_name || saleRace?.event_title)).name;
+  const watchers = Number(ticketRace?.watchers || saleRace?.watchers) || 0;
+  const tickets = ticketRace
+    ? String(ticketRace.tickets).split("||").map((t) => t.replace(/^HYROX /i, ""))
+    : [];
+  const ticketLine = tickets.length ? `${tickets.slice(0, 3).join(", ")}${tickets.length > 3 ? ` and ${tickets.length - 3} more` : ""}` : "";
+  const multiRace = (await watchedRaceCount(env, s.id)) >= 2;
+  const myAlerts = `${env.SITE_URL}/my-alerts?token=${s.unsubscribe_token}`;
+  const unsub = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
+  // Real numbers only: the exact count is said when it is a crowd (3+), otherwise just "many people".
+  const crowd = watchers >= 3 ? ` - right now ${watchers} people are watching ${race}` : "";
+  const what = ticketRace ? `the ${race} tickets you watch (${ticketLine})` : `${race} tickets`;
+  const firstLine = ticketRace
+    ? `Many people are monitoring these tickets${crowd}. When a ticket comes back, Priority members get the alert first.`
+    : `Many people are waiting for these tickets${crowd}. When the sale opens, Priority members get the alert first.`;
+  const season = multiRace ? `Watching several races? Season Priority covers all of them until ${SEASON_END_LABEL} for ${SEASON_PRICE_LABEL}.` : "";
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.55;color:#222;max-width:560px">
+<p>Hi HYROX athlete,</p>
+<p>You're watching ${escapeHtml(what)}.</p>
+<p><b>${escapeHtml(firstLine)}</b></p>
+<p><a href="${myAlerts}" style="display:inline-block;background:#111;color:#fff;font-weight:bold;padding:10px 16px;border-radius:8px;text-decoration:none">&#9889; Get Priority for ${PRIORITY_PRICE_LABEL}</a></p>
+<p style="font-size:14px;color:#555">One-off payment, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.</p>
+${season ? `<p>${escapeHtml(season)}</p>` : ""}
+<p style="margin-top:24px">Francesco</p>
+<p style="margin-top:28px;font-size:12px;color:#888"><a href="${myAlerts}" style="color:#888">Manage my alerts</a> &middot; <a href="${unsub}" style="color:#888">Unsubscribe</a></p>
+</div>`;
+  const text = `Hi HYROX athlete,
+
+You're watching ${what}.
+
+${firstLine}
+
+Get Priority for ${PRIORITY_PRICE_LABEL}: ${myAlerts}
+One-off payment, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.
+${season ? `\n${season}\n` : ""}
+Francesco
+
+Unsubscribe: ${unsub}`;
+  return { subject: NUDGE_SUBJECT, html, text };
+}
+
+async function sendNudgeTo(env: Env, s: any): Promise<boolean> {
+  const c = await nudgeEmailContent(env, s);
+  if (!c) return false;
+  await sendEmail(env, s.email, c.subject, c.html, c.text, { fromName: "Francesco from RoxRaceAlerts", replyTo: SUPPORT_EMAIL });
+  return true;
+}
+
+/** Part of the frequent checks: while switched on, sends the next few nudges in the morning. */
+async function sendNudgeEmails(env: Env): Promise<void> {
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'nudge_email'").first<any>();
+  if (row?.value !== "on" || !priorityPublic(env)) return;
+  const offset = zurichOffsetMinutes();
+  const hour = new Date(Date.now() + offset * 60000).getUTCHours();
+  if (hour < UPDATE_EMAIL_SWISS_HOURS[0] || hour >= UPDATE_EMAIL_SWISS_HOURS[1]) return;
+  await ensureNudgeTable(env);
+  const today = await env.DB.prepare("SELECT COUNT(*) AS n FROM nudge_sent WHERE date(sent_at, ?1) = date('now', ?1)").bind(`+${offset} minutes`).first<any>();
+  const room = Math.min(10, NUDGE_PER_DAY - (Number(today?.n) || 0));
+  if (room <= 0) return;
+  const { results } = await env.DB.prepare(`${NUDGE_CANDIDATES_SQL} LIMIT ?`).bind(room).all<any>();
+  for (const s of results || []) {
+    const claim = await env.DB.prepare("INSERT OR IGNORE INTO nudge_sent (subscriber_id) VALUES (?)").bind(s.id).run();
+    if (!claim.meta.changes) continue;
+    try {
+      await sendNudgeTo(env, s);
+    } catch (e) {
+      console.error(`nudge email to ${s.email} failed:`, e); // in email_log; not retried
+    }
+    await pause(600);
+  }
+}
+
+/** Admin's Telegram: /nudge_test sends the email to ADMIN_EMAIL (as if they were a free watcher),
+ * /nudge_start asks to switch it on (confirm button), /nudge_stop, /nudge_status. */
+async function handleNudgeCommand(env: Env, text: string): Promise<void> {
+  const reply = (t: string, markup?: object) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: t, ...(markup ? { reply_markup: markup } : {}) }),
+    });
+  const cmd = text.split(/[\s@]/)[0].toLowerCase();
+  await ensureNudgeTable(env);
+  const waiting = async () => Number((await env.DB.prepare(`SELECT COUNT(*) AS n FROM (${NUDGE_CANDIDATES_SQL})`).first<any>())?.n) || 0;
+  if (cmd === "/nudge_test") {
+    const me = env.ADMIN_EMAIL ? await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(env.ADMIN_EMAIL.toLowerCase()).first<any>() : null;
+    if (!me) return void (await reply(`${env.ADMIN_EMAIL || "ADMIN_EMAIL"} isn't a subscriber. Sign up with it first.`));
+    const sent = await sendNudgeTo(env, me);
+    await reply(sent ? `Test sent to ${me.email}. Send /nudge_start when it looks right.` : `${me.email} doesn't watch anything right now, so there's nothing to show. Watch a ticket first.`);
+    return;
+  }
+  if (cmd === "/nudge_start") {
+    const n = await waiting();
+    await reply(
+      `Switch on the Priority email? ${n} free users get it now (from ${UPDATE_EMAIL_SWISS_HOURS[0]}:00 Swiss time, ${NUDGE_PER_DAY} a day at most), then every new watcher once, a day after they start watching. /nudge_stop stops it.`,
+      { inline_keyboard: [[{ text: `📨 Switch on (${n} now)`, callback_data: "nud:start" }]] }
+    );
+    return;
+  }
+  if (cmd === "/nudge_stop") {
+    await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('nudge_email', 'off')").run();
+    await reply("Priority email switched off. Nothing more goes out.");
+    return;
+  }
+  if (cmd === "/nudge_status") {
+    const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'nudge_email'").first<any>();
+    const sent = await env.DB.prepare("SELECT COUNT(*) AS n, MIN(sent_at) AS first FROM nudge_sent").first<any>();
+    const bought = sent?.first
+      ? await env.DB.prepare(
+          `SELECT COUNT(DISTINCT n.subscriber_id) AS n FROM nudge_sent n WHERE EXISTS(SELECT 1 FROM race_priority r WHERE r.subscriber_id = n.subscriber_id AND r.created_at >= n.sent_at)
+             OR EXISTS(SELECT 1 FROM ticket_priority t WHERE t.subscriber_id = n.subscriber_id AND t.created_at >= n.sent_at)
+             OR EXISTS(SELECT 1 FROM season_pass p WHERE p.subscriber_id = n.subscriber_id AND p.created_at >= n.sent_at)`
+        ).first<any>()
+      : null;
+    await reply(`Priority email: ${row?.value === "on" ? "on" : "off"} · sent ${Number(sent?.n) || 0} · waiting ${await waiting()} · bought Priority after it: ${Number(bought?.n) || 0}`);
+  }
+}
+
+async function handleNudgeButton(env: Env, cb: any): Promise<void> {
+  const answer = (t: string) =>
+    fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callback_query_id: cb.id, text: t }),
+    });
+  if (!env.TELEGRAM_CHAT_ID || String(cb.from?.id) !== String(env.TELEGRAM_CHAT_ID) || cb.data !== "nud:start") {
+    await answer("Not allowed.");
+    return;
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('nudge_email', 'on')").run();
+  await answer("Switched on.");
+  await pingAdmin(env, `📨 Priority email switched on (from ${UPDATE_EMAIL_SWISS_HOURS[0]}:00 Swiss time, ${NUDGE_PER_DAY} a day at most). /nudge_status shows progress, /nudge_stop stops it.`);
 }
 
 async function handleSubscribe(req: Request, env: Env): Promise<Response> {
@@ -7792,6 +7980,7 @@ async function runFrequentChecks(env: Env): Promise<void> {
     draftGoingLivePosts(env),
     postPendingStories(env),
     sendUpdateEmails(env),
+    sendNudgeEmails(env),
     runInstagramPlan(env),
     submitIndexNow(env),
     runSeoChecks(env),

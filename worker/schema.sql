@@ -524,3 +524,10 @@ CREATE TABLE IF NOT EXISTS widget_hits (
   hits INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (host, slug, day)
 );
+
+-- Priority nudge email (2026-11-02): one row per subscriber who got "many people are watching the
+-- same tickets" (see sendNudgeEmails() in src/index.ts). The Worker also creates it on first use.
+CREATE TABLE IF NOT EXISTS nudge_sent (
+  subscriber_id INTEGER PRIMARY KEY,
+  sent_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
