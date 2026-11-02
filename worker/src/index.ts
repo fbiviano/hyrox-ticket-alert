@@ -5515,9 +5515,21 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
         showSeason ? `<button type="submit" name="priority" value="season">&#9889; ${SEASON_BUTTON_LABEL}</button>` : null
       )
     : `<button type="submit" name="priority" value="0">Alert me when ${escapeHtml(city)} tickets go on sale – free</button>`;
+  // On sale: both choices lead to the ticket picker, which ends with the same Free / Priority buttons.
+  const pickUrl = `/?event=${encodeURIComponent(ev.url)}`;
   const cta = ev.on_sale
-    ? `<p><a href="/?event=${encodeURIComponent(ev.url)}"><button type="button">Watch sold-out ${escapeHtml(city)} tickets – free</button></a></p>
-       <p class="hint">Pick the ticket types you want (Singles, Doubles, Relay, Pro...) and we email you the moment one is available again. Buying happens on ${official}.</p>`
+    ? `${
+        offerPriority
+          ? priorityChoiceHtml(
+              env,
+              "ticket",
+              `<a href="${pickUrl}"><button type="button">Watch - free</button></a>`,
+              `<a href="${pickUrl}"><button type="button">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button></a>`,
+              showSeason ? `<a href="${pickUrl}"><button type="button">&#9889; ${SEASON_BUTTON_LABEL}</button></a>` : null
+            )
+          : `<p><a href="${pickUrl}"><button type="button">Watch sold-out ${escapeHtml(city)} tickets – free</button></a></p>`
+      }
+       <p class="hint">${hasPriority ? "&#9889; You have Priority for this race. " : ""}Next you pick the ticket types you want (Singles, Doubles, Relay, Pro...) and we alert you the moment one is available again. Buying happens on ${official}.</p>`
     : `<form method="POST" action="/watch-sale">
         <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
         <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}">
