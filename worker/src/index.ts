@@ -6793,6 +6793,43 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
                 + (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 0) AS test_n`
     )
     .first<any>();
+  // One row per real purchase, to spot patterns (which races, how soon after sign-up, how they found us).
+  const buyers = await db
+    .prepare(
+      `SELECT p.kind, p.what, p.amount_cents, p.currency, p.wants_whatsapp, p.created_at,
+              s.created_at AS joined, s.source, s.referred_by IS NOT NULL AS referred,
+              (SELECT COUNT(*) FROM subscriptions w WHERE w.subscriber_id = p.subscriber_id) AS ticket_watches,
+              (SELECT group_concat(t, ', ') FROM (SELECT DISTINCT trim(replace(replace(w.ticket_name, 'HYROX ', ''), ' | ', ' |')) AS t FROM subscriptions w
+                 WHERE w.subscriber_id = p.subscriber_id AND (p.kind <> 'Ticket' OR w.event_name = p.what) LIMIT 4)) AS tickets,
+              (SELECT COUNT(*) FROM sale_watchers sw WHERE sw.subscriber_id = p.subscriber_id) AS race_watches,
+              (SELECT COUNT(*) FROM race_priority x WHERE x.subscriber_id = p.subscriber_id AND x.livemode = 1)
+                + (SELECT COUNT(*) FROM ticket_priority x WHERE x.subscriber_id = p.subscriber_id AND x.livemode = 1)
+                + (SELECT COUNT(*) FROM season_pass x WHERE x.subscriber_id = p.subscriber_id AND x.livemode = 1) AS buys
+       FROM (SELECT 'Race' AS kind, event_title AS what, subscriber_id, amount_cents, currency, wants_whatsapp, created_at FROM race_priority WHERE livemode = 1
+             UNION ALL SELECT 'Ticket', event_name, subscriber_id, amount_cents, currency, wants_whatsapp, created_at FROM ticket_priority WHERE livemode = 1
+             UNION ALL SELECT 'Season', season, subscriber_id, amount_cents, currency, wants_whatsapp, created_at FROM season_pass WHERE livemode = 1) p
+       JOIN subscribers s ON s.id = p.subscriber_id
+       ORDER BY p.created_at DESC LIMIT 50`
+    )
+    .all<any>()
+    .catch(() => ({ results: [] as any[] }));
+  const daysBetween = (a: string, b: string) => Math.max(0, Math.round((Date.parse(`${b.replace(" ", "T")}Z`) - Date.parse(`${a.replace(" ", "T")}Z`)) / 86400_000));
+  const buyersHtml = (buyers.results || []).length
+    ? `<h3>Each purchase</h3><div style="overflow-x:auto"><table class="admin-table" style="width:100%;font-size:0.85rem;border-collapse:collapse">
+        <tr><th align="left">Bought</th><th align="left">What</th><th align="left">Paid</th><th align="left">Signed up</th><th align="left">Came from</th><th align="left">Watches</th><th align="left">WhatsApp</th></tr>
+        ${(buyers.results || [])
+          .map(
+            (b: any) => `<tr style="border-top:1px solid #eee">
+          <td>${escapeHtml(String(b.created_at).slice(0, 10))}</td>
+          <td>${escapeHtml(b.kind)}: ${escapeHtml(b.what)}${b.buys > 1 ? ` <small>(${b.buys} buys)</small>` : ""}${b.tickets ? `<br><small>${escapeHtml(b.tickets)}</small>` : ""}</td>
+          <td>${money(b.amount_cents)} ${escapeHtml(String(b.currency).toUpperCase())}</td>
+          <td>${(() => { const d = daysBetween(b.joined, b.created_at); return d === 0 ? "same day" : `${d} days before`; })()}</td>
+          <td>${escapeHtml(b.source || (b.referred ? "friend's link" : "-"))}</td>
+          <td>${b.ticket_watches} ticket(s), ${b.race_watches} race(s)</td>
+          <td>${b.wants_whatsapp ? "yes" : "-"}</td></tr>`
+          )
+          .join("")}</table></div>`
+    : "";
   const prioCardHtml = () => `<div class="card">
       <h2>Priority sales</h2>
       <p><small>Which offer people pick: one race or ticket watch (${PRIORITY_PRICE_LABEL}) or the whole season (${SEASON_PRICE_LABEL}), and how many want WhatsApp. Real payments only; ${prio?.test_n || 0} test-mode purchase(s) not counted.</small></p>
@@ -6804,6 +6841,7 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(prio?.wa_yes || 0, "buyers who want WhatsApp")}
         ${tile(prio?.wa_list || 0, "numbers on the WhatsApp waitlist")}
       </div>
+      ${buyersHtml}
     </div>`;
 
   // Collapse "HYROX PRO MEN | Friday" / "... | Saturday" into one ticket type
