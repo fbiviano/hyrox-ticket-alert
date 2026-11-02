@@ -3842,14 +3842,15 @@ async function nudgeEmailContent(env: Env, s: any): Promise<{ subject: string; h
   const firstLine = ticketRace
     ? `Many people are monitoring these tickets. When a ticket comes back, Priority members get the alert first.`
     : `Many people are waiting for these tickets. When the sale opens, Priority members get the alert first.`;
-  const season = multiRace ? `Watching several races? Season Priority covers all of them until ${SEASON_END_LABEL} for ${SEASON_PRICE_LABEL}.` : "";
+  const season = `${multiRace ? "Watching several races? " : "Racing more than once this season? "}Season Priority covers every race and ticket you watch until ${SEASON_END_LABEL} for ${SEASON_PRICE_LABEL}.`;
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.55;color:#222;max-width:560px">
 <p>Hi HYROX athlete,</p>
 <p>You're watching ${escapeHtml(what)}.</p>
 <p><b>${escapeHtml(firstLine)}</b></p>
 <p><a href="${myAlerts}" style="display:inline-block;background:#111;color:#fff;font-weight:bold;padding:10px 16px;border-radius:8px;text-decoration:none">&#9889; Get Priority for ${PRIORITY_PRICE_LABEL}</a></p>
-<p style="font-size:14px;color:#555">One-off payment, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.</p>
-${season ? `<p>${escapeHtml(season)}</p>` : ""}
+<p>${escapeHtml(season)}</p>
+<p><a href="${myAlerts}" style="display:inline-block;background:#f5b400;color:#111;font-weight:bold;padding:10px 16px;border-radius:8px;text-decoration:none">&#9889; All races this season - ${SEASON_PRICE_LABEL}</a></p>
+<p style="font-size:14px;color:#555">One-off payments, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.</p>
 <p style="margin-top:24px">Francesco</p>
 <p style="margin-top:28px;font-size:12px;color:#888"><a href="${myAlerts}" style="color:#888">Manage my alerts</a> &middot; <a href="${unsub}" style="color:#888">Unsubscribe</a></p>
 </div>`;
@@ -3860,8 +3861,12 @@ You're watching ${what}.
 ${firstLine}
 
 Get Priority for ${PRIORITY_PRICE_LABEL}: ${myAlerts}
-One-off payment, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.
-${season ? `\n${season}\n` : ""}
+
+${season}
+All races this season - ${SEASON_PRICE_LABEL}: ${myAlerts}
+
+One-off payments, no subscription. Priority speeds up your alert; it doesn't reserve a ticket.
+
 Francesco
 
 Unsubscribe: ${unsub}`;
