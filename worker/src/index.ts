@@ -3808,7 +3808,7 @@ async function ensureNudgeTable(env: Env): Promise<void> {
   await env.DB.prepare("CREATE TABLE IF NOT EXISTS nudge_sent (subscriber_id INTEGER PRIMARY KEY, sent_at TEXT NOT NULL DEFAULT (datetime('now')))").run();
 }
 
-/** The email for one person: their most-watched race and tickets, with real watcher numbers. */
+/** The email for one person: the race (and tickets) of theirs that most people watch. */
 async function nudgeEmailContent(env: Env, s: any): Promise<{ subject: string; html: string; text: string } | null> {
   const ticketRace = await env.DB.prepare(
     `SELECT x.event_name, group_concat(x.ticket_name, '||') AS tickets,
@@ -3830,7 +3830,6 @@ async function nudgeEmailContent(env: Env, s: any): Promise<{ subject: string; h
         .first<any>();
   if (!ticketRace && !saleRace) return null;
   const race = shortRaceName(String(ticketRace?.event_name || saleRace?.event_title)).name;
-  const watchers = Number(ticketRace?.watchers || saleRace?.watchers) || 0;
   const tickets = ticketRace
     ? String(ticketRace.tickets).split("||").map((t) => t.replace(/^HYROX /i, ""))
     : [];
@@ -3838,12 +3837,11 @@ async function nudgeEmailContent(env: Env, s: any): Promise<{ subject: string; h
   const multiRace = (await watchedRaceCount(env, s.id)) >= 2;
   const myAlerts = `${env.SITE_URL}/my-alerts?token=${s.unsubscribe_token}`;
   const unsub = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
-  // Real numbers only: the exact count is said when it is a crowd (3+), otherwise just "many people".
-  const crowd = watchers >= 3 ? ` - right now ${watchers} people are watching ${race}` : "";
-  const what = ticketRace ? `the ${race} tickets you watch (${ticketLine})` : `${race} tickets`;
+  // No per-race numbers (the admin's call): most races have few watchers; "many people" is true site-wide.
+  const what = ticketRace ? `${race} tickets (${ticketLine})` : `${race} tickets`;
   const firstLine = ticketRace
-    ? `Many people are monitoring these tickets${crowd}. When a ticket comes back, Priority members get the alert first.`
-    : `Many people are waiting for these tickets${crowd}. When the sale opens, Priority members get the alert first.`;
+    ? `Many people are monitoring these tickets. When a ticket comes back, Priority members get the alert first.`
+    : `Many people are waiting for these tickets. When the sale opens, Priority members get the alert first.`;
   const season = multiRace ? `Watching several races? Season Priority covers all of them until ${SEASON_END_LABEL} for ${SEASON_PRICE_LABEL}.` : "";
   const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.55;color:#222;max-width:560px">
 <p>Hi HYROX athlete,</p>
