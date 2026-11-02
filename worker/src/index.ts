@@ -5502,15 +5502,28 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     : "";
 
   const official = `<a href="${escapeHtml(ev.url)}" rel="noopener">hyrox.com</a>`;
+  // Same Free / Priority choice as on the homepage; handleWatchSale takes priority=1/season to checkout.
+  const offerPriority =
+    priorityOfferedTo(env, subscriber) && !(subscriber && (await ownsRacePriority(env, subscriber.id, ev.url)));
+  const showSeason = !!subscriber && (await watchedRaceCount(env, subscriber.id)) >= 1;
+  const saleButtons = offerPriority
+    ? priorityChoiceHtml(
+        env,
+        "race",
+        `<button type="submit" name="priority" value="0">Alert me - free</button>`,
+        `<button type="submit" name="priority" value="1">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`,
+        showSeason ? `<button type="submit" name="priority" value="season">&#9889; ${SEASON_BUTTON_LABEL}</button>` : null
+      )
+    : `<button type="submit" name="priority" value="0">Alert me when ${escapeHtml(city)} tickets go on sale – free</button>`;
   const cta = ev.on_sale
     ? `<p><a href="/?event=${encodeURIComponent(ev.url)}"><button type="button">Watch sold-out ${escapeHtml(city)} tickets – free</button></a></p>
        <p class="hint">Pick the ticket types you want (Singles, Doubles, Relay, Pro...) and we email you the moment one is available again. Buying happens on ${official}.</p>`
     : `<form method="POST" action="/watch-sale">
         <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
-        <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}"><input type="hidden" name="priority" value="0">
+        <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}">
         ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
-        <button type="submit">Alert me when ${escapeHtml(city)} tickets go on sale – free</button>
-        <p class="consent">One email the moment the sale opens. Unsubscribe any time. Priority (alerted first, WhatsApp) can be added afterwards.</p>
+        ${saleButtons}
+        <p class="consent">One email the moment the sale opens. Unsubscribe any time.</p>
       </form>`;
 
   const faq: [string, string][] = [
