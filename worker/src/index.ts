@@ -1375,6 +1375,9 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
       <div id="eventList" class="event-list">${eventListHtml(events)}</div>
     </details>`;
 
+  // 2026-11-02: 2 of the 3 Nashville buyers paid for spectator tickets - family and friends
+  // didn't know we cover them.
+  const SPECTATOR_LINE = "Coming to watch? Spectator tickets sell out too - we alert you when they're back.";
   const hero = `<div class="hero">
     <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
     <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back.</p>
@@ -1389,10 +1392,10 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // A season holder already has Priority on anything new they watch - no choice to make.
   const seasonHeld = subscriber ? await hasSeasonPass(env, subscriber.id) : false;
   const offerPriority = priorityOfferedTo(env, subscriber) && !seasonHeld;
-  // The season only appears once it can matter: they already watch a race, so this is at least
-  // their second. A first-time visitor just sees Free vs Priority.
-  const watchedRaces = subscriber ? await watchedRaceCount(env, subscriber.id) : 0;
-  const seasonOffer = (button: string): string | null => (watchedRaces < 1 ? null : button);
+  // The season is offered to everyone (2026-11-02: hidden from first-timers, nobody bought it);
+  // someone who already paid for a race sees it as an upgrade at the difference.
+  const seasonLabel = seasonButtonLabel(await seasonPriceFor(env, subscriber?.id));
+  const seasonOffer = (button: string): string | null => button;
   const gridFlag = env.TICKET_GRID === "1" ? '<span id="ticketGridOn" hidden></span>' : "";
   const priorityFlag = offerPriority
     ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-choice="${escapeHtml(
@@ -1401,7 +1404,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           "race",
           `<button type="button" id="saleBtn">Notify me - free</button>`,
           `<button type="button" id="salePrioBtn">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`,
-          seasonOffer(`<button type="button" id="saleSeasonBtn">&#9889; ${SEASON_BUTTON_LABEL}</button>`)
+          seasonOffer(`<button type="button" id="saleSeasonBtn">&#9889; ${seasonLabel}</button>`)
         )
       )}"></span>`
     : "";
@@ -1416,6 +1419,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           ${hero}
           <div class="card">
             <h2>Monitor race tickets</h2>
+            <p class="hint">${SPECTATOR_LINE}</p>
             <form method="POST" action="/subscribe" id="signupForm">
               ${searchBox}
               <div class="submit-step" style="display:none">
@@ -1426,7 +1430,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                         "ticket",
                         `<button type="submit" name="priority" value="0">Watch - free</button>`,
                         `<button type="submit" name="priority" value="1">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button>`,
-                        seasonOffer(`<button type="submit" name="priority" value="season">&#9889; ${SEASON_BUTTON_LABEL}</button>`)
+                        seasonOffer(`<button type="submit" name="priority" value="season">&#9889; ${seasonLabel}</button>`)
                       )
                     : `<button type="submit" name="priority" value="0">Add selected ticket(s)</button>`
                 }
@@ -1458,7 +1462,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
         ${hero}
         <div class="card">
           <h2>Monitor race tickets</h2>
-          <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done.</p>
+          <p class="hint">Paste the HYROX event page you care about, pick your ticket(s), enter your email, confirm it, done. ${SPECTATOR_LINE}</p>
           <form method="POST" action="/subscribe" id="signupForm">
             ${searchBox}
             <div class="submit-step" style="display:none">
@@ -1473,7 +1477,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                       "ticket",
                       `<button type="submit" name="priority" value="0">Subscribe - free</button>`,
                       `<button type="submit" name="priority" value="1">&#9889; Subscribe first - ${PRIORITY_PRICE_LABEL}</button>`,
-                      seasonOffer(`<button type="submit" name="priority" value="season">&#9889; ${SEASON_BUTTON_LABEL}</button>`)
+                      seasonOffer(`<button type="submit" name="priority" value="season">&#9889; ${seasonLabel}</button>`)
                     )
                   : `<button type="submit" name="priority" value="0">Subscribe</button>`
               }
@@ -2769,6 +2773,8 @@ interface PriorityItem {
   name: string;
   description: string;
   metadata: Record<string, string>;
+  /** Shown in Stripe's payments list (Description); defaults to `name`. */
+  note?: string;
 }
 
 function racePriorityItem(env: Env, race: { event_url: string; event_title: string }): PriorityItem {
@@ -2802,9 +2808,25 @@ async function watchedRaceCount(env: Env, subscriberId: number): Promise<number>
 
 const SEASON_BUTTON_LABEL = `All races this season - ${SEASON_PRICE_LABEL}`;
 
-function seasonPriorityItem(env: Env): PriorityItem {
+/** Season price for this person: anyone who already paid for one race or ticket gets that
+ * one payment off ("upgrade"), instead of paying another race price. */
+async function seasonPriceFor(env: Env, subscriberId: number | null | undefined): Promise<number> {
+  if (!subscriberId) return SEASON_PRICE_CENTS;
+  const paid = await env.DB.prepare(
+    "SELECT 1 AS x WHERE EXISTS(SELECT 1 FROM race_priority WHERE subscriber_id = ?1 AND amount_cents > 0) OR EXISTS(SELECT 1 FROM ticket_priority WHERE subscriber_id = ?1 AND amount_cents > 0)"
+  )
+    .bind(subscriberId)
+    .first<any>();
+  return paid ? SEASON_PRICE_CENTS - PRIORITY_PRICE_CENTS : SEASON_PRICE_CENTS;
+}
+
+function seasonButtonLabel(cents: number): string {
+  return cents < SEASON_PRICE_CENTS ? `Upgrade: all races this season - ${money(cents)}` : SEASON_BUTTON_LABEL;
+}
+
+function seasonPriorityItem(env: Env, cents = SEASON_PRICE_CENTS): PriorityItem {
   return {
-    cents: SEASON_PRICE_CENTS,
+    cents,
     name: `Season Priority ${SEASON_LABEL}`,
     description: `New-ticket emails before anyone else, for every race and ticket you watch. ${whatsappIncluded(env)} One-off payment, valid until ${SEASON_END_LABEL}.`,
     metadata: { season: SEASON_LABEL },
@@ -2822,6 +2844,7 @@ async function startPriorityCheckout(env: Env, s: any, kind: PriorityKind, item:
     "line_items[0][price_data][product_data][description]": item.description,
     client_reference_id: String(s.id),
     customer_email: s.email,
+    "payment_intent_data[description]": (item.note || item.name).slice(0, 900),
     "metadata[subscriber_id]": String(s.id),
     "metadata[kind]": kind,
     success_url: `${env.SITE_URL}${successPath}`,
@@ -2901,7 +2924,7 @@ async function handlePriorityCheckout(req: Request, env: Env): Promise<Response>
     if (await ownsTicketPriority(env, s.id, sub.event_name)) return backToMyAlerts;
     item = ticketPriorityItem(env, sub.event_name);
   } else if (kind === "season") {
-    item = seasonPriorityItem(env);
+    item = seasonPriorityItem(env, await seasonPriceFor(env, s.id));
   } else {
     const race = await env.DB.prepare(
       `SELECT sw.event_url, sw.event_title, sw.resolved FROM sale_watchers w
@@ -3792,9 +3815,14 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
   let pick: { kind: PriorityKind; item: PriorityItem } | null = null;
   if (first && (choice === "1" || choice === "season") && priorityOfferedTo(env, subscriber) && !(await hasSeasonPass(env, subscriber.id))) {
     if (choice === "season") {
-      pick = { kind: "season", item: seasonPriorityItem(env) };
+      pick = { kind: "season", item: seasonPriorityItem(env, await seasonPriceFor(env, subscriber.id)) };
     } else if (!(await ownsTicketPriority(env, subscriber.id, first.event_name))) {
       pick = { kind: "ticket", item: ticketPriorityItem(env, first.event_name) };
+    }
+    // What they picked, so the Stripe payments list shows it (Description column).
+    if (pick) {
+      const names = (ticketValues.map(decodeTicket).filter(Boolean) as any[]).map((t) => String(t.ticket_name).replace(/^HYROX /i, ""));
+      pick.item.note = `${pick.item.name} - ${names.join(", ")}`;
     }
   }
   if (pick) {
@@ -3852,7 +3880,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   if ((choice === "1" || choice === "season") && priorityOfferedTo(env, subscriber) && !(await hasSeasonPass(env, subscriber.id))) {
     let pick: { kind: PriorityKind; item: PriorityItem } | null = null;
     if (choice === "season") {
-      pick = { kind: "season", item: seasonPriorityItem(env) };
+      pick = { kind: "season", item: seasonPriorityItem(env, await seasonPriceFor(env, subscriber.id)) };
     } else {
       const race = await env.DB.prepare("SELECT event_url, event_title, resolved FROM sale_watch WHERE event_url = ?").bind(eventUrl).first<any>();
       if (race && !race.resolved && !(await ownsRacePriority(env, subscriber.id, eventUrl))) pick = { kind: "race", item: racePriorityItem(env, race) };
@@ -4029,7 +4057,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
     saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
   } else if (priorityOpen(env, subscriber)) {
     saleSections.push(
-      `<p class="consent">&#9889; ${priorityExplainer(env, multiRace)}</p>${multiRace ? priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${SEASON_BUTTON_LABEL}`) : ""}`
+      `<p class="consent">&#9889; ${priorityExplainer(env, true)}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${seasonButtonLabel(await seasonPriceFor(env, subscriber.id))}`)}`
     );
   }
   const verifyBanner = subscriber.verified
@@ -5505,14 +5533,14 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   // Same Free / Priority choice as on the homepage; handleWatchSale takes priority=1/season to checkout.
   const hasPriority = !!subscriber && (await ownsRacePriority(env, subscriber.id, ev.url));
   const offerPriority = priorityOfferedTo(env, subscriber) && !hasPriority;
-  const showSeason = !!subscriber && (await watchedRaceCount(env, subscriber.id)) >= 1;
+  const seasonLabel = seasonButtonLabel(await seasonPriceFor(env, subscriber?.id));
   const saleButtons = offerPriority
     ? priorityChoiceHtml(
         env,
         "race",
         `<button type="submit" name="priority" value="0">Alert me - free</button>`,
         `<button type="submit" name="priority" value="1">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`,
-        showSeason ? `<button type="submit" name="priority" value="season">&#9889; ${SEASON_BUTTON_LABEL}</button>` : null
+        `<button type="submit" name="priority" value="season">&#9889; ${seasonLabel}</button>`
       )
     : `<button type="submit" name="priority" value="0">Alert me when ${escapeHtml(city)} tickets go on sale – free</button>`;
   // On sale: both choices lead to the ticket picker, which ends with the same Free / Priority buttons.
@@ -5525,17 +5553,17 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
               "ticket",
               `<a href="${pickUrl}"><button type="button">Watch - free</button></a>`,
               `<a href="${pickUrl}"><button type="button">&#9889; Watch first - ${PRIORITY_PRICE_LABEL}</button></a>`,
-              showSeason ? `<a href="${pickUrl}"><button type="button">&#9889; ${SEASON_BUTTON_LABEL}</button></a>` : null
+              `<a href="${pickUrl}"><button type="button">&#9889; ${seasonLabel}</button></a>`
             )
           : `<p><a href="${pickUrl}"><button type="button">Watch sold-out ${escapeHtml(city)} tickets – free</button></a></p>`
       }
-       <p class="hint">${hasPriority ? "&#9889; You have Priority for this race. " : ""}Next you pick the ticket types you want (Singles, Doubles, Relay, Pro...) and we alert you the moment one is available again. Buying happens on ${official}.</p>`
+       <p class="hint">${hasPriority ? "&#9889; You have Priority for this race. " : ""}Next you pick the ticket types you want (Singles, Doubles, Relay, Pro, Spectator...) and we alert you the moment one is available again. Coming to watch? Spectator tickets sell out too. Buying happens on ${official}.</p>`
     : `<form method="POST" action="/watch-sale">
         <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
         <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}">
         ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
         ${saleButtons}
-        <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first, also on WhatsApp. " : ""}One email the moment the sale opens. Unsubscribe any time.</p>
+        <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first, also on WhatsApp. " : ""}One email the moment the sale opens. Unsubscribe any time. Coming to watch? Spectator tickets sell out too - once the sale opens you can watch those as well.</p>
       </form>`;
 
   const faq: [string, string][] = [
@@ -7822,8 +7850,68 @@ export class CheckScheduler {
   }
 }
 
-export default {
+/** Short name for the site a visitor arrived from (Referer), as stored in subscribers.source. */
+function sourceFromReferrer(ref: string, ownHost: string): string {
+  let host = "";
+  try {
+    host = new URL(ref).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+  if (!host || host === ownHost || host.endsWith(`.${ownHost}`)) return "";
+  const known: [RegExp, string][] = [
+    [/(^|\.)gemini\.google\./, "gemini"],
+    [/(^|\.)google\./, "google"],
+    [/(^|\.)bing\.com$/, "bing"],
+    [/(^|\.)duckduckgo\.com$/, "duckduckgo"],
+    [/(^|\.)yahoo\./, "yahoo"],
+    [/(^|\.)ecosia\.org$/, "ecosia"],
+    [/(^|\.)instagram\.com$/, "ig"],
+    [/(^|\.)(facebook\.com|fb\.com|fb\.me)$/, "facebook"],
+    [/(^|\.)tiktok\.com$/, "tiktok"],
+    [/(^|\.)(youtube\.com|youtu\.be)$/, "youtube"],
+    [/(^|\.)reddit\.com$/, "reddit"],
+    [/(^|\.)(chatgpt\.com|openai\.com)$/, "chatgpt"],
+    [/(^|\.)perplexity\.ai$/, "perplexity"],
+    [/(^|\.)claude\.ai$/, "claude"],
+    [/(^|\.)copilot\.microsoft\.com$/, "copilot"],
+    [/(^|\.)(t\.co|x\.com|twitter\.com)$/, "x"],
+    [/(^|\.)linkedin\.com$/, "linkedin"],
+    [/(^|\.)(t\.me|telegram\.org)$/, "telegram"],
+    [/(^|\.)whatsapp\.com$/, "whatsapp"],
+  ];
+  for (const [re, name] of known) if (re.test(host)) return name;
+  // Any other site: its name without the ending, e.g. "hyroxforum" for hyroxforum.com.
+  const parts = host.split(".");
+  return (parts.length > 1 ? parts[parts.length - 2] : host).replace(/[^a-z0-9_-]/g, "").slice(0, 20);
+}
+
+/** Remembers where a visitor first came from (30 days) on whatever page they land on, so
+ * sign-ups say whether they found us via Google, Instagram, ChatGPT... An explicit ?src= or
+ * ?utm_source= wins; otherwise the referring site, only if nothing is stored yet. */
+function withSourceCookie(req: Request, resp: Response, ownHost: string): Response {
+  if (req.method !== "GET" || resp.status !== 200 || !(resp.headers.get("content-type") || "").includes("text/html")) return resp;
+  const url = new URL(req.url);
+  const tagged = (url.searchParams.get("src") || url.searchParams.get("utm_source") || "").toLowerCase();
+  const hasOne = !!parseCookies(req)[SRC_COOKIE];
+  const src = /^[a-z0-9_-]{1,20}$/.test(tagged) ? tagged : hasOne ? "" : sourceFromReferrer(req.headers.get("referer") || "", ownHost);
+  if (!src) return resp;
+  const out = new Response(resp.body, resp);
+  out.headers.append("Set-Cookie", `${SRC_COOKIE}=${src}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
+  return out;
+}
+
+const worker = {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const resp = await worker.route(req, env, ctx);
+    try {
+      return withSourceCookie(req, resp, new URL(env.SITE_URL).hostname.replace(/^www\./, ""));
+    } catch {
+      return resp;
+    }
+  },
+
+  async route(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     ctx.waitUntil(ensureScheduler(env));
     const url = new URL(req.url);
     try {
@@ -7862,9 +7950,7 @@ export default {
         // A friend's referral link: remember it for 30 days, until this visitor signs up.
         const ref = (url.searchParams.get("ref") || "").toUpperCase();
         if (REF_CODE_RE.test(ref)) resp.headers.append("Set-Cookie", `${REF_COOKIE}=${ref}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
-        // Where the visitor came from (e.g. ?src=ig on the Instagram bio link), saved on sign-up.
-        const src = (url.searchParams.get("src") || "").toLowerCase();
-        if (/^[a-z0-9_-]{1,20}$/.test(src)) resp.headers.append("Set-Cookie", `${SRC_COOKIE}=${src}; Max-Age=2592000; Path=/; Secure; SameSite=Lax`);
+        // Where the visitor came from is remembered for every page in withSourceCookie().
         return resp;
       }
       if (url.pathname === "/resolve" && req.method === "GET") return await handleResolve(req, env);
@@ -8098,3 +8184,5 @@ export default {
     ctx.waitUntil(handleIncomingEmail(message, env));
   },
 };
+
+export default worker;
