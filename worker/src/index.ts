@@ -6263,16 +6263,50 @@ async function seoReport(env: Env): Promise<string> {
   return lines.join("\n").slice(0, 4000);
 }
 
-/** Bing Webmaster Tools: searches of the last 7 days (Bing keeps them per week). */
+/** Bing Webmaster Tools, for the report. Bing often refuses calls from Cloudflare's shared
+ * addresses ("ThrottleIP"), so a good answer is kept (kv_meta bing_summary) and used when Bing
+ * says no; runSeoChecks keeps trying hourly until it has one for the day. */
 async function bingSummary(env: Env): Promise<string> {
   if (!env.BING_API_KEY) return "Bing: not connected.";
+  const live = await bingFetch(env);
+  if (live.ok) return live.text;
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'bing_summary'").first<any>();
+  const kept = row?.value ? JSON.parse(row.value) : null;
+  if (kept?.text) return `${kept.text}\n(Bing figures from ${kept.at}; Bing was busy just now)`;
+  return `Bing: busy right now (${truncate(live.text, 120)}). Bing limits the shared servers we run on; we retry every hour, so a later report will have it.`;
+}
+
+/** Tries Bing at most once an hour until today's figures are kept. */
+async function refreshBing(env: Env, date: string): Promise<void> {
+  if (!env.BING_API_KEY) return;
+  const row = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'bing_summary'").first<any>();
+  if (row?.value && JSON.parse(row.value).at === date) return;
+  const tried = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'bing_try'").first<any>();
+  if (tried?.value && Date.now() - Number(tried.value) < 3600_000) return;
+  await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('bing_try', ?)").bind(String(Date.now())).run();
+  await bingFetch(env);
+}
+
+/** Searches of the last 7 days (Bing keeps them per week). A good answer is also kept for the report. */
+async function bingFetch(env: Env): Promise<{ ok: boolean; text: string }> {
+  const r = await bingQuery(env);
+  if (r.ok) {
+    await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('bing_summary', ?)")
+      .bind(JSON.stringify({ at: swissNow().date, text: r.text }))
+      .run();
+  }
+  return r;
+}
+
+async function bingQuery(env: Env): Promise<{ ok: boolean; text: string }> {
+  if (!env.BING_API_KEY) return { ok: false, text: "not connected" };
   try {
     // The key is trimmed: a saved key file can carry a trailing newline/space, which Bing rejects with a 400.
     const resp = await fetch(`https://ssl.bing.com/webmaster/api.svc/json/GetQueryStats?siteUrl=${encodeURIComponent(`https://${SEO_SITE}/`)}&apikey=${encodeURIComponent(env.BING_API_KEY.trim())}`);
     const raw = await resp.text();
     let j: any = null;
     try { j = JSON.parse(raw); } catch {}
-    if (!resp.ok || !Array.isArray(j?.d)) return `Bing: couldn't read the data (${resp.status}${raw ? `: ${truncate(raw.replace(/\s+/g, " "), 150)}` : ""}).`;
+    if (!resp.ok || !Array.isArray(j?.d)) return { ok: false, text: `${resp.status}${j?.Message ? ` ${j.Message}` : raw ? `: ${truncate(raw.replace(/\s+/g, " "), 100)}` : ""}` };
     const since = Date.now() - 8 * 86400_000;
     const byQuery = new Map<string, { shown: number; clicks: number }>();
     for (const r of j.d) {
@@ -6285,11 +6319,11 @@ async function bingSummary(env: Env): Promise<string> {
       byQuery.set(q, cur);
     }
     const rows = [...byQuery.entries()].sort((a, b) => b[1].shown - a[1].shown);
-    if (!rows.length) return "🅱️ Bing: no searches showed us this week yet.";
+    if (!rows.length) return { ok: true, text: "🅱️ Bing: no searches showed us this week yet." };
     const sum = rows.reduce((s, [, r]) => ({ shown: s.shown + r.shown, clicks: s.clicks + r.clicks }), { shown: 0, clicks: 0 });
-    return [`🅱️ Bing: clicks ${sum.clicks} · shown ${sum.shown}`, ...rows.slice(0, 5).map(([q, r]) => `• ${q}: shown ${r.shown} · clicks ${r.clicks}`)].join("\n");
+    return { ok: true, text: [`🅱️ Bing: clicks ${sum.clicks} · shown ${sum.shown}`, ...rows.slice(0, 5).map(([q, r]) => `• ${q}: shown ${r.shown} · clicks ${r.clicks}`)].join("\n") };
   } catch (e) {
-    return `Bing: couldn't read the data - ${String((e as Error)?.message || e)}`;
+    return { ok: false, text: String((e as Error)?.message || e) };
   }
 }
 
@@ -6299,6 +6333,11 @@ async function runSeoChecks(env: Env): Promise<void> {
   if (!env.GSC_KEY || !env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
   const { date, weekday, hour } = swissNow();
   if (hour < 9) return;
+  try {
+    await refreshBing(env, date);
+  } catch (e) {
+    console.error("Bing refresh failed:", e);
+  }
   const last = await env.DB.prepare("SELECT value FROM kv_meta WHERE key = 'seo_check'").first<any>();
   if (last?.value === date) return;
   await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('seo_check', ?)").bind(date).run();
