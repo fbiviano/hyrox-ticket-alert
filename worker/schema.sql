@@ -531,3 +531,14 @@ CREATE TABLE IF NOT EXISTS nudge_sent (
   subscriber_id INTEGER PRIMARY KEY,
   sent_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Tickets that came back (2026-11-03): one row each time a watched ticket went from sold out to
+-- available (checkCommunityTickets in src/index.ts). Shown on /tickets-back and in the homepage numbers.
+CREATE TABLE IF NOT EXISTS ticket_returns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_name TEXT NOT NULL,
+  ticket_name TEXT NOT NULL,
+  shop_url TEXT,
+  returned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_returns_at ON ticket_returns(returned_at);

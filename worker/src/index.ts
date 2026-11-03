@@ -578,6 +578,7 @@ body.wide{max-width:980px}
 .side-compact button{font-size:0.85rem;padding:7px 12px;margin:2px 4px 2px 0}
 .hero h1,.hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
+.stats-line{color:#555;font-size:0.9rem;margin:10px 0 0}.stats-line b{color:#111}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
 .sponsors{display:flex;flex-direction:column;gap:8px;margin-top:10px}
 .sponsor{display:flex;gap:10px;align-items:center;padding:10px;border:1px solid #eee;border-radius:8px;text-decoration:none;color:inherit}
@@ -603,7 +604,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a> &middot; <a href="/privacy">Privacy</a><br>RoxRaceAlerts is operated by ${SELLER_ADDRESS} &middot; <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/guides/hyrox-spectator-tickets">Spectator tickets</a> &middot; <a href="/tickets-back">Tickets that came back</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a> &middot; <a href="/privacy">Privacy</a><br>RoxRaceAlerts is operated by ${SELLER_ADDRESS} &middot; <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -1378,9 +1379,11 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // 2026-11-02: 2 of the 3 Nashville buyers paid for spectator tickets - family and friends
   // didn't know we cover them.
   const SPECTATOR_LINE = "Coming to watch? Spectator tickets sell out too - we alert you when they're back.";
+  const stats = await siteStats(env);
   const hero = `<div class="hero">
     <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
     <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back.</p>
+    ${stats.athletes >= 50 ? `<p class="stats-line"><b>${stats.athletes}</b> athletes &middot; <b>${roundDown(stats.alerts)}+</b> alerts sent &middot; <b>${roundDown(stats.returns)}+</b> sold-out tickets <a href="/tickets-back">spotted coming back</a></p>` : ""}
   </div>`;
 
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
@@ -4448,6 +4451,11 @@ async function checkCommunityTickets(env: Env): Promise<void> {
     const newStatus = ticketStatus(ticket);
 
     if (row.last_status === "sold_out" && newStatus === "available") {
+      // Kept for the public "tickets that came back" page and the homepage numbers.
+      await env.DB.prepare("INSERT INTO ticket_returns (event_name, ticket_name, shop_url) VALUES (?, ?, ?)")
+        .bind(row.event_name, row.ticket_name, row.shop_url)
+        .run()
+        .catch((e) => console.error("ticket_returns insert failed:", e));
       await notifyTicketReturned(env, row);
     }
     if (newStatus !== row.last_status) {
@@ -5900,6 +5908,92 @@ function eventListHtml(events: DirectoryEvent[]): string {
   return group("On sale now", on) + group("Sale date announced", soon) + group("Not on sale yet", waiting);
 }
 
+// Returns were only logged (ticket_returns) from this date; earlier ones are counted from the
+// alert emails that went out (one return = one ticket name within one hour).
+const RETURNS_LOGGED_SINCE = "2026-11-03";
+
+/** Real numbers for the homepage and the "tickets that came back" page. */
+async function siteStats(env: Env): Promise<{ athletes: number; alerts: number; returns: number }> {
+  const r = await env.DB.prepare(
+    `SELECT (SELECT COUNT(*) FROM subscribers WHERE verified = 1) AS athletes,
+            (SELECT COUNT(*) FROM email_log WHERE ok = 1 AND (subject LIKE 'Ticket available:%' OR subject LIKE '%on sale%' OR subject LIKE '%live%'))
+              + (SELECT COUNT(*) FROM telegram_log WHERE ok = 1) AS alerts,
+            (SELECT COUNT(DISTINCT substr(created_at, 1, 13) || subject) FROM email_log WHERE ok = 1 AND subject LIKE 'Ticket available:%' AND created_at < ?1)
+              + (SELECT COUNT(*) FROM ticket_returns WHERE returned_at >= ?1) AS returns`
+  )
+    .bind(RETURNS_LOGGED_SINCE)
+    .first<any>()
+    .catch(() => null);
+  return { athletes: Number(r?.athletes) || 0, alerts: Number(r?.alerts) || 0, returns: Number(r?.returns) || 0 };
+}
+
+/** 333 -> 330, 1234 -> 1200: a rounded-down figure that stays true as "N+". */
+function roundDown(n: number): number {
+  if (n < 100) return Math.floor(n / 10) * 10;
+  const step = Math.pow(10, Math.floor(Math.log10(n)) - 1);
+  return Math.floor(n / step) * step;
+}
+
+/** Public page: sold-out tickets that came back in the last 30 days, per race - proof that waiting
+ * (with an alert) works. Also the live sold-out list. */
+async function handleTicketsBackPage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const stats = await siteStats(env);
+  const { results: recent } = await env.DB.prepare(
+    `SELECT event_name, COUNT(*) AS n, MAX(returned_at) AS last_at,
+            (SELECT group_concat(t, ', ') FROM (SELECT DISTINCT replace(r2.ticket_name, 'HYROX ', '') AS t FROM ticket_returns r2 WHERE r2.event_name = r.event_name AND r2.returned_at >= datetime('now', '-30 days') LIMIT 4)) AS tickets
+     FROM ticket_returns r WHERE returned_at >= datetime('now', '-30 days') GROUP BY event_name ORDER BY n DESC, last_at DESC LIMIT 30`
+  ).all<any>();
+  const { results: soldOut } = await env.DB.prepare(
+    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ?)
+     GROUP BY event_name ORDER BY n DESC LIMIT 20`
+  )
+    .bind(todayIso())
+    .all<any>();
+  const races = await listDirectoryEvents(env);
+  const raceHref = (eventName: string) => {
+    const city = shortRaceName(eventName).city.toLowerCase();
+    const ev = races.find((e) => shortRaceName(e.title).city.toLowerCase() === city);
+    return ev ? `/hyrox/${ev.slug}` : `/?q=${encodeURIComponent(city)}`;
+  };
+  const ago = (iso: string) => {
+    const h = Math.max(0, Math.round((Date.now() - Date.parse(`${iso.replace(" ", "T")}Z`)) / 3600_000));
+    return h < 1 ? "just now" : h < 24 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+  };
+  const title = "Sold-out HYROX tickets that came back";
+  const description = `${roundDown(stats.returns)}+ sold-out HYROX tickets spotted coming back since October 2026. Which races and ticket types returned in the last 30 days, updated automatically, and how to catch the next one with a free alert.`;
+  const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">Sold out is not the end. These tickets were sold out and came back, and watchers were alerted the moment they did.</p>
+    ${stats.returns >= 10 ? `<p class="stats-line"><b>${roundDown(stats.returns)}+</b> returns spotted since October 2026 &middot; <b>${stats.athletes}</b> athletes watching &middot; checked around the clock</p>` : ""}</div>
+    <div class="card"><h2>Came back in the last 30 days</h2>
+    ${
+      recent?.length
+        ? `<ul class="status-list">${recent
+            .map((r: any) => `<li><span><a href="${raceHref(r.event_name)}">${escapeHtml(shortRaceName(r.event_name).name)}</a><br><small>${escapeHtml(r.tickets || "")}</small></span><span><b>${r.n}</b> return${r.n === 1 ? "" : "s"}<br><small>last ${escapeHtml(ago(r.last_at))}</small></span></li>`)
+            .join("")}</ul>`
+        : `<p class="hint">This list started on ${RETURNS_LOGGED_SINCE} and fills up as tickets come back.${stats.returns >= 10 ? ` Before that, our alerts caught ${roundDown(stats.returns)}+ returns.` : ""}</p>`
+    }
+    <p class="hint">A return is one ticket type (for example Doubles Mixed, Saturday) going from sold out to available in the official HYROX shop. Most are gone again within the hour, which is why watchers get alerted instantly.</p></div>
+    <div class="card"><h2>Sold out right now (${(soldOut || []).reduce((s: number, r: any) => s + Number(r.n), 0)} ticket types)</h2>
+    ${
+      soldOut?.length
+        ? `<ul class="status-list">${soldOut.map((r: any) => `<li><span><a href="${raceHref(r.event_name)}">${escapeHtml(shortRaceName(r.event_name).name)}</a></span><span>${r.n} sold out</span></li>`).join("")}</ul>`
+        : "<p>None of the tickets being watched are sold out right now.</p>"
+    }
+    <p class="hint">Only tickets someone is watching are listed. Watch yours and it joins the check.</p></div>
+    ${ARTICLE_CTA}`;
+  return page(
+    `${title} | RoxRaceAlerts`,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}${body}`,
+    {},
+    false,
+    articleSeo(env, "/tickets-back", title, description, [
+      ["Do sold-out HYROX tickets really come back?", `Yes. RoxRaceAlerts has spotted ${roundDown(stats.returns)}+ sold-out ticket types becoming available again since October 2026, from cancellations, expired reservations and extra capacity. This page lists the latest ones.`],
+      ["How long does a returned ticket stay available?", "Often minutes, rarely more than an hour at popular races. Set a free alert on the exact ticket type and buy on the official shop as soon as you get it."],
+    ])
+  );
+}
+
 function eventSummaryLine(events: DirectoryEvent[]): string {
   const on = events.filter((e) => e.on_sale).length;
   const soon = events.filter((e) => !e.on_sale && e.presale_live_at).length;
@@ -5966,7 +6060,7 @@ function homeSeo(env: Env): PageSeo {
 // this site") and evergreen guides for the questions athletes search for. The sale-dates and
 // ticket-types guides fill themselves from the directory data.
 // ---------------------------------------------------------------------------
-const GUIDE_SLUGS = ["sold-out-hyrox-tickets", "hyrox-ticket-sale-dates", "hyrox-ticket-types"] as const;
+const GUIDE_SLUGS = ["sold-out-hyrox-tickets", "hyrox-ticket-sale-dates", "hyrox-ticket-types", "hyrox-spectator-tickets"] as const;
 
 function articleSeo(env: Env, path: string, title: string, description: string, faq: [string, string][] = []): PageSeo {
   return {
@@ -6126,6 +6220,49 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
 
+  if (slug === "hyrox-spectator-tickets") {
+    // 2026-11-02: spectator tickets were sold out at several races and families were paying for
+    // alerts on them - nobody else writes for the people who come to watch.
+    const title = GUIDE_TITLES[slug];
+    const { results: spec } = await env.DB.prepare(
+      `SELECT event_name, SUM(last_status = 'sold_out') AS sold, COUNT(*) AS n FROM community_tickets
+       WHERE upper(ticket_name) LIKE '%SPECTATOR%' AND (event_date IS NULL OR event_date >= ?) GROUP BY event_name ORDER BY sold DESC, event_name LIMIT 15`
+    )
+      .bind(todayIso())
+      .all<any>();
+    const soldOutRaces = (spec || []).filter((r: any) => Number(r.sold) > 0);
+    const description = "Coming to watch someone race HYROX? At most races spectators need a ticket, and at big events they sell out. Who needs one, what they cost, kids, and how to get alerted when sold-out spectator tickets come back.";
+    const faq: [string, string][] = [
+      ["Do I need a ticket to watch HYROX?", "At most HYROX races, yes: spectators need a spectator ticket to enter the venue, usually sold per race day in the same official shop as the athlete tickets. A few smaller events let supporters in for free; the event page on hyrox.com says which."],
+      ["How much do HYROX spectator tickets cost?", "Typically between about 10 and 25 euros, dollars or pounds per day depending on the city, and often free for young children. Prices are set per event and shown in the official shop."],
+      ["Do HYROX spectator tickets sell out?", `Yes, at the biggest races. ${soldOutRaces.length ? `Right now spectator tickets are sold out at ${soldOutRaces.slice(0, 3).map((r: any) => shortRaceName(r.event_name).name).join(", ")}${soldOutRaces.length > 3 ? " and more" : ""}.` : "Venues have limited space, and the busiest days (usually Saturday) go first."} Like athlete tickets, they come back when plans change, so a free alert on the day you need is worth setting.`],
+      ["Can kids watch HYROX for free?", "Often yes: many events let children under a certain age (commonly under 12 or under 14) in free with a ticketed adult. Check the event page, as the age limit differs by region."],
+      ["Can I watch without a spectator ticket?", "Usually not inside the venue. Some events have a free spectator zone or a fan area outside; the finish line and the stations are normally only for ticket holders."],
+    ];
+    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">For partners, parents and friends who come to cheer: how spectator tickets work and how to get one when they're gone.</p></div>
+    <div class="card">
+      <h2>Who needs a spectator ticket</h2>
+      <p>Everyone who comes to watch and is not racing. HYROX races happen indoors in arenas and exhibition halls with limited space, so most events sell a <b>spectator ticket per race day</b> (Friday, Saturday, Sunday...). Athletes don't need one for the day they race; a supporter does.</p>
+      <h2>Why they sell out</h2>
+      <p>Each athlete brings on average one or two supporters, and Saturday is the busiest day everywhere. At the biggest races the spectator allocation for the popular days goes within days of the athlete tickets. Like every other ticket, spectator tickets <b>come back</b> when people's plans change, usually without any announcement.</p>
+      <h2>How to get one when they're sold out</h2>
+      <ol><li><b>Watch the exact day.</b> Spectator tickets are per day: watch the day your athlete races, not just the race.</li>
+      <li><b>Set a free alert.</b> RoxRaceAlerts checks the official shop around the clock and tells you the moment a spectator ticket for that day is available again. Email and Telegram are free; Priority (${PRIORITY_PRICE_LABEL}, one-off) alerts you first, also on WhatsApp.</li>
+      <li><b>Buy fast, on the official shop only.</b> A returned ticket can be gone within the hour. Never pay strangers in Facebook groups.</li></ol>
+      <p><a href="/"><button type="button">Set a free spectator-ticket alert</button></a></p>
+    </div>
+    ${
+      spec?.length
+        ? `<div class="card"><h2>Spectator tickets being watched right now</h2><p class="hint">Races where supporters are watching spectator tickets on RoxRaceAlerts, and how many of those days are sold out.</p><ul class="status-list">${spec
+            .map((r: any) => `<li><span>${escapeHtml(shortRaceName(r.event_name).name)}</span><span>${Number(r.sold) > 0 ? `<span class="event-badge off">${r.sold} of ${r.n} sold out</span>` : `<span class="event-badge on">available</span>`}</span></li>`)
+            .join("")}</ul></div>`
+        : ""
+    }
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    ${ARTICLE_CTA}${otherGuides(slug)}`;
+    return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
+  }
+
   const r = page("Guide not found", `<div class="card"><p>No such guide. <a href="/guides/sold-out-hyrox-tickets">How to get sold-out HYROX tickets</a></p></div>`);
   return new Response(r.body, { status: 404, headers: r.headers });
 }
@@ -6134,6 +6271,7 @@ const GUIDE_TITLES: Record<(typeof GUIDE_SLUGS)[number], string> = {
   "sold-out-hyrox-tickets": "How to get HYROX tickets after they sell out: waitlist, resale & alerts",
   "hyrox-ticket-sale-dates": `HYROX ticket release dates 20${SEASON_LABEL}: when do tickets go on sale?`,
   "hyrox-ticket-types": "HYROX ticket types explained: Open, Pro, Doubles, Relay",
+  "hyrox-spectator-tickets": "HYROX spectator tickets: do you need one, and what if they're sold out?",
 };
 
 // ---------------------------------------------------------------------------
@@ -6318,6 +6456,7 @@ async function handleSitemap(env: Env): Promise<Response> {
     { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
     ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
     ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
+    { loc: `${env.SITE_URL}/tickets-back`, changefreq: "daily", priority: "0.7" },
     { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/supporters`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/partners`, changefreq: "monthly", priority: "0.4" },
@@ -6339,7 +6478,7 @@ const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
 /** Every URL the sitemap lists. */
 async function publicUrls(env: Env): Promise<string[]> {
   const races = await listDirectoryEvents(env);
-  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
+  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
 }
 
 /** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
@@ -8132,6 +8271,7 @@ const worker = {
       if (widgetData && req.method === "GET") return await handleWidgetData(req, env, widgetData[1]);
       const guide = url.pathname.match(/^\/guides\/([a-z0-9-]{1,60})\/?$/);
       if (guide && req.method === "GET") return await handleGuidePage(req, env, guide[1]);
+      if (url.pathname === "/tickets-back" && req.method === "GET") return await handleTicketsBackPage(req, env);
       if ((url.pathname === "/guides" || url.pathname === "/guides/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/guides/${GUIDE_SLUGS[0]}`, 301);
       const outMatch = url.pathname.match(/^\/out\/(\d{1,9})$/);
       if (outMatch && req.method === "GET") return await handleSponsorOut(req, env, Number(outMatch[1]));
