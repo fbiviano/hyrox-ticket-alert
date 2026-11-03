@@ -466,8 +466,11 @@ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin
 h1{font-size:1.5rem}
 .brand{font-size:1.5rem;font-weight:700;margin:0.67em 0}
 h2{font-size:1.1rem;margin-top:0}
-.faq h3{font-size:1rem;margin:16px 0 4px}
-.faq p{margin:0;color:#444;font-size:0.95rem}
+.faq details{border-top:1px solid #eee;padding:10px 0}.faq details:first-of-type{border-top:0}
+.faq summary{cursor:pointer;list-style:none;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.faq summary::-webkit-details-marker{display:none}.faq summary h3{font-size:1rem;margin:0}
+.faq summary::after{content:"+";color:#888;font-size:1.2rem;line-height:1;flex:none}.faq details[open] summary::after{content:"\\2013"}
+.faq p{margin:8px 0 0;color:#444;font-size:0.95rem}
 .card{background:#fff;border:1px solid #e2e2e2;border-radius:10px;padding:24px;margin-top:16px}
 label{display:block;margin:10px 0;font-size:0.95rem}
 input[type=email],input[type=text],input[type=tel]{width:100%;padding:10px;font-size:1rem;border:1px solid #ccc;border-radius:6px;box-sizing:border-box;margin-top:6px}
@@ -5873,7 +5876,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       ${cta}
     </div>
     ${ticketsHtml}
-    <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${supportersHtml}
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
       ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
@@ -5994,6 +5997,12 @@ async function handleTicketsBackPage(req: Request, env: Env): Promise<Response> 
   );
 }
 
+/** One FAQ entry: the question is a line you click to open the answer (2026-11-03: the open
+ * lists took too much space). The answer stays in the HTML, so search engines still read it. */
+function faqItem(q: string, a: string): string {
+  return `<details><summary><h3>${escapeHtml(q)}</h3></summary><p>${escapeHtml(a)}</p></details>`;
+}
+
 function eventSummaryLine(events: DirectoryEvent[]): string {
   const on = events.filter((e) => e.on_sale).length;
   const soon = events.filter((e) => !e.on_sale && e.presale_live_at).length;
@@ -6028,7 +6037,7 @@ const HOME_FAQ: [string, string][] = [
 ];
 
 function homeFaqHtml(): string {
-  return `<div class="card faq"><h2>HYROX ticket alerts: common questions</h2>${HOME_FAQ.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>`;
+  return `<div class="card faq"><h2>HYROX ticket alerts: common questions</h2>${HOME_FAQ.map(([q, a]) => faqItem(q, a)).join("")}</div>`;
 }
 
 function homeSeo(env: Env): PageSeo {
@@ -6146,7 +6155,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
       <h2>What to avoid</h2>
       <p>Paying strangers in Facebook groups or chats is how most people lose money. Only use the official shop and, where offered, its official transfer feature.</p>
     </div>
-    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${ARTICLE_CTA}${otherGuides(slug)}`;
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
@@ -6174,7 +6183,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
       <p>Set a free alert on a race and RoxRaceAlerts emails you the moment its pre-sale or public sale opens, so you don't have to remember the time or the time zone.</p></div>
     <div class="card"><h2>On sale now (${onSale.length})</h2>${list(onSale, (e) => `Race ${escapeHtml(e.event_date || "TBA")}`)}</div>
     <div class="card"><h2>Not on sale yet (${notYet.length})</h2>${list(notYet, (e) => `Race ${escapeHtml(e.event_date || "TBA")}`)}</div>
-    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${ARTICLE_CTA}${otherGuides(slug)}`;
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
@@ -6215,7 +6224,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
             .join("")}</ul></div>`
         : ""
     }
-    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${ARTICLE_CTA}${otherGuides(slug)}`;
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
@@ -6258,7 +6267,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
             .join("")}</ul></div>`
         : ""
     }
-    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => `<h3>${escapeHtml(q)}</h3><p>${escapeHtml(a)}</p>`).join("")}</div>
+    <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${ARTICLE_CTA}${otherGuides(slug)}`;
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
