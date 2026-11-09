@@ -1445,6 +1445,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
             ${browseSection}
           </div>
           ${faq}
+          ${pastRaceLinksHtml(await listPastRaces(env, events))}
         </div>
         <div class="sidebar">
           ${sideOnSaleCard}
@@ -1492,6 +1493,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           ${browseSection}
         </div>
         ${faq}
+        ${pastRaceLinksHtml(await listPastRaces(env, events))}
       </div>
       <div class="sidebar">
         ${sideOnSaleCard}
@@ -4064,6 +4066,11 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   await env.DB.prepare("INSERT OR IGNORE INTO sale_watch (event_url, event_title, event_date) VALUES (?, ?, ?)")
     .bind(eventUrl, eventTitle, eventDate)
     .run();
+  if (form.get("next_edition") === "1") {
+    // Set from a finished race's page: the row may still carry last season's date and "resolved"
+    // (its sale happened), which would make the checks skip it forever. Re-arm it, dateless.
+    await env.DB.prepare("UPDATE sale_watch SET resolved = 0, event_date = NULL, updated_at = datetime('now') WHERE event_url = ?").bind(eventUrl).run();
+  }
   await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
     .bind(subscriber.id, eventUrl)
     .run();
@@ -5511,6 +5518,7 @@ async function indexEvents(env: Env): Promise<number> {
       )
         .bind(url, title, eventDate)
         .run();
+      if (!existingMap.has(url) && eventDate && eventDate >= todayIso()) await moveNextEditionWatches(env, url, title, eventDate);
       indexed++;
     } catch (e) {
       console.error(`Failed to index ${url}:`, e);
@@ -5700,6 +5708,152 @@ function raceYearLabel(ev: DirectoryEvent): string {
   return `${start}/${String(start + 1).slice(2)}`;
 }
 
+/** Cities whose last race is over and whose next edition isn't listed yet: one row per city, the
+ * most recent edition. Their pages stay up ("next edition not announced yet" + the alert) so the
+ * ranking survives the gap between seasons - /hyrox/birmingham was indexed in October 2026 and
+ * vanished the day after the race, while "hyrox birmingham tickets" is searched ~1,000 times a
+ * month (keyword research 2026-11-09). Youngstars editions are skipped. */
+async function listPastRaces(env: Env, upcoming: DirectoryEvent[]): Promise<DirectoryEvent[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url
+     FROM event_directory WHERE event_date < ? AND title NOT LIKE '%Youngstars%' ORDER BY event_date DESC, title`
+  )
+    .bind(todayIso())
+    .all<DirectoryEvent>();
+  const taken = new Set(upcoming.map((e) => e.slug));
+  const out: DirectoryEvent[] = [];
+  for (const ev of results || []) {
+    const slug = citySlug(ev.title) || "race";
+    if (taken.has(slug)) continue; // a newer edition of this city is listed - its page serves
+    taken.add(slug);
+    ev.slug = slug;
+    out.push(ev);
+  }
+  return out;
+}
+
+/** People who set an alert on a finished race's page watched the old event URL. When a new
+ * edition of that city appears in the directory (new URL), their watch moves to it; a reused URL
+ * needs no move, the watch on it is checked as usual. */
+async function moveNextEditionWatches(env: Env, newUrl: string, title: string, eventDate: string): Promise<void> {
+  const city = citySlug(title);
+  if (!city || /youngstars/i.test(title)) return;
+  const { results } = await env.DB.prepare(
+    `SELECT sw.event_url, d.title FROM sale_watch sw JOIN event_directory d ON d.url = sw.event_url
+     WHERE sw.event_date IS NULL AND d.event_date < ? AND sw.event_url != ?`
+  )
+    .bind(todayIso(), newUrl)
+    .all<any>();
+  const old = (results || []).filter((r: any) => citySlug(r.title) === city);
+  if (!old.length) return;
+  await env.DB.prepare("INSERT OR IGNORE INTO sale_watch (event_url, event_title, event_date) VALUES (?, ?, ?)").bind(newUrl, title, eventDate).run();
+  let moved = 0;
+  for (const r of old) {
+    const res = await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) SELECT subscriber_id, ? FROM sale_watchers WHERE event_url = ?")
+      .bind(newUrl, r.event_url)
+      .run();
+    moved += res.meta?.changes || 0;
+    await env.DB.prepare("UPDATE sale_watch SET resolved = 1, updated_at = datetime('now') WHERE event_url = ?").bind(r.event_url).run();
+  }
+  if (moved) await pingAdmin(env, `🔁 ${moved} next-edition watcher(s) moved from the finished ${city} race to ${title} (${eventDate})`);
+}
+
+/** /hyrox/<city> for a city whose last race is over and whose next edition isn't announced:
+ * what happened, that nothing is on sale, and the alert for when the next edition opens. */
+async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcoming: DirectoryEvent[]): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const { name, city } = shortRaceName(ev.title);
+  const alias = CITY_ALIASES[city.toLowerCase()];
+  const cityShown = alias ? `${city} (${alias})` : city;
+  const lastYear = (ev.event_date || "").slice(0, 4);
+  const nextYear = String(Number(lastYear) + 1);
+  const lastDay = new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`));
+  const official = `<a href="${escapeHtml(ev.url)}" rel="noopener">hyrox.com</a>`;
+  const faq: [string, string][] = [
+    [
+      `When do HYROX ${city} ${nextYear} tickets go on sale?`,
+      `Not announced yet. The last ${name} took place on ${lastDay}. HYROX usually announces the next edition of a city some months after the race and the ticket sale date a few weeks ahead. Set a free alert and you get an email the moment the next ${city} sale opens.`,
+    ],
+    [
+      `Is HYROX ${city} coming back in ${nextYear}?`,
+      `HYROX hasn't announced it. Most cities return every season, but nothing is confirmed until it appears on hyrox.com. We watch the official ${city} event page around the clock and tell you when it changes.`,
+    ],
+    [
+      `Is there a HYROX ${city} waitlist for the next edition?`,
+      `Not an official one before the race is announced. A free RoxRaceAlerts alert does the job: one email when the next edition's tickets (or a pre-sale) open, then you buy on hyrox.com as usual.`,
+    ],
+    [
+      `Are there HYROX ${city} spectator tickets?`,
+      `At most HYROX races spectators need a ticket, sold on the official HYROX shop next to the race tickets once the sale opens, often with free entry for young children. Spectator tickets sell out at the big events too; once the sale is open you can set an alert for them here like for any other ticket type.`,
+    ],
+    [
+      `Where do I buy HYROX ${city} tickets?`,
+      `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
+    ],
+  ];
+  const title = `HYROX ${cityShown} ${nextYear} Tickets: Not Announced Yet, Release Date & Alerts | RoxRaceAlerts`;
+  const description = `HYROX ${city} ${nextYear} tickets are not on sale: the next edition hasn't been announced. The last ${name} was on ${lastDay}. Free alert the moment the next ${city} ticket sale opens.`;
+  const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
+  const seo: PageSeo = {
+    description,
+    canonical: pageUrl,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "HYROX races", item: `${env.SITE_URL}/` },
+          { "@type": "ListItem", position: 2, name: `HYROX ${city}`, item: pageUrl },
+        ],
+      },
+      { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+    ],
+  };
+  const others = upcoming.slice(0, 10);
+  return page(
+    title,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
+    <div class="hero">
+      <h1>HYROX ${escapeHtml(cityShown)} ${nextYear} tickets: next edition not announced yet</h1>
+      <p class="hero-sub">The last ${escapeHtml(name)} was on ${escapeHtml(lastDay)}. Nothing is on sale for ${escapeHtml(city)} right now.</p>
+    </div>
+    <div class="card">
+      <h2>Ticket status</h2>
+      <ul class="status-list">
+        <li><span>Status</span><span class="event-badge off">Next edition not announced</span></li>
+        <li><span>Last race</span><span>${escapeHtml(lastDay)}</span></li>
+        <li><span>Official event page</span><span>${official}</span></li>
+      </ul>
+      <form method="POST" action="/watch-sale">
+        <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
+        <input type="hidden" name="event_date" value=""><input type="hidden" name="next_edition" value="1">
+        ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
+        <button type="submit" name="priority" value="0">Alert me when HYROX ${escapeHtml(city)} tickets go on sale – free</button>
+        <p class="consent">One email the moment the next ${escapeHtml(city)} edition opens its ticket sale or a pre-sale. Unsubscribe any time. Coming to watch? Spectator tickets go on sale at the same time - you can watch those too once the shop is open.</p>
+      </form>
+    </div>
+    <div class="card faq"><h2>HYROX ${escapeHtml(city)} ${nextYear} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
+    <div class="card race-links"><h2>HYROX races on sale or coming up</h2>
+      ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
+      <p><a href="/">All ${upcoming.length} upcoming HYROX races</a></p>
+    </div>`,
+    {},
+    false,
+    seo
+  );
+}
+
+/** Links to the cities waiting for their next edition, for the bottom of race pages and the homepage. */
+function pastRaceLinksHtml(past: DirectoryEvent[]): string {
+  if (!past.length) return "";
+  return `<div class="card race-links"><h2>Waiting for the next edition</h2>
+      <p class="hint">These cities raced recently and haven't announced the next date yet. Set an alert and hear first.</p>
+      ${past.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}</a>`).join("")}
+    </div>`;
+}
+
 // ---------------------------------------------------------------------------
 // Race pages (/hyrox/<city>): one page per upcoming race - dates, ticket status, the tickets we
 // track, the alert form and a race-specific FAQ. These are the pages that can rank for
@@ -5708,7 +5862,10 @@ function raceYearLabel(ev: DirectoryEvent): string {
 async function handleRacePage(req: Request, env: Env, slug: string): Promise<Response> {
   const events = await listDirectoryEvents(env);
   const ev = events.find((e) => e.slug === slug);
+  const past = await listPastRaces(env, events);
   if (!ev) {
+    const gone = past.find((e) => e.slug === slug);
+    if (gone) return nextEditionPage(req, env, gone, events);
     const r = page("Race not found", `<div class="card"><p>We don't know an upcoming HYROX race at that address. <a href="/">See all upcoming HYROX races</a>.</p></div>`);
     return new Response(r.body, { status: 404, headers: r.headers });
   }
@@ -5923,7 +6080,8 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
       ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
       <p><a href="/">All ${events.length} upcoming HYROX races</a></p>
-    </div>`,
+    </div>
+    ${pastRaceLinksHtml(past)}`,
     {},
     false,
     seo
@@ -6503,9 +6661,11 @@ async function handleSupportersRequest(req: Request, env: Env): Promise<Response
 async function handleSitemap(env: Env): Promise<Response> {
   const today = todayIso();
   const races = await listDirectoryEvents(env);
+  const past = await listPastRaces(env, races);
   const urls = [
     { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
     ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
+    ...past.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "weekly", priority: "0.6" })),
     ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
     { loc: `${env.SITE_URL}/tickets-back`, changefreq: "daily", priority: "0.7" },
     { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
@@ -6529,7 +6689,8 @@ const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
 /** Every URL the sitemap lists. */
 async function publicUrls(env: Env): Promise<string[]> {
   const races = await listDirectoryEvents(env);
-  return [`${env.SITE_URL}/`, ...races.map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
+  const past = await listPastRaces(env, races);
+  return [`${env.SITE_URL}/`, ...[...races, ...past].map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
 }
 
 /** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
