@@ -5684,6 +5684,22 @@ function assignSlugs(events: DirectoryEvent[]): DirectoryEvent[] {
   return events;
 }
 
+/** Alternative names people type: "hyrox nyc tickets" is searched far more than "hyrox new york
+ * tickets" (keyword research 2026-11-09), so the alias goes into the title and H1. */
+const CITY_ALIASES: Record<string, string> = { "new york": "NYC", "washington dc": "DC", "washington": "DC" };
+
+/** Year for titles: the race year; else the season from the shop address (".../season-26-27-...");
+ * else the current HYROX season (September to August). A race without a date used to leave a hole
+ * in the title ("HYROX New York  Tickets") while people search "hyrox nyc 2026 tickets". */
+function raceYearLabel(ev: DirectoryEvent): string {
+  if (ev.event_date) return ev.event_date.slice(0, 4);
+  const m = /season-(\d{2})-(\d{2})/i.exec(ev.shop_url || "");
+  if (m) return `20${m[1]}/${m[2]}`;
+  const now = new Date();
+  const start = now.getUTCMonth() >= 8 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  return `${start}/${String(start + 1).slice(2)}`;
+}
+
 // ---------------------------------------------------------------------------
 // Race pages (/hyrox/<city>): one page per upcoming race - dates, ticket status, the tickets we
 // track, the alert form and a race-specific FAQ. These are the pages that can rank for
@@ -5699,7 +5715,9 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   const subscriber = await getSessionSubscriber(req, env);
   const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
   const { name, city } = shortRaceName(ev.title);
-  const year = (ev.event_date || "").slice(0, 4);
+  const year = raceYearLabel(ev);
+  const alias = CITY_ALIASES[city.toLowerCase()];
+  const cityShown = alias ? `${city} (${alias})` : city;
   const raceDay = ev.event_date
     ? new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`))
     : "date to be announced";
@@ -5768,6 +5786,25 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
         <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first, also on WhatsApp. " : ""}One email the moment the sale opens. Unsubscribe any time. Coming to watch? Spectator tickets sell out too - once the sale opens you can watch those as well.</p>
       </form>`;
 
+  // Spectator tickets get their own section: "hyrox <city> spectator tickets" is a search of its own
+  // (1,000/month for NYC alone), and the generic FAQ answer was all the page said about them.
+  const spectatorTracked = [...tracked].filter(([n]) => /spectator/i.test(n));
+  const spectatorHtml = `<div class="card"><h2>HYROX ${escapeHtml(city)} spectator tickets</h2>
+      ${
+        spectatorTracked.length
+          ? `<ul class="status-list">${spectatorTracked
+              .map(([n, s]) => `<li><span>${escapeHtml(n)}</span><span class="event-badge ${s === "sold_out" ? "off" : "on"}">${s === "sold_out" ? "Sold out" : "Available"}</span></li>`)
+              .join("")}</ul>`
+          : ""
+      }
+      <p class="hint">${
+        ev.on_sale
+          ? `Spectator tickets for ${escapeHtml(name)} are sold on the official HYROX shop next to the race tickets`
+          : `Spectator tickets for ${escapeHtml(name)} go on sale on the official HYROX shop together with the race tickets`
+      }, usually with free entry for young children. They sell out at the big races too: ${
+        ev.on_sale ? `<a href="${pickUrl}">watch the spectator ticket</a>` : "set the alert above"
+      } and we tell you the moment one is available. <a href="/guides/hyrox-spectator-tickets">How HYROX spectator tickets work</a>.</p></div>`;
+
   const faq: [string, string][] = [
     [
       `HYROX ${city} ${year} ticket release date: when do tickets go on sale?`,
@@ -5806,6 +5843,10 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       `Only through the official HYROX shop and its transfer or resale option, where HYROX offers one for this race. Avoid paying strangers in Facebook groups or chats - that's where ticket scams happen. Returned tickets reappear in the official shop, and an alert gets you there first.`,
     ],
     [
+      `How much are HYROX ${city} tickets?`,
+      `Prices are set per race and ticket type on the official HYROX shop: Singles is the cheapest athlete ticket, Doubles and Relay are priced per team, and spectator tickets cost much less than an athlete ticket. At some races the price goes up as the event gets closer, so buying at release is the cheapest way in - a free alert tells you the moment the sale opens.`,
+    ],
+    [
       `Are there HYROX ${city} spectator tickets?`,
       `At most HYROX races spectators need a ticket, often with free entry for young children. They are sold on the official HYROX shop next to the race tickets. Spectator tickets can sell out at the biggest events; you can set a free alert for them like for any other ticket type.`,
     ],
@@ -5824,7 +5865,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   // date", "waitlist"); each part only where it's true for this race.
   // "presale" added 2026-11-02: Search Console showed "<city> 2027 tickets presale" finding race pages.
   const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Presale, Release Date & Alerts" : "Presale, Release Date & Waitlist";
-  const title = `HYROX ${city} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
+  const title = `HYROX ${cityShown} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
   const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
   const seo: PageSeo = {
@@ -5862,7 +5903,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     title,
     `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
     <div class="hero">
-      <h1>HYROX ${escapeHtml(city)} ${year} tickets: ${escapeHtml(status.short)}</h1>
+      <h1>HYROX ${escapeHtml(cityShown)} ${year} tickets: ${escapeHtml(status.short)}</h1>
       <p class="hero-sub">${escapeHtml(status.sentence)}</p>
     </div>
     <div class="card">
@@ -5876,6 +5917,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       ${cta}
     </div>
     ${ticketsHtml}
+    ${spectatorHtml}
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${supportersHtml}
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
