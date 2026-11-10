@@ -6324,13 +6324,17 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     description,
     canonical: pageUrl,
     ownH1: true,
+    // Google rejects an Event without a start date (Search Console 2026-11-10: /hyrox/new-york
+    // failed the Events check), so a race HYROX hasn't dated yet carries no event data at all.
     jsonLd: [
-      {
+      ...(ev.event_date ? [{
         "@context": "https://schema.org",
         "@type": "SportsEvent",
         name: `${name} ${year}`.trim(),
-        ...(ev.event_date ? { startDate: ev.event_date } : {}),
-        ...(endDate ? { endDate } : {}),
+        description,
+        startDate: ev.event_date,
+        endDate: endDate || ev.event_date,
+        eventAttendanceMode: "https://schema.org/OfflineEventAttendanceMode",
         eventStatus: "https://schema.org/EventScheduled",
         location: { "@type": "Place", name: ev.venue_name || name, address: { "@type": "PostalAddress", addressLocality: city, ...(ev.venue_address ? { streetAddress: ev.venue_address } : {}) } },
         organizer: { "@type": "Organization", name: "HYROX", url: "https://hyrox.com" },
@@ -6340,7 +6344,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
           url: ev.url,
           ...(ev.on_sale ? { availability: "https://schema.org/InStock" } : ev.presale_live_at ? { availability: "https://schema.org/PreOrder", validFrom: ev.presale_live_at } : {}),
         },
-      },
+      }] : []),
       {
         "@context": "https://schema.org",
         "@type": "BreadcrumbList",
