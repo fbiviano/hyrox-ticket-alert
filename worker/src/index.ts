@@ -4099,6 +4099,18 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
         }
       }
       const url = await startPriorityCheckout(env, subscriber, pick.kind, pick.item, needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+      // Race pages post the form itself (field nav=1), no script: answering with JSON showed the
+      // buyer a page of raw text instead of the checkout (found 2026-11-10).
+      if (form.get("nav") === "1") {
+        if (url) return new Response(null, { status: 303, headers: { Location: url, "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) } });
+        return page(
+          "Payment could not start",
+          `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved${
+            needsVerification ? "; confirm your email (we've sent a link) to switch it on" : ""
+          }.</p><p><a href="/my-alerts">My alerts</a></p></div>`,
+          { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
+        );
+      }
       return new Response(
         JSON.stringify(
           url
@@ -5796,6 +5808,14 @@ async function moveNextEditionWatches(env: Env, newUrl: string, title: string, e
       .bind(newUrl, r.event_url)
       .run();
     moved += res.meta?.changes || 0;
+    // Priority paid for on the finished race's page (so after that race) was bought for this new
+    // edition: it moves too. Passes from before the old race belonged to that edition and stay.
+    await env.DB.prepare(
+      `UPDATE OR IGNORE race_priority SET event_url = ?1, event_title = ?2, event_name = NULL
+       WHERE event_url = ?3 AND created_at > (SELECT date(COALESCE(event_end_date, event_date), '+1 day') FROM event_directory WHERE url = ?3)`
+    )
+      .bind(newUrl, title, r.event_url)
+      .run();
     await env.DB.prepare("UPDATE sale_watch SET resolved = 1, updated_at = datetime('now') WHERE event_url = ?").bind(r.event_url).run();
   }
   if (moved) await pingAdmin(env, `🔁 ${moved} next-edition watcher(s) moved from the finished ${city} race to ${title} (${eventDate})`);
@@ -5813,6 +5833,20 @@ async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcom
   const nextYear = String(Number(lastYear) + 1);
   const lastDay = new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`));
   const official = `<a href="${escapeHtml(ev.url)}" rel="noopener">hyrox.com</a>`;
+  // Free / Priority like on the other race pages. No season pass here: it ends on a fixed date,
+  // and the next edition of a city may go on sale after it. Priority bought here follows the
+  // watch to the new edition (moveNextEditionWatches).
+  const hasPriority = !!subscriber && (await ownsRacePriority(env, subscriber.id, ev.url));
+  const offerPriority = priorityOfferedTo(env, subscriber) && !hasPriority;
+  const freeLabel = `Alert me when HYROX ${escapeHtml(city)} tickets go on sale – free`;
+  const alertButtons = offerPriority
+    ? priorityChoiceHtml(
+        env,
+        "race",
+        `<button type="submit" name="priority" value="0">Alert me - free</button>`,
+        `<button type="submit" name="priority" value="1">&#9889; Notify me first - ${PRIORITY_PRICE_LABEL}</button>`
+      )
+    : `<button type="submit" name="priority" value="0">${freeLabel}</button>`;
   const faq: [string, string][] = [
     [
       `When do HYROX ${city} ${nextYear} tickets go on sale?`,
@@ -5871,10 +5905,10 @@ async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcom
       </ul>
       <form method="POST" action="/watch-sale">
         <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
-        <input type="hidden" name="event_date" value=""><input type="hidden" name="next_edition" value="1">
+        <input type="hidden" name="event_date" value=""><input type="hidden" name="next_edition" value="1"><input type="hidden" name="nav" value="1">
         ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
-        <button type="submit" name="priority" value="0">Alert me when HYROX ${escapeHtml(city)} tickets go on sale – free</button>
-        <p class="consent">One email the moment the next ${escapeHtml(city)} edition opens its ticket sale or a pre-sale. Unsubscribe any time. Coming to watch? Spectator tickets go on sale at the same time - you can watch those too once the shop is open.</p>
+        ${alertButtons}
+        <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first. " : ""}One email the moment the next ${escapeHtml(city)} edition opens its ticket sale or a pre-sale. Unsubscribe any time. Coming to watch? Spectator tickets go on sale at the same time - you can watch those too once the shop is open.</p>
       </form>
     </div>
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} ${nextYear} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
@@ -6396,7 +6430,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
        <p class="hint">${hasPriority ? "&#9889; You have Priority for this race. " : ""}Next you pick the ticket types you want (Singles, Doubles, Relay, Pro, Spectator...) and we alert you the moment one is available again. Coming to watch? Spectator tickets sell out too. Buying happens on ${official}.</p>`
     : `<form method="POST" action="/watch-sale">
         <input type="hidden" name="event_url" value="${escapeHtml(ev.url)}"><input type="hidden" name="event_title" value="${escapeHtml(ev.title)}">
-        <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}">
+        <input type="hidden" name="event_date" value="${escapeHtml(ev.event_date || "")}"><input type="hidden" name="nav" value="1">
         ${subscriber ? "" : `<label>Your email<input type="email" name="email" required placeholder="you@example.com"></label>`}
         ${saleButtons}
         <p class="consent">${hasPriority ? "&#9889; You have Priority for this race: you're alerted first, also on WhatsApp. " : ""}One email the moment the sale opens. Unsubscribe any time. Coming to watch? Spectator tickets sell out too - once the sale opens you can watch those as well.</p>
