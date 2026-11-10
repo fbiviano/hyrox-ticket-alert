@@ -546,6 +546,11 @@ details.browse[open] .browse-toggle .chev{transform:rotate(90deg)}
 .status-list{list-style:none;padding:0;margin:0}
 .status-list li{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #eee;font-size:0.95rem}
 .status-list li:last-child{border-bottom:0}
+.trip-list{list-style:none;padding:0;margin:0 0 12px}
+.trip-list li{padding:10px 0;border-bottom:1px solid #eee;font-size:0.95rem}
+.trip-list li:last-child{border-bottom:0}
+.trip-list b{display:block;margin-bottom:2px}
+.trip-list small{display:block;color:#555;margin-top:4px}
 .race-links a{display:inline-block;margin:4px 12px 4px 0;font-size:0.9rem}
 .event-row:hover{background:#f7f7f7}
 .event-badge{font-size:0.75rem;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0}
@@ -6339,6 +6344,228 @@ async function handleSchedulePage(req: Request, env: Env): Promise<Response> {
 // track, the alert form and a race-specific FAQ. These are the pages that can rank for
 // "hyrox <city> tickets"; the competitor that owns those searches has exactly this.
 // ---------------------------------------------------------------------------
+// Trip guide for the biggest US races (2026-11-10). RoxRadar ranks for the plain city name with
+// travel content (airport, transport, parking, hotels); our race pages had none. Every line below
+// was read on the venue's, airport's, transit agency's or tourism board's own website on the
+// `checked` date and links to that page: nothing is estimated, and where the official sources
+// disagree or say nothing (drive times, prices) the guide says nothing either.
+// A guide belongs to a venue, not a city: it only shows while the official event page still
+// names that venue, so a race that moves loses its guide instead of showing a wrong one.
+type TripRowKind = "note" | "airport" | "transit" | "parking" | "hotels";
+interface TripGuide {
+  venue: string[]; // one of these must appear in the race's official venue name or address
+  checked: string; // the day the sources were read
+  rows: { kind: TripRowKind; text: string; sources: [string, string][] }[];
+}
+const TRIP_ROW_LABELS: Record<TripRowKind, string> = {
+  note: "Good to know",
+  airport: "Airport",
+  transit: "Public transport",
+  parking: "Parking",
+  hotels: "Hotels by the venue",
+};
+const TRIP_GUIDES: Record<string, TripGuide> = {
+  nashville: {
+    venue: ["Music City Center"],
+    checked: "2026-11-10",
+    rows: [
+      { kind: "airport", text: "Nashville International Airport (BNA) is the city's commercial airport.", sources: [["Nashville International Airport", "https://flynashville.com/"]] },
+      {
+        kind: "transit",
+        text: "WeGo Public Transit Route 18 runs between the airport and the Elizabeth Duff Transit Center at WeGo Central in downtown Nashville. It boards at the Ground Transportation Center on Level 1 of the Terminal 2 Garage. WeGo gives about 20 minutes for express trips and 35 to 45 minutes for local trips.",
+        sources: [["WeGo Public Transit", "https://www.wegotransit.com/ride/transit-services/airport/"]],
+      },
+      {
+        kind: "parking",
+        text: "Music City Center has its own covered garage with 1,800 spaces at 701 Demonbreun Street. The main entrance is at 7th Avenue and Demonbreun Street, with two more on 6th Avenue. Special event rates may apply and are posted at the entrance.",
+        sources: [["Music City Center", "https://nashvillemcc.com/parking"]],
+      },
+      {
+        kind: "hotels",
+        text: "The venue's own hotel list puts these within half a mile: Omni Nashville Hotel, 1 Hotel Nashville, Embassy Suites Nashville Downtown, The Westin Nashville and JW Marriott Nashville.",
+        sources: [["Music City Center", "https://nashvillemcc.com/hotels"]],
+      },
+    ],
+  },
+  dallas: {
+    venue: ["Kay Bailey Hutchison"],
+    checked: "2026-11-10",
+    rows: [
+      {
+        kind: "note",
+        text: "The DART rail station at the convention center has been closed since January 2026 because of the rebuild. Trains pass through without stopping, so do not plan to get off there.",
+        sources: [["DART", "https://www.dart.org/guide/transit-and-use/rail/rail-station-detail/convention-center-station"]],
+      },
+      {
+        kind: "airport",
+        text: "Dallas Love Field (DAL) is about seven miles from the convention center. Dallas Fort Worth International (DFW) is about 30 minutes away, according to the venue.",
+        sources: [["Kay Bailey Hutchison Convention Center", "https://www.dallasconventioncenter.com/attendees/getting-here-parking"]],
+      },
+      {
+        kind: "transit",
+        text: "DART sends rail riders to EBJ Union Station or Cedars Station instead of the closed stop, and runs an on-demand GoLink connector from both. From DFW, the DART Orange Line leaves from Terminal A Station for downtown Dallas. From Love Field, DART bus Route 5 Love Link runs to Inwood/Love Field Station.",
+        sources: [
+          ["DART station notice", "https://www.dart.org/guide/transit-and-use/rail/rail-station-detail/convention-center-station"],
+          ["DART to DFW", "https://www.dart.org/guide/transit-and-use/rail/dart-to-dfw-airport"],
+          ["DART to Love Field", "https://www.dart.org/guide/transit-and-use/rail/travelling-to-and-from-dallas-love-field-airport"],
+        ],
+      },
+      {
+        kind: "parking",
+        text: "The on-site garage at Memorial Dr. and S Griffin St. has 1,200 spaces. Lot C at 502 S Lamar St. has 170 more. Both are first come, first served. The venue warns that construction can slow access, so allow extra time.",
+        sources: [["Kay Bailey Hutchison Convention Center", "https://www.dallasconventioncenter.com/attendees/getting-here-parking"]],
+      },
+      {
+        kind: "hotels",
+        text: "Omni Dallas Hotel is adjacent to the convention center, according to the venue.",
+        sources: [["Kay Bailey Hutchison Convention Center", "https://www.dallasconventioncenter.com/attendees/attendees-faqs"]],
+      },
+    ],
+  },
+  anaheim: {
+    venue: ["Anaheim Convention Center"],
+    checked: "2026-11-10",
+    rows: [
+      {
+        kind: "airport",
+        text: "John Wayne Airport (SNA) is the closest, 13.5 miles and about 20 minutes from the convention center. Long Beach (LGB) is 18 miles away, Los Angeles (LAX) 35 miles and Ontario (ONT) 37 miles, according to the venue's 2026 brochure.",
+        sources: [["Anaheim Convention Center brochure", "https://assets.simpleviewinc.com/simpleview/image/upload/v1/clients/anaheimca/ACC_Spec_Guide_2026_singles_701cb92a-9b24-448c-9bf5-e007efa8aec2.pdf"]],
+      },
+      {
+        kind: "transit",
+        text: "OC Bus routes 43 (Harbor Blvd) and 50 (Katella Ave) serve the convention center and the ARTIC station, where Amtrak Pacific Surfliner and Metrolink trains stop. The ART resort shuttle no longer runs: it ended all service on 31 March 2026.",
+        sources: [
+          ["Visit Anaheim", "https://www.visitanaheim.org/plan-your-trip/getting-here/"],
+          ["ART notice", "https://rideart.org/"],
+        ],
+      },
+      {
+        kind: "parking",
+        text: "The venue's parking guide shows on-site Car Parks 1, 4, 5, 6 and 7, with entrances marked on Katella Avenue and West Street. There is no in-and-out and no overnight parking, and the rate is subject to change.",
+        sources: [["Anaheim Convention Center parking guide", "https://assets.simpleviewinc.com/simpleview/image/upload/v1/clients/anaheimca/ACC_Campus_Map_d479c9c5-b246-4885-aa7d-a13698182eb7.pdf"]],
+      },
+      {
+        kind: "hotels",
+        text: "Four hotels surround the convention center: Anaheim Marriott, Hilton Anaheim, Sheraton Park Hotel at the Anaheim Resort and The Westin Anaheim Resort.",
+        sources: [["Visit Anaheim", "https://www.visitanaheim.org/meetings/anaheim-convention-center/"]],
+      },
+    ],
+  },
+  chicago: {
+    venue: ["Navy Pier"],
+    checked: "2026-11-10",
+    rows: [
+      {
+        kind: "airport",
+        text: "Chicago has two airports: O'Hare International (ORD) and Chicago Midway International (MDW). Choose Chicago lists Navy Pier as 17 miles from O'Hare and 11 miles from Midway.",
+        sources: [["Choose Chicago", "https://www.choosechicago.com/listing/navy-pier/"]],
+      },
+      {
+        kind: "transit",
+        text: "CTA buses 29, 65 and 66 serve Navy Pier directly at most hours. From O'Hare, take the Blue Line to Grand and then bus 65 east. From Midway, take the Orange Line to Washington/Wabash and then bus 124 east.",
+        sources: [
+          ["CTA", "https://www.transitchicago.com/attractions/"],
+          ["CTA airports", "https://www.transitchicago.com/airports/"],
+        ],
+      },
+      {
+        kind: "parking",
+        text: "Navy Pier has two on-site garages, West and East, for up to 1,500 vehicles combined. They are reached from Illinois Street and Lake Shore Drive.",
+        sources: [["Navy Pier", "https://navypier.org/plan-your-visit/getting-here-and-parking/parking-and-valet/"]],
+      },
+      {
+        kind: "hotels",
+        text: "Sable at Navy Pier is on the pier itself and connected to its Festival Hall, according to Choose Chicago.",
+        sources: [["Choose Chicago", "https://www.choosechicago.com/listing/sable-at-navy-pier-chicago-curio-collection-by-hilton/"]],
+      },
+      {
+        kind: "note",
+        text: "Navy Pier's event center is at the far east end of the pier, so allow time to walk its length from the main entrance.",
+        sources: [["Navy Pier", "https://navypier.org/event-center/attendees/"]],
+      },
+    ],
+  },
+  "las-vegas": {
+    venue: ["Las Vegas Convention Center"],
+    checked: "2026-11-10",
+    rows: [
+      {
+        kind: "airport",
+        text: "Harry Reid International Airport (LAS) is 3.5 miles from the Las Vegas Convention Center, according to the venue's operator.",
+        sources: [["Las Vegas Convention and Visitors Authority", "https://www.vegasmeansbusiness.com/planning-tools/transportation/"]],
+      },
+      {
+        kind: "transit",
+        text: "The Las Vegas Monorail stops at the venue, at Boingo Station at Las Vegas Convention Center, and runs along the Strip between MGM Grand and SAHARA Las Vegas. It does not go to the airport. From the airport, RTC bus Route 108 Paradise leaves from Level Zero at Terminal 1. The underground Vegas Loop is free between the convention center's own stations.",
+        sources: [
+          ["Las Vegas Monorail", "https://www.lvmonorail.com/las-vegas-conventions/"],
+          ["Harry Reid Airport", "https://www.harryreidairport.com/busses-shuttles/public-bus"],
+          ["Vegas Loop", "https://www.vegasmeansbusiness.com/planning-tools/transportation/vegas-loop/"],
+        ],
+      },
+      {
+        kind: "parking",
+        text: "The venue's campus map marks visitor parking entrances at the Diamond, Silver, Bronze, White and Platinum lots.",
+        sources: [["Las Vegas Convention Center", "https://www.vegasmeansbusiness.com/meeting-facilities/convention-and-conference-facilities/las-vegas-convention-center/"]],
+      },
+      {
+        kind: "hotels",
+        text: "Westgate Las Vegas Resort & Casino is adjacent to the convention center, according to the venue's operator. It also lists Renaissance Las Vegas Hotel, Courtyard Las Vegas Convention Center and SpringHill Suites Las Vegas Convention Center as just south of it or across the street.",
+        sources: [["Las Vegas Convention and Visitors Authority", "https://www.vegasmeansbusiness.com/listing/westgate-las-vegas-resort-&-casino/30361/"]],
+      },
+      {
+        kind: "note",
+        text: "The campus is large. The venue says walking from the West Hall to the North and Central Halls can take up to 25 minutes.",
+        sources: [["Las Vegas Convention and Visitors Authority", "https://www.vegasmeansbusiness.com/planning-tools/transportation/vegas-loop/"]],
+      },
+    ],
+  },
+  houston: {
+    venue: ["NRG", "Reliant"],
+    checked: "2026-11-10",
+    rows: [
+      {
+        kind: "note",
+        text: "NRG Park was renamed Reliant Park on 1 August 2026. Signs, maps and the venue's website now say Reliant Center and Reliant Park.",
+        sources: [
+          ["Visit Houston", "https://www.visithoustontexas.com/blog/post/nrg-park-is-now-reliant-park/"],
+          ["Reliant Park", "https://www.reliantpark.com/"],
+        ],
+      },
+      {
+        kind: "airport",
+        text: "Houston has two airports. George Bush Intercontinental (IAH) is 23 miles north of downtown Houston, according to the Houston Airport System. William P. Hobby (HOU) is south of downtown.",
+        sources: [["Houston Airport System", "https://www.fly2houston.com/airport-business/about/"]],
+      },
+      {
+        kind: "transit",
+        text: "METRORail's Red Line stops at Stadium Park / Astrodome station, at the southern end of the line. From Bush Intercontinental, the venue recommends METRO's route 500 airport bus to downtown and then the Red Line southbound.",
+        sources: [
+          ["Houston METRO", "https://www.ridemetro.org/riding-metro/houston-attractions/nrg-park"],
+          ["Reliant Park", "https://www.reliantpark.com/plan-your-visit/"],
+        ],
+      },
+      {
+        kind: "parking",
+        text: "Reliant Park has 26,000 parking spaces. Events at Reliant Center, the former NRG Center, use Gate 10 at Kirby and McNee.",
+        sources: [["Reliant Park", "https://www.reliantpark.com/directions-parking/"]],
+      },
+      {
+        kind: "hotels",
+        text: "Holiday Inn Houston by NRG Park is next to the stadium, with direct pedestrian access into the park, according to Visit Houston.",
+        sources: [["Visit Houston", "https://www.visithoustontexas.com/travel-planning/getting-to-and-around-houston/metro-rail/"]],
+      },
+    ],
+  },
+};
+
+function tripGuideFor(ev: DirectoryEvent): TripGuide | null {
+  const guide = ev.slug ? TRIP_GUIDES[ev.slug] : undefined;
+  if (!guide) return null;
+  const where = `${ev.venue_name || ""} ${ev.venue_address || ""}`.toLowerCase();
+  return guide.venue.some((v) => where.includes(v.toLowerCase())) ? guide : null;
+}
+
 async function handleRacePage(req: Request, env: Env, slug: string): Promise<Response> {
   const events = await listDirectoryEvents(env);
   const ev = events.find((e) => e.slug === slug);
@@ -6505,6 +6732,31 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
     ],
   ];
+  const guide = tripGuideFor(ev);
+  const guideRow = (kind: TripRowKind) => guide?.rows.filter((r) => r.kind === kind).map((r) => r.text).join(" ") || "";
+  const guideChecked = guide
+    ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${guide.checked}T00:00:00Z`))
+    : "";
+  if (guide) {
+    const from = ` (From the official venue, airport and transit websites, read on ${guideChecked}.)`;
+    const travel: [string, string][] = [];
+    if (guideRow("airport")) travel.push([`What is the closest airport to HYROX ${city}, and how do I get to the venue?`, `${guideRow("airport")} ${guideRow("transit")}`.trim() + from]);
+    if (guideRow("parking")) travel.push([`Where can I park for HYROX ${city}?`, guideRow("parking") + from]);
+    if (guideRow("hotels")) travel.push([`Which hotels are closest to HYROX ${city}?`, guideRow("hotels") + from]);
+    faq.unshift(...travel);
+  }
+  const guideHtml = guide
+    ? `<div class="card"><h2>Getting to HYROX ${escapeHtml(city)}: airport, transport, parking and hotels</h2>
+      <ul class="trip-list">${guide.rows
+        .map(
+          (r) =>
+            `<li><b>${TRIP_ROW_LABELS[r.kind]}</b><span>${escapeHtml(r.text)}</span><small>Source: ${r.sources
+              .map(([label, url]) => `<a href="${escapeHtml(url)}" rel="noopener nofollow" target="_blank">${escapeHtml(label)}</a>`)
+              .join(", ")}</small></li>`
+        )
+        .join("")}</ul>
+      <p class="hint">Read on the linked official websites on ${guideChecked}. Timetables, closures and parking rules change, so check them again before you travel.</p></div>`
+    : "";
   // "When" and "where" lead the questions: they are what people who type just the city want to know.
   if (venueLine) faq.unshift([`Where is HYROX ${city} ${year} held?`, `${name} ${year} is held at ${venueLine}, according to the official event page on hyrox.com.`]);
   if (ev.event_date)
@@ -6588,6 +6840,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     ${infoHtml}
     ${ticketsHtml}
     ${spectatorHtml}
+    ${guideHtml}
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${supportersHtml}
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
