@@ -5396,7 +5396,12 @@ function parseEventDetails(html: string): { endDate: string | null; venueName: s
     if (month) endDate = `${d[3]}-${month}-${d[1].padStart(2, "0")}`;
   }
   const addr = html.match(/event_map_address[^>]*>(?:\s*<span class="w-post-elm-before">[^<]*<\/span>)?\s*<span class="w-post-elm-value">([^<]+)<\/span>\s*<\/div>(?:\s*<div class="w-btn-wrapper[^"]*">\s*<a [^>]*>\s*<span class="w-btn-label">([^<]+)<)?/i);
-  return { endDate, venueAddress: addr ? clean(addr[1], 200) : null, venueName: addr && addr[2] ? clean(addr[2], 80) : null };
+  // The button after the address is usually just the venue's name ("Music City Center"), sometimes
+  // "More informations about Riocentro" (Rio, Buenos Aires): keep the name, drop a generic label.
+  let venueName = addr && addr[2] ? clean(addr[2], 80) : null;
+  if (venueName) venueName = venueName.replace(/^more info(rmation)?s?\s+(about|on)\s+/i, "").trim() || null;
+  if (venueName && /^(more info|venue|website|directions?|map|click|learn|find|view|get|here|visit|see)\b/i.test(venueName)) venueName = null;
+  return { endDate, venueAddress: addr ? clean(addr[1], 200) : null, venueName };
 }
 
 function todayIso(): string {
