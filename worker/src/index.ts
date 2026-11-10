@@ -607,7 +607,7 @@ body.wide{max-width:980px}
 @media (max-width:1000px){.layout{flex-direction:column}.main-col,.sidebar{flex:1 1 auto;max-width:none;width:100%}}
 </style></head>
 <body${wide ? ' class="wide"' : ""}>${seo.ownH1 ? '<p class="brand">RoxRaceAlerts</p>' : "<h1>RoxRaceAlerts</h1>"}${body}
-<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/guides/hyrox-spectator-tickets">Spectator tickets</a> &middot; <a href="/tickets-back">Tickets that came back</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a> &middot; <a href="/privacy">Privacy</a><br>RoxRaceAlerts is operated by ${SELLER_ADDRESS} &middot; <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></small></p>
+<p><small>Independent HYROX ticket-availability alerts. Not affiliated with HYROX or vivenu. &middot; <a href="/about">About</a> &middot; <a href="/hyrox-schedule">Race schedule</a> &middot; <a href="/guides/sold-out-hyrox-tickets">Sold-out tickets</a> &middot; <a href="/guides/hyrox-ticket-sale-dates">Sale dates</a> &middot; <a href="/guides/hyrox-ticket-types">Ticket types</a> &middot; <a href="/guides/hyrox-spectator-tickets">Spectator tickets</a> &middot; <a href="/tickets-back">Tickets that came back</a> &middot; <a href="/supporters">For gyms</a> &middot; <a href="/feedback">Feedback</a> &middot; <a href="/partners">Partner with us</a> &middot; <a href="/terms">Terms &amp; refunds</a> &middot; <a href="/privacy">Privacy</a><br>RoxRaceAlerts is operated by ${SELLER_ADDRESS} &middot; <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a></small></p>
 </body></html>`,
     {
       headers: {
@@ -5742,9 +5742,13 @@ function raceYearLabel(ev: DirectoryEvent): string {
 
 /** The running HYROX season (September to August): "2026/27". */
 function currentSeasonLabel(): string {
-  const now = new Date();
-  const start = now.getUTCMonth() >= 8 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const start = seasonStartYear();
   return `${start}/${String(start + 1).slice(2)}`;
+}
+
+function seasonStartYear(): number {
+  const now = new Date();
+  return now.getUTCMonth() >= 8 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
 }
 
 /** Cities whose last race is over and whose next edition isn't listed yet: one row per city, the
@@ -5942,6 +5946,22 @@ const COUNTRIES: Record<string, Country> = {
   "south-africa": { name: "South Africa", cities: ["cape-town", "johannesburg", "durban"] },
 };
 
+/** Countries with a single HYROX city: no country page, but the schedule names the country. */
+const SINGLE_CITY_COUNTRIES: Record<string, string> = {
+  cairo: "Egypt",
+  "kuala-lumpur": "Malaysia",
+  helsinki: "Finland",
+  auckland: "New Zealand",
+  bangkok: "Thailand",
+  taipei: "Taiwan",
+  "buenos-aires": "Argentina",
+  copenhagen: "Denmark",
+  riga: "Latvia",
+  athens: "Greece",
+  oslo: "Norway",
+  budapest: "Hungary",
+};
+
 /** Country of a city slug; "paris-grand-palais" counts as Paris. */
 function countryOfCity(slug: string): string | null {
   for (const [c, def] of Object.entries(COUNTRIES)) if (def.cities.includes(slug)) return c;
@@ -5984,11 +6004,12 @@ function inCountry(def: Country): string {
 }
 
 /** Links to every country page, for the homepage and the bottom of race pages. */
-function countryLinksHtml(byCountry: Map<string, CountryRaces>, except = ""): string {
+function countryLinksHtml(byCountry: Map<string, CountryRaces>, except = "", scheduleLink = true): string {
   const links = [...byCountry.keys()].filter((c) => c !== except);
   if (!links.length) return "";
   return `<div class="card race-links"><h2>HYROX races by country</h2>
       ${links.map((c) => `<a href="/hyrox/${c}">HYROX ${escapeHtml(COUNTRIES[c].name)}</a>`).join("")}
+      ${scheduleLink ? `<p><a href="/hyrox-schedule">Full HYROX race schedule, by date</a></p>` : ""}
     </div>`;
 }
 
@@ -6117,6 +6138,162 @@ async function countryPage(req: Request, env: Env, slug: string, byCountry: Map<
     <div class="card faq"><h2>HYROX ${escapeHtml(def.name)}: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     ${countryLinksHtml(byCountry, slug)}
     <div class="card race-links"><p><a href="/">All upcoming HYROX races worldwide</a></p></div>`,
+    {},
+    false,
+    seo
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Season schedule (/hyrox-schedule): every race of the season by month, with dates, venue and
+// ticket status. "hyrox 2026 schedule" is searched 3,600 times a month in the US alone and the
+// competitor holds first place with a page like this (lookup 2026-11-10); we had none.
+// ---------------------------------------------------------------------------
+async function handleSchedulePage(req: Request, env: Env): Promise<Response> {
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const all = await listDirectoryEvents(env);
+  const past = await listPastRaces(env, all);
+  const byCountry = racesByCountry(all, past);
+  const events = all.filter((e) => !/youngstars/i.test(e.title));
+  const start = seasonStartYear();
+  const years = `${start}/${start + 1}`;
+  const today = todayIso();
+  // Races of this season that are over (or running): the directory keeps them.
+  const { results: doneRows } = await env.DB.prepare(
+    "SELECT url, title, event_date, event_end_date, venue_name FROM event_directory WHERE event_date < ?1 AND event_date >= ?2 AND title NOT LIKE '%Youngstars%' ORDER BY event_date, title"
+  )
+    .bind(today, `${start}-07-01`)
+    .all<DirectoryEvent>();
+  const seen = new Set<string>();
+  const done = (doneRows || []).filter((e) => {
+    const k = `${e.event_date}|${citySlug(e.title)}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  const pages = new Set([...all, ...past].map((e) => e.slug));
+
+  const fmt = (iso: string, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", ...opts }).format(new Date(`${iso}T00:00:00Z`));
+  const dates = (ev: DirectoryEvent) => {
+    if (!ev.event_date) return "date to be announced";
+    const end = ev.event_end_date && ev.event_end_date > ev.event_date ? ev.event_end_date : null;
+    if (!end) return fmt(ev.event_date, { day: "numeric", month: "long", year: "numeric" });
+    const sameMonth = end.slice(0, 7) === ev.event_date.slice(0, 7);
+    return `${fmt(ev.event_date, sameMonth ? { day: "numeric" } : { day: "numeric", month: "long" })} to ${fmt(end, { day: "numeric", month: "long", year: "numeric" })}`;
+  };
+  const status = (ev: DirectoryEvent) =>
+    ev.on_sale
+      ? { badge: "On sale now", cls: "on" }
+      : ev.presale_is_live
+        ? { badge: "Pre-sale live", cls: "on" }
+        : ev.presale_live_at
+          ? { badge: "Sale date announced", cls: "soon" }
+          : { badge: "Not on sale yet", cls: "off" };
+  const cityOf = (ev: DirectoryEvent) => shortRaceName(ev.title).city;
+  const countryOf = (ev: DirectoryEvent) => {
+    const city = citySlug(ev.title);
+    const c = countryOfCity(city);
+    return c ? COUNTRIES[c].name : SINGLE_CITY_COUNTRIES[city] || "";
+  };
+  const row = (ev: DirectoryEvent, slug: string | undefined, badge: string, cls: string) => {
+    const label = `<b>HYROX ${escapeHtml(cityOf(ev))}</b>`;
+    const country = countryOf(ev);
+    return `<li><span>${slug && pages.has(slug) ? `<a href="/hyrox/${slug}">${label}</a>` : label}${country ? `, ${escapeHtml(country)}` : ""}<br><span class="hint">${escapeHtml(
+      `${dates(ev)}${ev.venue_name ? ` · ${ev.venue_name}` : ""}`
+    )}</span></span><span class="event-badge ${cls}" style="align-self:center">${badge}</span></li>`;
+  };
+
+  // Upcoming races by month; races without a date go last.
+  const months = new Map<string, DirectoryEvent[]>();
+  for (const ev of events) {
+    const k = ev.event_date ? ev.event_date.slice(0, 7) : "";
+    if (!months.has(k)) months.set(k, []);
+    months.get(k)!.push(ev);
+  }
+  const monthsHtml = [...months]
+    .map(
+      ([k, list]) => `<div class="card"><h2>${k ? `HYROX races in ${escapeHtml(fmt(`${k}-01`, { month: "long", year: "numeric" }))}` : "Date to be announced"}</h2>
+      <ul class="status-list">${list.map((e) => row(e, e.slug, status(e).badge, status(e).cls)).join("")}</ul></div>`
+    )
+    .join("");
+  const doneHtml = done.length
+    ? `<div class="card"><h2>Already raced in ${years}</h2>
+      <ul class="status-list">${done
+        .map((e) => (e.event_end_date && e.event_end_date >= today ? row(e, citySlug(e.title), "On now", "on") : row(e, citySlug(e.title), "Finished", "off")))
+        .join("")}</ul></div>`
+    : "";
+
+  const next = events.find((e) => e.event_date);
+  const onSale = events.filter((e) => e.on_sale).length;
+  const worlds = events.find((e) => /world championships/i.test(e.title));
+  const faq: [string, string][] = [];
+  if (next)
+    faq.push([
+      "When is the next HYROX race?",
+      `The next one is HYROX ${cityOf(next)}${countryOf(next) ? ` (${countryOf(next)})` : ""}, ${dates(next)}${next.venue_name ? ` at ${next.venue_name}` : ""}. Tickets: ${status(next).badge.toLowerCase()}.`,
+    ]);
+  faq.push([
+    `How many HYROX races are there in the ${years} season?`,
+    `${events.length + done.length} races are on the official calendar for ${years} so far: ${done.length} already held and ${events.length} still to come. HYROX keeps adding races during the season, and this page follows the calendar on hyrox.com on its own.`,
+  ]);
+  if (worlds)
+    faq.push([
+      `When and where are the HYROX World Championships ${(worlds.event_date || "").slice(0, 4)}?`,
+      `The HYROX World Championships take place in ${cityOf(worlds).replace(/world championships\s*/i, "")}, ${dates(worlds)}${worlds.venue_name ? ` at ${worlds.venue_name}` : ""}.`,
+    ]);
+  faq.push(
+    [
+      "Which HYROX races have tickets on sale right now?",
+      `${onSale} of the ${events.length} upcoming races have their ticket sale open; they carry the "On sale now" badge in the schedule above. Open a race to see which ticket types are available or sold out.`,
+    ],
+    [
+      "When do HYROX tickets go on sale?",
+      `Every race has its own sale date, usually announced a few weeks ahead and often with a pre-sale first. Popular races sell out within minutes. Open a race in the schedule and set a free alert: you get an email the moment its sale opens or a sold-out ticket comes back.`,
+    ],
+    [
+      "Is this the official HYROX schedule?",
+      `No. RoxRaceAlerts is an independent alert service built by a HYROX athlete. Dates and venues are taken from the official event pages on hyrox.com, which remains the source of truth; tickets are only sold on the official HYROX shop.`,
+    ]
+  );
+
+  const title = `HYROX ${years} Schedule: All Race Dates, Cities & Tickets | RoxRaceAlerts`;
+  const description = `The full HYROX ${years} schedule: ${events.length} upcoming races by date, with city, venue and live ticket status${next ? `. Next: HYROX ${cityOf(next)}, ${dates(next)}` : ""}. Free alert when tickets go on sale.`;
+  const pageUrl = `${env.SITE_URL}/hyrox-schedule`;
+  const seo: PageSeo = {
+    description,
+    canonical: pageUrl,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "HYROX races", item: `${env.SITE_URL}/` },
+          { "@type": "ListItem", position: 2, name: `HYROX ${years} schedule`, item: pageUrl },
+        ],
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        name: `HYROX ${years} schedule`,
+        itemListElement: events.map((e, i) => ({ "@type": "ListItem", position: i + 1, name: `HYROX ${cityOf(e)}${e.event_date ? ` (${dates(e)})` : ""}`, url: `${env.SITE_URL}/hyrox/${e.slug}` })),
+      },
+      { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+    ],
+  };
+  return page(
+    title,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
+    <div class="hero">
+      <h1>HYROX ${years} schedule: every race date and city</h1>
+      <p class="hero-sub">The HYROX race calendar for the ${years} season: ${events.length} upcoming races, ${onSale} with tickets on sale now${done.length ? `, ${done.length} already held` : ""}. Updated around the clock from the official event pages.</p>
+    </div>
+    ${monthsHtml}
+    ${doneHtml}
+    <div class="card faq"><h2>HYROX ${years} schedule: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
+    ${countryLinksHtml(byCountry, "", false)}
+    <div class="card race-links"><p><a href="/">Set a free ticket alert for any HYROX race</a></p></div>`,
     {},
     false,
     seo
@@ -6983,6 +7160,7 @@ async function handleSitemap(env: Env): Promise<Response> {
     ...past.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "weekly", priority: "0.6" })),
     ...[...racesByCountry(races, past).keys()].map((c) => ({ loc: `${env.SITE_URL}/hyrox/${c}`, changefreq: "daily", priority: "0.7" })),
     ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
+    { loc: `${env.SITE_URL}/hyrox-schedule`, changefreq: "daily", priority: "0.8" },
     { loc: `${env.SITE_URL}/tickets-back`, changefreq: "daily", priority: "0.7" },
     { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
     { loc: `${env.SITE_URL}/supporters`, changefreq: "monthly", priority: "0.5" },
@@ -7006,7 +7184,7 @@ const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
 async function publicUrls(env: Env): Promise<string[]> {
   const races = await listDirectoryEvents(env);
   const past = await listPastRaces(env, races);
-  return [`${env.SITE_URL}/`, ...[...races, ...past].map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...[...racesByCountry(races, past).keys()].map((c) => `${env.SITE_URL}/hyrox/${c}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
+  return [`${env.SITE_URL}/`, ...[...races, ...past].map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...[...racesByCountry(races, past).keys()].map((c) => `${env.SITE_URL}/hyrox/${c}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/hyrox-schedule`, `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
 }
 
 /** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
@@ -8795,6 +8973,8 @@ const worker = {
       const racePage = url.pathname.match(/^\/hyrox\/([a-z0-9-]{1,60})\/?$/);
       if (racePage && req.method === "GET") return await handleRacePage(req, env, racePage[1]);
       if ((url.pathname === "/hyrox" || url.pathname === "/hyrox/") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/`, 301);
+      if (url.pathname === "/hyrox-schedule" && req.method === "GET") return await handleSchedulePage(req, env);
+      if ((url.pathname === "/schedule" || url.pathname === "/hyrox-schedule/" || url.pathname === "/hyrox-calendar") && req.method === "GET") return Response.redirect(`${env.SITE_URL}/hyrox-schedule`, 301);
       if (url.pathname === "/about" && req.method === "GET") return await handleAboutPage(req, env);
       if (url.pathname === "/supporters" && req.method === "GET") return await handleSupportersPage(req, env, "", { race: url.searchParams.get("race") || "next" });
       if (url.pathname === "/supporters" && req.method === "POST") return await handleSupportersRequest(req, env);
