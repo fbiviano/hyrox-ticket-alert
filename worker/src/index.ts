@@ -1445,7 +1445,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
             ${browseSection}
           </div>
           ${faq}
-          ${pastRaceLinksHtml(await listPastRaces(env, events))}
+          ${raceFooterLinksHtml(events, await listPastRaces(env, events))}
         </div>
         <div class="sidebar">
           ${sideOnSaleCard}
@@ -1493,7 +1493,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
           ${browseSection}
         </div>
         ${faq}
-        ${pastRaceLinksHtml(await listPastRaces(env, events))}
+        ${raceFooterLinksHtml(events, await listPastRaces(env, events))}
       </div>
       <div class="sidebar">
         ${sideOnSaleCard}
@@ -5737,6 +5737,11 @@ function raceYearLabel(ev: DirectoryEvent): string {
   if (ev.event_date) return ev.event_date.slice(0, 4);
   const m = /season-(\d{2})-(\d{2})/i.exec(ev.shop_url || "");
   if (m) return `20${m[1]}/${m[2]}`;
+  return currentSeasonLabel();
+}
+
+/** The running HYROX season (September to August): "2026/27". */
+function currentSeasonLabel(): string {
   const now = new Date();
   const start = now.getUTCMonth() >= 8 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
   return `${start}/${String(start + 1).slice(2)}`;
@@ -5794,7 +5799,7 @@ async function moveNextEditionWatches(env: Env, newUrl: string, title: string, e
 
 /** /hyrox/<city> for a city whose last race is over and whose next edition isn't announced:
  * what happened, that nothing is on sale, and the alert for when the next edition opens. */
-async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcoming: DirectoryEvent[]): Promise<Response> {
+async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcoming: DirectoryEvent[], past: DirectoryEvent[]): Promise<Response> {
   const subscriber = await getSessionSubscriber(req, env);
   const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
   const { name, city } = shortRaceName(ev.title);
@@ -5871,8 +5876,10 @@ async function nextEditionPage(req: Request, env: Env, ev: DirectoryEvent, upcom
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} ${nextYear} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
     <div class="card race-links"><h2>HYROX races on sale or coming up</h2>
       ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
+      ${countryLineHtml(ev, racesByCountry(upcoming, past))}
       <p><a href="/">All ${upcoming.length} upcoming HYROX races</a></p>
-    </div>`,
+    </div>
+    ${countryLinksHtml(racesByCountry(upcoming, past))}`,
     {},
     false,
     seo
@@ -5889,6 +5896,234 @@ function pastRaceLinksHtml(past: DirectoryEvent[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Country pages (/hyrox/<country>): every race of one country on one page. "hyrox canada" is
+// searched 2,900 times a month in Canada alone (keyword research 2026-11-10) and the competitor
+// has a page per country; we had none. A country gets a page once two of its cities are in the
+// directory - with a single city the race page already says everything. A city page wins the
+// address when a city and a country share a name (Singapore, Hong Kong have no entry here).
+// A city missing from this list simply appears on no country page: add it to its country.
+// ---------------------------------------------------------------------------
+interface Country {
+  name: string;
+  local?: string; // what people there type ("hyrox deutschland"); shown in the title
+  the?: boolean; // "in the Netherlands"
+  cities: string[]; // city slugs, as citySlug() makes them
+}
+const COUNTRIES: Record<string, Country> = {
+  usa: {
+    name: "USA",
+    local: "United States",
+    the: true,
+    cities: ["new-york", "washington-d-c", "washington-dc", "washington", "salt-lake-city", "boston", "tampa", "denver", "dallas", "anaheim", "nashville", "chicago", "phoenix", "las-vegas", "miami-beach", "miami", "houston", "atlanta", "san-diego", "portland", "los-angeles", "charlotte", "fort-lauderdale", "austin", "san-francisco", "seattle", "philadelphia", "orlando", "st-louis", "minneapolis"],
+  },
+  canada: { name: "Canada", cities: ["toronto", "vancouver", "ottawa", "montreal", "calgary"] },
+  uk: { name: "UK", local: "United Kingdom", the: true, cities: ["london", "birmingham", "manchester", "glasgow", "cardiff", "liverpool", "edinburgh", "belfast", "newcastle", "leeds"] },
+  ireland: { name: "Ireland", cities: ["dublin", "cork"] },
+  germany: { name: "Germany", local: "Deutschland", cities: ["karlsruhe", "hamburg", "dusseldorf", "frankfurt", "cologne", "koln", "berlin", "stuttgart", "munich", "munchen", "leipzig", "hannover", "dortmund", "essen", "nuremberg", "bremen"] },
+  netherlands: { name: "Netherlands", local: "Nederland", the: true, cities: ["maastricht", "utrecht", "amsterdam", "rotterdam", "heerenveen", "eindhoven", "the-hague"] },
+  belgium: { name: "Belgium", cities: ["gent", "ghent", "mechelen", "brussels", "antwerp"] },
+  france: { name: "France", cities: ["bordeaux", "nice", "paris", "toulouse", "lyon", "marseille", "lille", "nantes"] },
+  spain: { name: "Spain", local: "España", cities: ["tenerife", "valencia", "barcelona", "bilbao", "madrid", "malaga", "sevilla", "seville"] },
+  italy: { name: "Italy", local: "Italia", cities: ["rome", "milan", "verona", "bari", "rimini", "turin", "bologna"] },
+  switzerland: { name: "Switzerland", local: "Schweiz", cities: ["geneva", "basel", "zurich", "st-gallen"] },
+  austria: { name: "Austria", local: "Österreich", cities: ["vienna", "graz", "salzburg"] },
+  poland: { name: "Poland", local: "Polska", cities: ["gdansk", "poznan", "katowice", "warsaw", "krakow", "wroclaw"] },
+  sweden: { name: "Sweden", cities: ["stockholm", "gothenburg", "malmo"] },
+  portugal: { name: "Portugal", cities: ["lisbon", "porto"] },
+  turkey: { name: "Turkey", cities: ["izmir", "istanbul"] },
+  mexico: { name: "Mexico", local: "México", cities: ["acapulco", "mexico-city", "cancun", "guadalajara", "monterrey", "puebla"] },
+  brazil: { name: "Brazil", local: "Brasil", cities: ["sao-paulo", "rio-de-janeiro", "porto-alegre"] },
+  australia: { name: "Australia", cities: ["perth", "melbourne", "brisbane", "sydney", "adelaide"] },
+  japan: { name: "Japan", cities: ["chiba", "osaka", "nagoya", "tokyo", "yokohama"] },
+  "south-korea": { name: "South Korea", cities: ["seoul", "incheon"] },
+  china: { name: "China", cities: ["shenzhen", "beijing", "shanghai", "guangzhou", "sanya", "chengdu", "hangzhou"] },
+  india: { name: "India", cities: ["mumbai", "gujarat", "noida", "bengaluru", "delhi", "new-delhi", "hyderabad"] },
+  uae: { name: "UAE", local: "United Arab Emirates", the: true, cities: ["dubai", "abu-dhabi"] },
+  "south-africa": { name: "South Africa", cities: ["cape-town", "johannesburg", "durban"] },
+};
+
+/** Country of a city slug; "paris-grand-palais" counts as Paris. */
+function countryOfCity(slug: string): string | null {
+  for (const [c, def] of Object.entries(COUNTRIES)) if (def.cities.includes(slug)) return c;
+  for (const [c, def] of Object.entries(COUNTRIES)) if (def.cities.some((k) => slug.startsWith(`${k}-`))) return c;
+  return null;
+}
+
+interface CountryRaces {
+  upcoming: DirectoryEvent[]; // soonest first
+  past: DirectoryEvent[]; // cities waiting for their next edition
+}
+
+/** Races per country, only for countries with two or more cities in the directory. */
+function racesByCountry(events: DirectoryEvent[], past: DirectoryEvent[]): Map<string, CountryRaces> {
+  const all = new Map<string, CountryRaces & { cities: Set<string> }>();
+  const add = (ev: DirectoryEvent, key: "upcoming" | "past") => {
+    if (/youngstars/i.test(ev.title)) return;
+    const city = citySlug(ev.title);
+    const c = countryOfCity(city);
+    if (!c) return;
+    if (!all.has(c)) all.set(c, { upcoming: [], past: [], cities: new Set() });
+    const g = all.get(c)!;
+    g[key].push(ev);
+    g.cities.add(COUNTRIES[c].cities.find((k) => city === k || city.startsWith(`${k}-`)) || city);
+  };
+  for (const ev of events) add(ev, "upcoming");
+  for (const ev of past) add(ev, "past");
+  const out = new Map<string, CountryRaces>();
+  // Same order as COUNTRIES, so the list of links reads the same everywhere.
+  for (const c of Object.keys(COUNTRIES)) {
+    const g = all.get(c);
+    if (g && g.cities.size >= 2) out.set(c, { upcoming: g.upcoming, past: g.past });
+  }
+  return out;
+}
+
+/** "in the UK" / "in Canada". */
+function inCountry(def: Country): string {
+  return `${def.the ? "the " : ""}${def.name}`;
+}
+
+/** Links to every country page, for the homepage and the bottom of race pages. */
+function countryLinksHtml(byCountry: Map<string, CountryRaces>, except = ""): string {
+  const links = [...byCountry.keys()].filter((c) => c !== except);
+  if (!links.length) return "";
+  return `<div class="card race-links"><h2>HYROX races by country</h2>
+      ${links.map((c) => `<a href="/hyrox/${c}">HYROX ${escapeHtml(COUNTRIES[c].name)}</a>`).join("")}
+    </div>`;
+}
+
+/** "All HYROX races in Canada" link for a race page, when its country has a page. */
+function countryLineHtml(ev: DirectoryEvent, byCountry: Map<string, CountryRaces>): string {
+  const c = countryOfCity(citySlug(ev.title));
+  return c && byCountry.has(c) ? `<p><a href="/hyrox/${c}">All HYROX races in ${escapeHtml(inCountry(COUNTRIES[c]))}</a></p>` : "";
+}
+
+/** "Waiting for the next edition" plus the country links: the bottom of the homepage and race pages. */
+function raceFooterLinksHtml(events: DirectoryEvent[], past: DirectoryEvent[]): string {
+  return pastRaceLinksHtml(past) + countryLinksHtml(racesByCountry(events, past));
+}
+
+function listWords(items: string[]): string {
+  const u = [...new Set(items)];
+  return u.length <= 1 ? u.join("") : `${u.slice(0, -1).join(", ")} and ${u[u.length - 1]}`;
+}
+
+async function countryPage(req: Request, env: Env, slug: string, byCountry: Map<string, CountryRaces>): Promise<Response> {
+  const def = COUNTRIES[slug];
+  const g = byCountry.get(slug)!;
+  const subscriber = await getSessionSubscriber(req, env);
+  const counts = subscriber ? await getWatchCounts(subscriber.id, env) : { tickets: 0, races: 0 };
+  const season = currentSeasonLabel();
+  const where = inCountry(def);
+  const day = (iso: string) => new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${iso}T00:00:00Z`));
+  const dates = (ev: DirectoryEvent) =>
+    !ev.event_date ? "date to be announced" : ev.event_end_date && ev.event_end_date > ev.event_date ? `${day(ev.event_date)} to ${day(ev.event_end_date)}` : day(ev.event_date);
+  const status = (ev: DirectoryEvent) =>
+    ev.on_sale
+      ? { badge: "On sale now", cls: "on" }
+      : ev.presale_is_live
+        ? { badge: "Pre-sale live", cls: "on" }
+        : ev.presale_live_at
+          ? { badge: "Sale date announced", cls: "soon" }
+          : { badge: "Not on sale yet", cls: "off" };
+  const cityOf = (ev: DirectoryEvent) => shortRaceName(ev.title).city;
+  const upcomingCities = g.upcoming.map(cityOf);
+  const pastCities = g.past.map(cityOf);
+  const onSale = g.upcoming.filter((e) => e.on_sale);
+  const announced = g.upcoming.filter((e) => !e.on_sale && e.presale_live_at);
+  const next = g.upcoming[0];
+  const nameShown = def.local ? `${def.name} (${def.local})` : def.name;
+
+  const faq: [string, string][] = [
+    [
+      `When is the next HYROX race in ${where}?`,
+      next
+        ? `The next one is HYROX ${cityOf(next)}${next.event_date ? `, ${dates(next)}` : " (date to be announced)"}${next.venue_name ? ` at ${next.venue_name}` : ""}. Tickets: ${status(next).badge.toLowerCase()}.`
+        : `No upcoming HYROX race in ${where} is listed on hyrox.com right now. Set a free alert on a city's page and you hear the moment its next edition opens.`,
+    ],
+    [
+      `Which cities host HYROX in ${where}?`,
+      `${upcomingCities.length ? `Coming up: ${listWords(upcomingCities)}. ` : ""}${pastCities.length ? `Raced recently, next date not announced yet: ${listWords(pastCities)}. ` : ""}The list follows the official race calendar on hyrox.com and updates on its own.`,
+    ],
+    [
+      `Are HYROX ${def.name} tickets sold out?`,
+      onSale.length
+        ? `${onSale.length} of the ${g.upcoming.length} upcoming races in ${where} ${onSale.length === 1 ? "has" : "have"} tickets on sale right now (${listWords(onSale.map(cityOf))}). Popular ticket types sell out quickly, but sold-out tickets come back regularly when people's plans change: a free alert tells you the moment one does.`
+        : `No race in ${where} has its ticket sale open right now, so nothing is sold out. Once a sale opens, the race's page shows which ticket types are available or sold out.`,
+    ],
+    [
+      `When do HYROX ${def.name} tickets go on sale?`,
+      `Every race has its own sale date, usually announced a few weeks ahead and often with a pre-sale first. ${
+        announced.length ? `Announced so far: ${announced.map((e) => `${cityOf(e)} on ${formatInTimezone(e.presale_live_at!, e.presale_timezone)}`).join("; ")}. ` : ""
+      }Set a free alert on a race's page and you get an email the moment its sale opens.`,
+    ],
+    [
+      `Where do I buy tickets for HYROX races in ${where}?`,
+      `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
+    ],
+  ];
+  const title = `HYROX ${nameShown} ${season}: Races, Dates & Tickets | RoxRaceAlerts`;
+  const description = `Every HYROX race in ${where} for ${season}: ${listWords([...upcomingCities, ...pastCities])}. Dates, venues and live ticket status, with a free alert when tickets go on sale or come back.`;
+  const pageUrl = `${env.SITE_URL}/hyrox/${slug}`;
+  const seo: PageSeo = {
+    description,
+    canonical: pageUrl,
+    ownH1: true,
+    jsonLd: [
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "HYROX races", item: `${env.SITE_URL}/` },
+          { "@type": "ListItem", position: 2, name: `HYROX ${def.name}`, item: pageUrl },
+        ],
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        name: `HYROX races in ${where} ${season}`,
+        itemListElement: g.upcoming.map((e, i) => ({ "@type": "ListItem", position: i + 1, name: `HYROX ${cityOf(e)}`, url: `${env.SITE_URL}/hyrox/${e.slug}` })),
+      },
+      { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })) },
+    ],
+  };
+  const row = (ev: DirectoryEvent, line: string, badge: string, cls: string) =>
+    `<li><span><a href="/hyrox/${ev.slug}"><b>HYROX ${escapeHtml(cityOf(ev))}</b></a><br><span class="hint">${escapeHtml(line)}</span></span><span class="event-badge ${cls}" style="align-self:center">${badge}</span></li>`;
+  return page(
+    title,
+    `${navBar("/", subscriber, counts.tickets + counts.races, !subscriber, env)}
+    <div class="hero">
+      <h1>HYROX ${escapeHtml(nameShown)} ${season}: races, dates and tickets</h1>
+      <p class="hero-sub">${
+        g.upcoming.length
+          ? `${g.upcoming.length} upcoming HYROX race${g.upcoming.length === 1 ? "" : "s"} in ${escapeHtml(where)}: ${escapeHtml(listWords(upcomingCities))}. ${onSale.length} on sale now.`
+          : `No upcoming HYROX race in ${escapeHtml(where)} is listed right now. Set an alert for the next edition of your city.`
+      }</p>
+    </div>
+    ${
+      g.upcoming.length
+        ? `<div class="card"><h2>Upcoming HYROX races in ${escapeHtml(where)}</h2>
+      <ul class="status-list">${g.upcoming.map((e) => row(e, `${dates(e)}${e.venue_name ? ` · ${e.venue_name}` : ""}`, status(e).badge, status(e).cls)).join("")}</ul>
+      <p class="hint">Open a race for its tickets, venue and a free alert: we email you the moment its sale opens or a sold-out ticket comes back. Buying happens on hyrox.com.</p></div>`
+        : ""
+    }
+    ${
+      g.past.length
+        ? `<div class="card"><h2>Waiting for the next edition</h2>
+      <ul class="status-list">${g.past.map((e) => row(e, `Last race: ${e.event_date ? day(e.event_date) : "this season"}`, "Next edition not announced", "off")).join("")}</ul>
+      <p class="hint">These cities raced recently and haven't announced the next date. Open one to set an alert and hear first.</p></div>`
+        : ""
+    }
+    <div class="card faq"><h2>HYROX ${escapeHtml(def.name)}: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
+    ${countryLinksHtml(byCountry, slug)}
+    <div class="card race-links"><p><a href="/">All upcoming HYROX races worldwide</a></p></div>`,
+    {},
+    false,
+    seo
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Race pages (/hyrox/<city>): one page per upcoming race - dates, ticket status, the tickets we
 // track, the alert form and a race-specific FAQ. These are the pages that can rank for
 // "hyrox <city> tickets"; the competitor that owns those searches has exactly this.
@@ -5899,7 +6134,9 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   const past = await listPastRaces(env, events);
   if (!ev) {
     const gone = past.find((e) => e.slug === slug);
-    if (gone) return nextEditionPage(req, env, gone, events);
+    if (gone) return nextEditionPage(req, env, gone, events, past);
+    const byCountry = racesByCountry(events, past);
+    if (byCountry.has(slug)) return countryPage(req, env, slug, byCountry);
     const r = page("Race not found", `<div class="card"><p>We don't know an upcoming HYROX race at that address. <a href="/">See all upcoming HYROX races</a>.</p></div>`);
     return new Response(r.body, { status: 404, headers: r.headers });
   }
@@ -6140,9 +6377,10 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     ${supportersHtml}
     <div class="card race-links"><h2>Other upcoming HYROX races</h2>
       ${others.map((o) => `<a href="/hyrox/${o.slug}">HYROX ${escapeHtml(shortRaceName(o.title).city)}${o.event_date ? ` (${escapeHtml(o.event_date)})` : ""}</a>`).join("")}
+      ${countryLineHtml(ev, racesByCountry(events, past))}
       <p><a href="/">All ${events.length} upcoming HYROX races</a></p>
     </div>
-    ${pastRaceLinksHtml(past)}`,
+    ${raceFooterLinksHtml(events, past)}`,
     {},
     false,
     seo
@@ -6739,6 +6977,7 @@ async function handleSitemap(env: Env): Promise<Response> {
     { loc: `${env.SITE_URL}/`, changefreq: "hourly", priority: "1.0" },
     ...races.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "daily", priority: "0.8" })),
     ...past.map((r) => ({ loc: `${env.SITE_URL}/hyrox/${r.slug}`, changefreq: "weekly", priority: "0.6" })),
+    ...[...racesByCountry(races, past).keys()].map((c) => ({ loc: `${env.SITE_URL}/hyrox/${c}`, changefreq: "daily", priority: "0.7" })),
     ...GUIDE_SLUGS.map((s) => ({ loc: `${env.SITE_URL}/guides/${s}`, changefreq: "weekly", priority: "0.7" })),
     { loc: `${env.SITE_URL}/tickets-back`, changefreq: "daily", priority: "0.7" },
     { loc: `${env.SITE_URL}/about`, changefreq: "monthly", priority: "0.5" },
@@ -6763,7 +7002,7 @@ const INDEXNOW_KEY = "8f3c1e7a52b94d06a1c4e9f7b2d8356c";
 async function publicUrls(env: Env): Promise<string[]> {
   const races = await listDirectoryEvents(env);
   const past = await listPastRaces(env, races);
-  return [`${env.SITE_URL}/`, ...[...races, ...past].map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
+  return [`${env.SITE_URL}/`, ...[...races, ...past].map((r) => `${env.SITE_URL}/hyrox/${r.slug}`), ...[...racesByCountry(races, past).keys()].map((c) => `${env.SITE_URL}/hyrox/${c}`), ...GUIDE_SLUGS.map((s) => `${env.SITE_URL}/guides/${s}`), `${env.SITE_URL}/tickets-back`, `${env.SITE_URL}/about`, `${env.SITE_URL}/supporters`, `${env.SITE_URL}/partners`];
 }
 
 /** Submits all public URLs to IndexNow. Production only (the key file must be served on the same
