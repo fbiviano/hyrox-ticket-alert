@@ -5378,6 +5378,27 @@ function parseEventDate(html: string): string | null {
   return `${year}-${month}-${day.padStart(2, "0")}`;
 }
 
+/** Last race day and venue from an event page. The end date sits in "event_date_3" next to the
+ * start date ("- 13. Dec. 2026"), the address in "event_map_address", and many pages follow the
+ * address with a button named after the venue (checked on Nashville, Houston, London, Utrecht,
+ * 2026-11-10). Whatever a page doesn't have stays null - nothing is guessed. */
+function parseEventDetails(html: string): { endDate: string | null; venueName: string | null; venueAddress: string | null } {
+  const clean = (t: string, max: number) => {
+    const v = decodeHtmlEntities(t).replace(/\s+/g, " ").trim();
+    // "VENUE INFORMATION COMING SOON" (New York, 2026-11-10) and the like are not a venue.
+    return v && v.length <= max && !/coming soon|announced soon|\btb[acd]\b|to be (announced|confirmed|determined)/i.test(v) ? v : null;
+  };
+  let endDate: string | null = null;
+  const end = html.match(/event_date_3[^>]*>(?:\s*<span class="w-post-elm-before">[^<]*<\/span>)?\s*<span class="w-post-elm-value">([^<]+)</i);
+  const d = end ? end[1].match(/(\d{1,2})\.\s*([A-Za-z]+)\.?\s*(\d{4})/) : null;
+  if (d) {
+    const month = MONTH_ABBR[d[2].slice(0, 3).toLowerCase()];
+    if (month) endDate = `${d[3]}-${month}-${d[1].padStart(2, "0")}`;
+  }
+  const addr = html.match(/event_map_address[^>]*>(?:\s*<span class="w-post-elm-before">[^<]*<\/span>)?\s*<span class="w-post-elm-value">([^<]+)<\/span>\s*<\/div>(?:\s*<div class="w-btn-wrapper[^"]*">\s*<a [^>]*>\s*<span class="w-btn-label">([^<]+)<)?/i);
+  return { endDate, venueAddress: addr ? clean(addr[1], 200) : null, venueName: addr && addr[2] ? clean(addr[2], 80) : null };
+}
+
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -5512,11 +5533,15 @@ async function indexEvents(env: Env): Promise<number> {
       const title = decodeHtmlEntities(m[1]).replace(/\s*\|\s*HYROX\s*$/i, "").trim();
       if (!title) continue;
       const eventDate = parseEventDate(html);
+      const details = parseEventDetails(html);
       await env.DB.prepare(
-        `INSERT INTO event_directory (url, title, event_date, updated_at) VALUES (?, ?, ?, datetime('now'))
-         ON CONFLICT(url) DO UPDATE SET title = excluded.title, event_date = excluded.event_date, updated_at = excluded.updated_at`
+        `INSERT INTO event_directory (url, title, event_date, event_end_date, venue_name, venue_address, updated_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(url) DO UPDATE SET title = excluded.title, event_date = excluded.event_date, updated_at = excluded.updated_at,
+           event_end_date = excluded.event_end_date,
+           venue_name = CASE WHEN excluded.venue_address IS NOT NULL THEN excluded.venue_name ELSE venue_name END,
+           venue_address = COALESCE(excluded.venue_address, venue_address)`
       )
-        .bind(url, title, eventDate)
+        .bind(url, title, eventDate, eventDate && details.endDate && details.endDate >= eventDate ? details.endDate : null, details.venueName, details.venueAddress)
         .run();
       if (!existingMap.has(url) && eventDate && eventDate >= todayIso()) await moveNextEditionWatches(env, url, title, eventDate);
       indexed++;
@@ -5651,6 +5676,10 @@ interface DirectoryEvent {
   presale_timezone: string | null;
   presale_is_live: number;
   shop_url: string | null;
+  // From the official event page (parseEventDetails), filled by the nightly indexing; null until then.
+  event_end_date?: string | null;
+  venue_name?: string | null;
+  venue_address?: string | null;
   slug?: string; // its page: /hyrox/<slug>
 }
 
@@ -5658,7 +5687,7 @@ interface DirectoryEvent {
  * the homepage HTML, the race pages and the sitemap). */
 async function listDirectoryEvents(env: Env): Promise<DirectoryEvent[]> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url FROM event_directory
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url, event_end_date, venue_name, venue_address FROM event_directory
      WHERE event_date IS NULL OR event_date >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
@@ -5715,7 +5744,7 @@ function raceYearLabel(ev: DirectoryEvent): string {
  * month (keyword research 2026-11-09). Youngstars editions are skipped. */
 async function listPastRaces(env: Env, upcoming: DirectoryEvent[]): Promise<DirectoryEvent[]> {
   const { results } = await env.DB.prepare(
-    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url
+    `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url, event_end_date, venue_name, venue_address
      FROM event_directory WHERE event_date < ? AND title NOT LIKE '%Youngstars%' ORDER BY event_date DESC, title`
   )
     .bind(todayIso())
@@ -5878,6 +5907,17 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   const raceDay = ev.event_date
     ? new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${ev.event_date}T00:00:00Z`))
     : "date to be announced";
+  // Race days and venue as the official event page states them (2026-11-10: the competitor ranks
+  // for the plain city name with exactly this information; our pages only talked about tickets).
+  const endDate = ev.event_date && ev.event_end_date && ev.event_end_date > ev.event_date ? ev.event_end_date : null;
+  const lastDay = endDate
+    ? new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${endDate}T00:00:00Z`))
+    : "";
+  const raceDays = endDate ? `${raceDay} to ${lastDay}` : raceDay;
+  const venueLine =
+    ev.venue_name && ev.venue_address && !ev.venue_address.toLowerCase().includes(ev.venue_name.toLowerCase())
+      ? `${ev.venue_name}, ${ev.venue_address}`
+      : ev.venue_address || ev.venue_name || "";
   const saleWhen = ev.presale_live_at ? formatInTimezone(ev.presale_live_at, ev.presale_timezone) : "";
   const status = ev.on_sale
     ? { badge: "On sale now", cls: "on", short: "on sale now", sentence: `${name} tickets are on sale now on the official HYROX shop.` }
@@ -6012,6 +6052,19 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
     ],
   ];
+  // "When" and "where" lead the questions: they are what people who type just the city want to know.
+  if (venueLine) faq.unshift([`Where is HYROX ${city} ${year} held?`, `${name} ${year} is held at ${venueLine}, according to the official event page on hyrox.com.`]);
+  if (ev.event_date)
+    faq.unshift([
+      `When is HYROX ${city} ${year}?`,
+      `${name} ${year} takes place ${endDate ? `from ${raceDay} to ${lastDay}` : `on ${raceDay}`}${ev.venue_name ? ` at ${ev.venue_name}` : ""}. Which division races on which day is published on the official event page closer to the race.`,
+    ]);
+  const infoHtml =
+    ev.event_date && (endDate || venueLine)
+      ? `<div class="card"><h2>HYROX ${escapeHtml(city)} ${year}: dates and venue</h2>
+      <p>${escapeHtml(name)} ${year} takes place ${endDate ? `from <b>${escapeHtml(raceDay)}</b> to <b>${escapeHtml(lastDay)}</b>` : `on <b>${escapeHtml(raceDay)}</b>`}${venueLine ? ` at <b>${escapeHtml(venueLine)}</b>` : ""}. ${escapeHtml(status.sentence)}</p>
+      <p class="hint">Dates and venue as published on the official event page on ${official}. Start times per division are announced there closer to the race.</p></div>`
+      : "";
   const others = events.filter((e) => e !== ev).slice(0, 10);
   const supporters = await listSupporters(env, ev.slug);
   const supportersHtml = `<div class="card"><h2>Gyms supporting HYROX ${escapeHtml(city)} athletes</h2>${
@@ -6023,7 +6076,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   // "presale" added 2026-11-02: Search Console showed "<city> 2027 tickets presale" finding race pages.
   const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Presale, Release Date & Alerts" : "Presale, Release Date & Waitlist";
   const title = `HYROX ${cityShown} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
-  const description = `${status.sentence} Race day: ${raceDay}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
+  const description = `${status.sentence} Race day${endDate ? "s" : ""}: ${raceDays}${ev.venue_name ? ` at ${ev.venue_name}` : ""}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
   const seo: PageSeo = {
     description,
@@ -6035,8 +6088,9 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
         "@type": "SportsEvent",
         name: `${name} ${year}`.trim(),
         ...(ev.event_date ? { startDate: ev.event_date } : {}),
+        ...(endDate ? { endDate } : {}),
         eventStatus: "https://schema.org/EventScheduled",
-        location: { "@type": "Place", name: name, address: { "@type": "PostalAddress", addressLocality: city } },
+        location: { "@type": "Place", name: ev.venue_name || name, address: { "@type": "PostalAddress", addressLocality: city, ...(ev.venue_address ? { streetAddress: ev.venue_address } : {}) } },
         organizer: { "@type": "Organization", name: "HYROX", url: "https://hyrox.com" },
         url: ev.url,
         offers: {
@@ -6067,12 +6121,14 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
       <h2>Ticket status</h2>
       <ul class="status-list">
         <li><span>Status</span><span class="event-badge ${status.cls}">${status.badge}</span></li>
-        <li><span>Race day</span><span>${escapeHtml(raceDay)}</span></li>
+        <li><span>${endDate ? "Race days" : "Race day"}</span><span>${escapeHtml(raceDays)}</span></li>
+        ${venueLine ? `<li><span>Venue</span><span>${escapeHtml(venueLine)}</span></li>` : ""}
         ${saleWhen && !ev.on_sale ? `<li><span>Tickets go on sale</span><span>${escapeHtml(saleWhen)}</span></li>` : ""}
         <li><span>Official event page</span><span>${official}</span></li>
       </ul>
       ${cta}
     </div>
+    ${infoHtml}
     ${ticketsHtml}
     ${spectatorHtml}
     <div class="card faq"><h2>HYROX ${escapeHtml(city)} tickets: questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
@@ -6743,7 +6799,11 @@ async function submitIndexNow(env: Env, force = false): Promise<{ status: number
 // 3 days ago.
 // ---------------------------------------------------------------------------
 const SEO_SITE = "roxracealerts.com";
-const SEO_TRACKED = ["hyrox race alerts", "hyrox alerts", "hyrox ticket alerts", "roxracealerts", "hyrox tickets", "hyrox tickets sold out", "hyrox waitlist", "hyrox ticket release"];
+// Last six added 2026-11-10: city ticket searches where RoxRadar sits only at place 7-10 (OpenSEO lookup).
+const SEO_TRACKED = [
+  "hyrox race alerts", "hyrox alerts", "hyrox ticket alerts", "roxracealerts", "hyrox tickets", "hyrox tickets sold out", "hyrox waitlist", "hyrox ticket release",
+  "hyrox nashville tickets", "hyrox nashville 2026 tickets", "hyrox houston 2026 tickets", "hyrox dallas 2026 tickets", "hyrox anaheim 2026 tickets", "hyrox nyc tickets",
+];
 
 type GscRow = { keys?: string[]; clicks: number; impressions: number; position: number };
 const isoDaysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10);

@@ -542,3 +542,9 @@ CREATE TABLE IF NOT EXISTS ticket_returns (
   returned_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_ticket_returns_at ON ticket_returns(returned_at);
+
+-- Race days and venue on the race pages (2026-11-10): read from the official event page by
+-- parseEventDetails during the nightly indexing. Applied by hand to both databases:
+-- ALTER TABLE event_directory ADD COLUMN event_end_date TEXT;
+-- ALTER TABLE event_directory ADD COLUMN venue_name TEXT;
+-- ALTER TABLE event_directory ADD COLUMN venue_address TEXT;
