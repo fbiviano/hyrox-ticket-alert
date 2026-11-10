@@ -6440,18 +6440,21 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
       .bind(todayIso())
       .all<any>();
     const soldOutRaces = (spec || []).filter((r: any) => Number(r.sold) > 0);
-    const description = "Coming to watch someone race HYROX? At most races spectators need a ticket, and at big events they sell out. Who needs one, what they cost, kids, and how to get alerted when sold-out spectator tickets come back.";
+    const description = "Do HYROX spectator tickets sell out? Yes, at the big races. Who needs one, what they cost, kids, buying at the door, and how to get alerted when sold-out spectator tickets come back.";
+    const sellOutAnswer = `Yes, at the biggest races. ${soldOutRaces.length ? `Right now spectator tickets are sold out at ${soldOutRaces.slice(0, 3).map((r: any) => shortRaceName(r.event_name).name).join(", ")}${soldOutRaces.length > 3 ? " and more" : ""}.` : "Venues have limited space, and the busiest days (usually Saturday) go first."} Like athlete tickets, they come back when plans change, so a free alert on the day you need is worth setting.`;
     const faq: [string, string][] = [
+      ["Do HYROX spectator tickets sell out?", sellOutAnswer],
+      ["Can you buy HYROX spectator tickets at the door?", "Don't count on it. Spectator tickets are sold online in the official HYROX shop, per race day. Where an event sells them on site at all, it is only while that day isn't sold out - and the popular days are. Buy online before you travel."],
+      ["Will HYROX release more spectator tickets?", "Sometimes. Extra spectator tickets are occasionally added closer to the race, and tickets that people give back reappear in the official shop. Neither is announced ahead of time, which is why an alert on the exact day helps."],
       ["Do I need a ticket to watch HYROX?", "At most HYROX races, yes: spectators need a spectator ticket to enter the venue, usually sold per race day in the same official shop as the athlete tickets. A few smaller events let supporters in for free; the event page on hyrox.com says which."],
       ["How much do HYROX spectator tickets cost?", "Typically between about 10 and 25 euros, dollars or pounds per day depending on the city, and often free for young children. Prices are set per event and shown in the official shop."],
-      ["Do HYROX spectator tickets sell out?", `Yes, at the biggest races. ${soldOutRaces.length ? `Right now spectator tickets are sold out at ${soldOutRaces.slice(0, 3).map((r: any) => shortRaceName(r.event_name).name).join(", ")}${soldOutRaces.length > 3 ? " and more" : ""}.` : "Venues have limited space, and the busiest days (usually Saturday) go first."} Like athlete tickets, they come back when plans change, so a free alert on the day you need is worth setting.`],
       ["Can kids watch HYROX for free?", "Often yes: many events let children under a certain age (commonly under 12 or under 14) in free with a ticketed adult. Check the event page, as the age limit differs by region."],
       ["Can I watch without a spectator ticket?", "Usually not inside the venue. Some events have a free spectator zone or a fan area outside; the finish line and the stations are normally only for ticket holders."],
     ];
-    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">For partners, parents and friends who come to cheer: how spectator tickets work and how to get one when they're gone.</p></div>
+    const body = `<div class="hero"><h1>${escapeHtml(title)}</h1><p class="hero-sub">Yes, at the big races they sell out, Saturdays first. For partners, parents and friends who come to cheer: how spectator tickets work and how to get one when they're gone.</p></div>
     <div class="card">
       <h2>Who needs a spectator ticket</h2>
-      <p>Everyone who comes to watch and is not racing. HYROX races happen indoors in arenas and exhibition halls with limited space, so most events sell a <b>spectator ticket per race day</b> (Friday, Saturday, Sunday...). Athletes don't need one for the day they race; a supporter does.</p>
+      <p>Everyone who comes to watch and is not racing - some call them supporter or visitor tickets. HYROX races happen indoors in arenas and exhibition halls with limited space, so most events sell a <b>spectator ticket per race day</b> (Friday, Saturday, Sunday...). Athletes don't need one for the day they race; a supporter does.</p>
       <h2>Why they sell out</h2>
       <p>Each athlete brings on average one or two supporters, and Saturday is the busiest day everywhere. At the biggest races the spectator allocation for the popular days goes within days of the athlete tickets. Like every other ticket, spectator tickets <b>come back</b> when people's plans change, usually without any announcement.</p>
       <h2>How to get one when they're sold out</h2>
@@ -6468,6 +6471,13 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
         : ""
     }
     <div class="card faq"><h2>Questions</h2>${faq.map(([q, a]) => faqItem(q, a)).join("")}</div>
+    <div class="card race-links"><h2>Spectator tickets by race</h2>
+      <p class="hint">Races with tickets on sale now. Each page shows whether spectator tickets are available and lets you set an alert.</p>
+      ${races
+        .filter((e) => e.on_sale && !/youngstars/i.test(e.title))
+        .map((e) => `<a href="/hyrox/${e.slug}">HYROX ${escapeHtml(shortRaceName(e.title).city)} spectator tickets</a>`)
+        .join("")}
+    </div>
     ${ARTICLE_CTA}${otherGuides(slug)}`;
     return page(`${title} | RoxRaceAlerts`, `${nav}${body}`, {}, false, articleSeo(env, `/guides/${slug}`, title, description, faq));
   }
@@ -6480,7 +6490,9 @@ const GUIDE_TITLES: Record<(typeof GUIDE_SLUGS)[number], string> = {
   "sold-out-hyrox-tickets": "How to get HYROX tickets after they sell out: waitlist, resale & alerts",
   "hyrox-ticket-sale-dates": `HYROX ticket release dates 20${SEASON_LABEL}: when do tickets go on sale?`,
   "hyrox-ticket-types": "HYROX ticket types explained: Open, Pro, Doubles, Relay",
-  "hyrox-spectator-tickets": "HYROX spectator tickets: do you need one, and what if they're sold out?",
+  // 2026-11-10: "do you need one" -> "do they sell out": the page's most-shown search is "do hyrox
+  // spectator tickets sell out" (place 7, no clicks). "HYROX spectator tickets" and "sold out" stay.
+  "hyrox-spectator-tickets": "HYROX spectator tickets: do they sell out, and what if they're sold out?",
 };
 
 // ---------------------------------------------------------------------------
