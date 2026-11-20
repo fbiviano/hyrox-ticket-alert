@@ -1148,12 +1148,12 @@ interface ActivePast {
   past: string;
 }
 
-function splitByEventDate<T extends { event_date?: string | null }>(rows: T[]): { active: T[]; past: T[] } {
+function splitByEventDate<T extends { event_date?: string | null; still_on?: number | null }>(rows: T[]): { active: T[]; past: T[] } {
   const today = todayIso();
   const active: T[] = [];
   const past: T[] = [];
   for (const r of rows) {
-    (r.event_date && r.event_date < today ? past : active).push(r);
+    (r.event_date && r.event_date < today && !r.still_on ? past : active).push(r);
   }
   return { active, past };
 }
@@ -1187,7 +1187,8 @@ async function renderTicketRows(
   const { results } = await env.DB.prepare(
     `SELECT id, event_name, ticket_name, event_date, purchased_at,
        (SELECT last_status FROM community_tickets ct WHERE ct.event_name = subscriptions.event_name AND ct.ticket_name = subscriptions.ticket_name LIMIT 1) AS last_status,
-       ${hasTicketPrioritySql("subscriptions.subscriber_id", "subscriptions.event_name")} AS has_priority
+       ${hasTicketPrioritySql("subscriptions.subscriber_id", "subscriptions.event_name")} AS has_priority,
+       ${raceRunningSql("subscriptions.shop_url", "subscriptions.event_name")} AS still_on
      FROM subscriptions WHERE subscriber_id = ? ORDER BY event_date IS NULL, event_date, event_name, ticket_name`
   )
     .bind(subscriberId)
@@ -4114,7 +4115,7 @@ function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[
 async function freeWatchedItems(env: Env, subscriberId: number): Promise<string[]> {
   const rows = await env.DB.prepare(
     `SELECT x.event_name AS name, x.ticket_name AS ticket FROM subscriptions x
-       WHERE x.subscriber_id = ?1 AND x.purchased_at IS NULL AND (x.event_date IS NULL OR x.event_date >= date('now'))
+       WHERE x.subscriber_id = ?1 AND x.purchased_at IS NULL AND (x.event_date IS NULL OR x.event_date >= date('now') OR ${raceRunningSql("x.shop_url", "x.event_name")})
          AND NOT ${hasTicketPrioritySql("?1", "x.event_name")}
      UNION ALL
      SELECT sw.event_title AS name, NULL AS ticket FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
@@ -4756,7 +4757,7 @@ async function checkCommunityTickets(env: Env): Promise<void> {
   // alert either.
   const { results } = await env.DB.prepare(
     `SELECT ct.* FROM community_tickets ct
-     WHERE (ct.event_date IS NULL OR ct.event_date >= ?)
+     WHERE (ct.event_date IS NULL OR ct.event_date >= ? OR ${raceRunningSql("ct.shop_url")})
        AND EXISTS (
          SELECT 1 FROM subscriptions sub JOIN subscribers s ON s.id = sub.subscriber_id
          WHERE s.verified = 1 AND sub.event_name = ct.event_name AND sub.ticket_name = ct.ticket_name AND sub.purchased_at IS NULL
@@ -5726,6 +5727,23 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// A race is over the day after its LAST race day, not its first. HYROX weekends run up to twelve
+// days; until 2026-11-20 everything went by the first day, so on day two of five the Dallas page
+// turned into "2027 not announced yet" and its ticket checks stopped - exactly when searches for
+// spectator tickets peaked (Search Console: ~430 views, 0 clicks).
+/** SQL, event_directory rows: the last race day (the first one when no end date is known). */
+const RACE_LAST_DAY_SQL = "MAX(event_date, COALESCE(event_end_date, event_date))";
+
+/** SQL, ticket and subscription rows: the row's race has started and is not over yet. These rows
+ * carry only the first race day and the shop's event name, which differs from the directory title
+ * ("BYD | HYROX Melbourne | Season 26/27" vs "BYD HYROX Melbourne"), so the race is found by its
+ * shop address; `nameCol` covers rows without one (subscriptions made from a sale watch). */
+function raceRunningSql(shopCol: string, nameCol?: string): string {
+  const base = "CASE WHEN instr(rd.shop_url, '?') > 0 THEN substr(rd.shop_url, 1, instr(rd.shop_url, '?') - 1) ELSE rd.shop_url END";
+  const byShop = `(rd.shop_url IS NOT NULL AND substr(${shopCol}, 1, length(${base})) = ${base})`;
+  return `EXISTS (SELECT 1 FROM event_directory rd WHERE rd.event_date < date('now') AND rd.event_end_date >= date('now') AND (${byShop}${nameCol ? ` OR rd.title = ${nameCol}` : ""}))`;
+}
+
 // Same fallback problem as the homepage's client-side formatLocal (see
 // RESOLVE_SCRIPT above, kept in sync with this table) - Intl's 'short'
 // timeZoneName silently degrades to a bare "GMT-3"/"GMT+8" offset for
@@ -6006,12 +6024,12 @@ interface DirectoryEvent {
   slug?: string; // its page: /hyrox/<slug>
 }
 
-/** Upcoming races in the directory, soonest first, each with its page slug (the /events feed,
+/** Upcoming and running races in the directory, soonest first, each with its page slug (the /events feed,
  * the homepage HTML, the race pages and the sitemap). */
 async function listDirectoryEvents(env: Env): Promise<DirectoryEvent[]> {
   const { results } = await env.DB.prepare(
     `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url, event_end_date, venue_name, venue_address FROM event_directory
-     WHERE event_date IS NULL OR event_date >= ?
+     WHERE event_date IS NULL OR ${RACE_LAST_DAY_SQL} >= ?
      ORDER BY event_date IS NULL, event_date, title`
   )
     .bind(todayIso())
@@ -6077,7 +6095,7 @@ function seasonStartYear(): number {
 async function listPastRaces(env: Env, upcoming: DirectoryEvent[]): Promise<DirectoryEvent[]> {
   const { results } = await env.DB.prepare(
     `SELECT url, title, event_date, on_sale, on_sale_since, presale_note, presale_live_at, presale_timezone, presale_is_live, shop_url, event_end_date, venue_name, venue_address
-     FROM event_directory WHERE event_date < ? AND title NOT LIKE '%Youngstars%' ORDER BY event_date DESC, title`
+     FROM event_directory WHERE ${RACE_LAST_DAY_SQL} < ? AND title NOT LIKE '%Youngstars%' ORDER BY event_date DESC, title`
   )
     .bind(todayIso())
     .all<DirectoryEvent>();
@@ -6499,9 +6517,9 @@ async function handleSchedulePage(req: Request, env: Env): Promise<Response> {
   const start = seasonStartYear();
   const years = `${start}/${start + 1}`;
   const today = todayIso();
-  // Races of this season that are over (or running): the directory keeps them.
+  // Races of this season that are over: the directory keeps them.
   const { results: doneRows } = await env.DB.prepare(
-    "SELECT url, title, event_date, event_end_date, venue_name FROM event_directory WHERE event_date < ?1 AND event_date >= ?2 AND title NOT LIKE '%Youngstars%' ORDER BY event_date, title"
+    `SELECT url, title, event_date, event_end_date, venue_name FROM event_directory WHERE ${RACE_LAST_DAY_SQL} < ?1 AND event_date >= ?2 AND title NOT LIKE '%Youngstars%' ORDER BY event_date, title`
   )
     .bind(today, `${start}-07-01`)
     .all<DirectoryEvent>();
@@ -6554,13 +6572,13 @@ async function handleSchedulePage(req: Request, env: Env): Promise<Response> {
   const monthsHtml = [...months]
     .map(
       ([k, list]) => `<div class="card"><h2>${k ? `HYROX races in ${escapeHtml(fmt(`${k}-01`, { month: "long", year: "numeric" }))}` : "Date to be announced"}</h2>
-      <ul class="status-list">${list.map((e) => row(e, e.slug, status(e).badge, status(e).cls)).join("")}</ul></div>`
+      <ul class="status-list">${list.map((e) => (e.event_date && e.event_date <= today ? row(e, e.slug, "On now", "on") : row(e, e.slug, status(e).badge, status(e).cls))).join("")}</ul></div>`
     )
     .join("");
   const doneHtml = done.length
     ? `<div class="card"><h2>Already raced in ${years}</h2>
       <ul class="status-list">${done
-        .map((e) => (e.event_end_date && e.event_end_date >= today ? row(e, citySlug(e.title), "On now", "on") : row(e, citySlug(e.title), "Finished", "off")))
+        .map((e) => row(e, citySlug(e.title), "Finished", "off"))
         .join("")}</ul></div>`
     : "";
 
@@ -6912,7 +6930,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   const shopPath = ev.shop_url ? ev.shop_url.split("?")[0] : "";
   const { results: trackedRows } = await env.DB.prepare(
     // Prefix match written with substr: D1 rejects LIKE patterns as long as a shop URL.
-    "SELECT ticket_name, last_status FROM community_tickets WHERE (event_date IS NULL OR event_date >= ?1) AND (instr(event_name, ?2) > 0 OR substr(shop_url, 1, length(?3)) = ?3) ORDER BY ticket_name"
+    `SELECT ticket_name, last_status FROM community_tickets WHERE (event_date IS NULL OR event_date >= ?1 OR ${raceRunningSql("shop_url")}) AND (instr(event_name, ?2) > 0 OR substr(shop_url, 1, length(?3)) = ?3) ORDER BY ticket_name`
   )
     .bind(todayIso(), `HYROX ${city}`, shopPath || "\u0000")
     .all<any>();
@@ -7217,7 +7235,7 @@ async function handleTicketsBackPage(req: Request, env: Env): Promise<Response> 
      FROM ticket_returns r WHERE returned_at >= datetime('now', '-30 days') GROUP BY event_name ORDER BY n DESC, last_at DESC LIMIT 30`
   ).all<any>();
   const { results: soldOut } = await env.DB.prepare(
-    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ?)
+    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ? OR ${raceRunningSql("shop_url")})
      GROUP BY event_name ORDER BY n DESC LIMIT 20`
   )
     .bind(todayIso())
@@ -7462,7 +7480,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
     const { results: cats } = await env.DB.prepare(
       `SELECT CASE WHEN upper(ticket_name) LIKE '%RELAY%' THEN 'Relay' WHEN upper(ticket_name) LIKE '%DOUBLES%' THEN 'Doubles' WHEN upper(ticket_name) LIKE '%PRO%' THEN 'Pro' WHEN upper(ticket_name) LIKE '%ADAPTIVE%' THEN 'Adaptive' WHEN upper(ticket_name) LIKE '%SPECTATOR%' THEN 'Spectator' ELSE 'Open (Singles)' END AS cat,
               SUM(last_status = 'sold_out') AS sold, COUNT(*) AS n
-       FROM community_tickets WHERE event_date IS NULL OR event_date >= ? GROUP BY cat ORDER BY sold DESC`
+       FROM community_tickets WHERE event_date IS NULL OR event_date >= ? OR ${raceRunningSql("shop_url")} GROUP BY cat ORDER BY sold DESC`
     )
       .bind(todayIso())
       .all<any>();
@@ -7503,7 +7521,7 @@ async function handleGuidePage(req: Request, env: Env, slug: string): Promise<Re
     const title = GUIDE_TITLES[slug];
     const { results: spec } = await env.DB.prepare(
       `SELECT event_name, SUM(last_status = 'sold_out') AS sold, COUNT(*) AS n FROM community_tickets
-       WHERE upper(ticket_name) LIKE '%SPECTATOR%' AND (event_date IS NULL OR event_date >= ?) GROUP BY event_name ORDER BY sold DESC, event_name LIMIT 15`
+       WHERE upper(ticket_name) LIKE '%SPECTATOR%' AND (event_date IS NULL OR event_date >= ? OR ${raceRunningSql("shop_url")}) GROUP BY event_name ORDER BY sold DESC, event_name LIMIT 15`
     )
       .bind(todayIso())
       .all<any>();
@@ -9186,7 +9204,7 @@ async function weeklyPost(env: Env, today: string): Promise<{ slides: Slide[]; c
   });
   const races = await racesBetween(env, today, weekEnd);
   const { results: hot } = await env.DB.prepare(
-    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ?)
+    `SELECT event_name, COUNT(*) AS n FROM community_tickets WHERE last_status = 'sold_out' AND (event_date IS NULL OR event_date >= ? OR ${raceRunningSql("shop_url")})
      GROUP BY event_name ORDER BY n DESC LIMIT 6`
   )
     .bind(today)
