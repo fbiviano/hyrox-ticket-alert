@@ -21,11 +21,11 @@ database_id = "8b3ea91c-590a-4bb7-9ebd-24f732c85afb"
 SEND_FROM = "RoxRaceAlerts <alerts@alerts.roxracealerts.com>"
 SITE_URL = "https://roxracealerts.com"
 ADMIN_EMAIL = "francescobiviano609@gmail.com"
-# WhatsApp Cloud API sending number. Currently Meta's free TEST number; swap for the real
-# number's ID when one is registered. Not a secret - useless without WHATSAPP_TOKEN.
-WHATSAPP_PHONE_NUMBER_ID = "1414773445051539"
-# The number subscribers message to link WhatsApp (digits only). Meta's test number for now.
-WHATSAPP_PUBLIC_NUMBER = "15556594991"
+# WhatsApp Cloud API sending number: the own yallo number +41 76 689 22 03 (WABA 2205251853738334).
+# Not a secret - useless without WHATSAPP_TOKEN.
+WHATSAPP_PHONE_NUMBER_ID = "1457141434154754"
+# The number subscribers message to link WhatsApp (digits only).
+WHATSAPP_PUBLIC_NUMBER = "41766892203"
 # The Meta app id (not a secret) - used to register the webhook through the API.
 WHATSAPP_APP_ID = "1854886458861233"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
