@@ -4311,11 +4311,18 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   }
   if (seasonActive) {
     saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
-  } else if (priorityOpen(env, subscriber) && (rows.activeCount > 0 || saleRows.live || saleRows.soon || saleRows.waiting)) {
-    // Season offer only while they watch something - with an empty list it's a big button for nothing.
-    saleSections.push(
-      `<p class="consent">&#9889; ${priorityExplainer(env, true)}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${seasonButtonLabel(await seasonPriceFor(env, subscriber.id))}`)}`
-    );
+  }
+  // The season offer lives in a small sidebar box (always in the same place, also with an empty list)
+  // instead of a big button under the watch list. Per-race $3 buttons stay on the rows.
+  let seasonCard = "";
+  if (!seasonActive && priorityOpen(env, subscriber)) {
+    const seasonCents = await seasonPriceFor(env, subscriber.id);
+    seasonCard = `<div class="card">
+      <h2>&#9889; Season Priority</h2>
+      <p>Alerts before everyone else for <b>every race you watch</b> this season, WhatsApp included. <b>${money(seasonCents)}</b> one-off, valid until ${SEASON_END_LABEL}.</p>
+      ${priorityForm(subscriber.unsubscribe_token, "season", seasonCents < SEASON_PRICE_CENTS ? `Upgrade - ${money(seasonCents)}` : `Get Season Priority - ${money(seasonCents)}`)}
+      <p class="consent">No subscription. Priority speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a>${escapeHtml(priorityPreviewNote(env))}</p>
+    </div>`;
   }
   const verifyBanner = subscriber.verified
     ? ""
@@ -4345,6 +4352,7 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
       </div>
       <div class="sidebar side-compact">
         ${renderWhatsAppCard(env, subscriber)}
+        ${seasonCard}
         ${await renderInviteCard(env, subscriber)}
         ${renderTelegramCard(env, subscriber)}
       </div>
