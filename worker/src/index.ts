@@ -1178,7 +1178,7 @@ async function renderTicketRows(
   env: Env,
   priorityOn = false,
   seasonActive = false
-): Promise<ActivePast & { purchased: string }> {
+): Promise<ActivePast & { purchased: string; activeCount: number }> {
   const { results } = await env.DB.prepare(
     `SELECT id, event_name, ticket_name, event_date, purchased_at,
        (SELECT last_status FROM community_tickets ct WHERE ct.event_name = subscriptions.event_name AND ct.ticket_name = subscriptions.ticket_name LIMIT 1) AS last_status,
@@ -1230,6 +1230,7 @@ async function renderTicketRows(
   };
   return {
     active: render(active, "No active subscriptions yet.", true),
+    activeCount: active.length,
     past: render(past),
     purchased: render(purchasedRows),
   };
@@ -4310,7 +4311,8 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   }
   if (seasonActive) {
     saleSections.push(`<p class="consent">&#9889; <b>Season Priority active</b> until ${SEASON_END_LABEL}: you're notified before everyone else for every race you watch.</p>`);
-  } else if (priorityOpen(env, subscriber)) {
+  } else if (priorityOpen(env, subscriber) && (rows.activeCount > 0 || saleRows.live || saleRows.soon || saleRows.waiting)) {
+    // Season offer only while they watch something - with an empty list it's a big button for nothing.
     saleSections.push(
       `<p class="consent">&#9889; ${priorityExplainer(env, true)}</p>${priorityForm(subscriber.unsubscribe_token, "season", `&#9889; ${seasonButtonLabel(await seasonPriceFor(env, subscriber.id))}`)}`
     );
@@ -4342,8 +4344,8 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
         </div>
       </div>
       <div class="sidebar side-compact">
-        ${await renderInviteCard(env, subscriber)}
         ${renderWhatsAppCard(env, subscriber)}
+        ${await renderInviteCard(env, subscriber)}
         ${renderTelegramCard(env, subscriber)}
       </div>
     </div>`,
