@@ -548,3 +548,14 @@ CREATE INDEX IF NOT EXISTS idx_ticket_returns_at ON ticket_returns(returned_at);
 -- ALTER TABLE event_directory ADD COLUMN event_end_date TEXT;
 -- ALTER TABLE event_directory ADD COLUMN venue_name TEXT;
 -- ALTER TABLE event_directory ADD COLUMN venue_address TEXT;
+
+-- Free plan = 1 race (FREE_RACE_LIMIT). A watch added over the limit is parked here and becomes a
+-- real subscriptions/sale_watchers row when its Priority payment completes (Stripe metadata pending_id).
+-- kind 'ticket': payload = JSON array of encoded tickets; kind 'race': {event_url, event_title}.
+CREATE TABLE IF NOT EXISTS pending_watches (
+  id TEXT PRIMARY KEY,
+  subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
