@@ -1,6 +1,7 @@
 import { resolveEvent, getEventData, ticketStatus, isFetchableUrl, HEADERS, FetchBlocked } from "./resolve";
 import { renderCardJpeg, renderSlideJpeg, type CardInput, type Slide } from "./igcard";
 import PostalMime from "postal-mime";
+import qrcode from "qrcode-generator";
 
 const SITEMAP_URL = "https://hyrox.com/event-sitemap.xml";
 const INDEX_BATCH_SIZE = 30;
@@ -2050,12 +2051,22 @@ function renderWhatsAppCard(env: Env, s: any): string {
   const expires = s.whatsapp_code_expires ? Date.parse(String(s.whatsapp_code_expires).replace(" ", "T") + "Z") : 0;
   if (s.whatsapp_code && expires > Date.now()) {
     const code = escapeHtml(s.whatsapp_code);
-    const link = `https://wa.me/${number}?text=${encodeURIComponent(`START ${s.whatsapp_code}`)}`;
-    return `<div class="card">
+    const link = whatsappStartLink(env, s.whatsapp_code);
+    // On a computer without WhatsApp the button leads nowhere useful, so computers also get a QR code:
+    // scanning it with the phone camera opens WhatsApp there with the message ready. Hidden on phones.
+    const qr = qrcode(0, "M");
+    qr.addData(link);
+    qr.make();
+    return `<div class="card" id="whatsapp">
       <h2>WhatsApp alerts</h2>
       <p>Almost done. Send this message to our WhatsApp number <b>+${escapeHtml(number)}</b>:</p>
       <p style="font-size:1.4rem;letter-spacing:0.05em"><b>START ${code}</b></p>
       <p><a href="${escapeHtml(link)}" target="_blank" rel="noopener"><button type="button">Open WhatsApp with the message ready</button></a></p>
+      <style>@media (max-width: 800px), (pointer: coarse) { .wa-qr { display: none } }</style>
+      <div class="wa-qr">
+        <p><b>On a computer?</b> Scan this with your phone camera - WhatsApp opens with the message ready, just tap Send.</p>
+        <div style="width:180px;max-width:100%;background:#fff;padding:6px;border-radius:8px">${qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true })}</div>
+      </div>
       <p><small>The code works for 30 minutes. Once WhatsApp confirms, <a href="/my-alerts">refresh this page</a>.</small></p>
     </div>`;
   }
@@ -2122,10 +2133,21 @@ async function handleWhatsAppLink(req: Request, env: Env): Promise<Response> {
   if (!s || !whatsappLinkingOpen(env, s)) {
     return page("Not available", `<div class="card"><p>WhatsApp alerts aren't available for this account yet. <a href="/my-alerts">Back to my alerts</a></p></div>`);
   }
+  const code = newWhatsAppCode();
   await env.DB.prepare("UPDATE subscribers SET whatsapp_code = ?, whatsapp_code_expires = datetime('now', '+30 minutes') WHERE id = ?")
-    .bind(newWhatsAppCode(), s.id)
+    .bind(code, s.id)
     .run();
-  return new Response(null, { status: 303, headers: { Location: `${env.SITE_URL}/my-alerts`, "Set-Cookie": sessionCookieHeader(token) } });
+  // Phones: one tap - straight into WhatsApp with "START <code>" ready, they only press Send.
+  // Computers: back to My alerts, which shows the code, the button and a QR code to scan.
+  const isPhone = /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers.get("User-Agent") || "");
+  const location = isPhone ? whatsappStartLink(env, code) : `${env.SITE_URL}/my-alerts#whatsapp`;
+  return new Response(null, { status: 303, headers: { Location: location, "Set-Cookie": sessionCookieHeader(token) } });
+}
+
+/** wa.me link that opens a chat with our number and "START <code>" already typed. */
+function whatsappStartLink(env: Env, code: string): string {
+  const number = String(env.WHATSAPP_PUBLIC_NUMBER || "").replace(/\D/g, "");
+  return `https://wa.me/${number}?text=${encodeURIComponent(`START ${code}`)}`;
 }
 
 async function handleWhatsAppUnlink(req: Request, env: Env): Promise<Response> {
@@ -4272,7 +4294,13 @@ async function handleMyAlerts(req: Request, env: Env): Promise<Response> {
   const counts = await getWatchCounts(subscriber.id, env);
   const paidBanner =
     url.searchParams.get("priority") === "success"
-      ? `<div class="verify-banner" style="background:#e6f4ea;border-color:#bfe0c9;color:#1e7e34"><p><b>Payment received.</b> Priority shows on your alerts below within a few seconds - refresh if it isn't there yet.</p></div>`
+      ? `<div class="verify-banner" style="background:#e6f4ea;border-color:#bfe0c9;color:#1e7e34"><p><b>Payment received.</b> Priority shows on your alerts below within a few seconds - refresh if it isn't there yet.</p>${
+          // Right after paying is when people want WhatsApp: offer it here, one tap, instead of in the sidebar.
+          !subscriber.whatsapp_phone && whatsappLinkingOpen(env, subscriber)
+            ? `<p style="margin-top:10px"><b>Get your alerts on WhatsApp too:</b> tap the button, then press Send in WhatsApp.</p>
+               <form method="POST" action="/whatsapp/link"><input type="hidden" name="token" value="${escapeHtml(subscriber.unsubscribe_token)}"><button type="submit">Get alerts on WhatsApp</button></form>`
+            : ""
+        }</div>`
       : "";
   const saleSections: string[] = [];
   if (saleRows.live) saleSections.push(`<h2>Live now</h2>${saleRows.live}`);

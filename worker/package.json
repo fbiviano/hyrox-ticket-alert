@@ -14,6 +14,7 @@
   "dependencies": {
     "@resvg/resvg-wasm": "^2.6.2",
     "jpeg-js": "^0.4.4",
-    "postal-mime": "^3.0.0"
+    "postal-mime": "^3.0.0",
+    "qrcode-generator": "^1.4.4"
   }
 }
