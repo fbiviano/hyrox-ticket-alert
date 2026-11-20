@@ -48,6 +48,7 @@ export interface Env {
   WHATSAPP_APP_SECRET?: string; // verifies Meta's webhook signatures
   WHATSAPP_APP_ID?: string; // the Meta app's id (not secret)
   WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
+  WA_INVITE_KEY?: string; // temporary secret for the one-off /admin/whatsapp/invite-waitlist email
   GSC_KEY?: string; // Google service-account key (JSON) with read access to Search Console - SEO report
   BING_API_KEY?: string; // Bing Webmaster Tools API key - SEO report
 }
@@ -9435,6 +9436,58 @@ const worker = {
         await checkCommunityTickets(env);
         await sendDueFreeTicketAlerts(env);
         return jsonResponse({ ok: true });
+      }
+      if (url.pathname === "/admin/whatsapp/invite-waitlist" && req.method === "POST") {
+        // One-off launch email (text approved by the admin 2026-11-20) to everyone who left a WhatsApp
+        // number before launch: open My alerts and send START. Sends at most once per person (email_log).
+        if (!env.WA_INVITE_KEY || (req.headers.get("Authorization") || "") !== `Bearer ${env.WA_INVITE_KEY}`) return new Response("Unauthorized", { status: 401 });
+        const subject = "Your HYROX alerts are now on WhatsApp";
+        const rows = await env.DB.prepare(
+          `SELECT s.email, s.unsubscribe_token FROM subscribers s
+           WHERE s.verified = 1 AND s.whatsapp_waitlist_phone IS NOT NULL AND s.whatsapp_phone IS NULL
+             AND NOT EXISTS (SELECT 1 FROM email_log e WHERE e.to_address = s.email AND e.subject = ? AND e.ok = 1)`
+        ).bind(subject).all<any>();
+        const number = "+" + String(env.WHATSAPP_PUBLIC_NUMBER || "").replace(/\D/g, "").replace(/^41(\d\d)(\d{3})(\d\d)(\d\d)$/, "41 $1 $2 $3 $4");
+        let sent = 0;
+        const failed: string[] = [];
+        for (const s of rows.results || []) {
+          const myAlerts = `${env.SITE_URL}/my-alerts?token=${s.unsubscribe_token}`;
+          const unsub = `${env.SITE_URL}/unsubscribe?token=${s.unsubscribe_token}`;
+          const text = `Hi,
+
+You asked for RoxRaceAlerts on WhatsApp - it's live now.
+
+To switch it on (takes 10 seconds):
+1. Open My alerts: ${myAlerts}
+2. Tap "Get alerts on WhatsApp".
+3. Send the START message that opens in WhatsApp.
+
+From then on you get every alert on WhatsApp as well as by email, from our number ${number}. Reply STOP on WhatsApp any time to turn it off.
+
+RoxRaceAlerts
+
+Unsubscribe: ${unsub}`;
+          const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;line-height:1.55;color:#222;max-width:560px">
+<p>Hi,</p>
+<p>You asked for RoxRaceAlerts on WhatsApp &ndash; it's live now.</p>
+<p>To switch it on (takes 10 seconds):</p>
+<ol style="padding-left:20px">
+<li>Open My alerts: <a href="${myAlerts}">roxracealerts.com/my-alerts</a></li>
+<li>Tap <b>"Get alerts on WhatsApp"</b>.</li>
+<li>Send the START message that opens in WhatsApp.</li>
+</ol>
+<p>From then on you get every alert on WhatsApp as well as by email, from our number <b>${escapeHtml(number)}</b>. Reply <b>STOP</b> on WhatsApp any time to turn it off.</p>
+<p>RoxRaceAlerts</p>
+<p style="margin-top:28px;font-size:12px;color:#888"><a href="${unsub}" style="color:#888">Unsubscribe</a></p>
+</div>`;
+          try {
+            await sendEmail(env, s.email, subject, html, text, { replyTo: SUPPORT_EMAIL });
+            sent++;
+          } catch {
+            failed.push(String(s.email));
+          }
+        }
+        return jsonResponse({ candidates: rows.results?.length || 0, sent, failed: failed.length });
       }
       if (url.pathname === "/admin/whatsapp-test" && req.method === "POST") {
         // Sends one sample alert to ADMIN_WHATSAPP so the whole path (token, number,
