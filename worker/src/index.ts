@@ -2715,7 +2715,7 @@ function handleTermsPage(env: Env): Response {
 
 /** Privacy policy, incl. how people opt in to each alert channel (Meta asks for this before
  * allowing a WhatsApp Business number). */
-function handlePrivacyPage(): Response {
+function handlePrivacyPage(env: Env): Response {
   return page(
     "Privacy",
     `<div class="card">
@@ -2725,7 +2725,7 @@ function handlePrivacyPage(): Response {
       <ul>
         <li><b>Email:</b> you enter your email and pick the races or tickets to watch, then confirm with the link we email you. Only then do alerts start.</li>
         <li><b>Telegram:</b> only if you connect it yourself on My alerts and press Start in our bot. Send /stop to turn it off.</li>
-        <li><b>WhatsApp:</b> only if you add your number (at checkout or on My alerts) and reply START to our first message. Reply STOP any time to turn it off.</li>
+        <li><b>WhatsApp:</b> ${whatsappLive(env) ? "only if you switch it on yourself: tap &quot;Get alerts on WhatsApp&quot; in My alerts and send us the START message." : "only if you add your number (at checkout or on My alerts) and reply START to our first message."} Reply STOP any time to turn it off.</li>
       </ul>
       <p>We only message you about the races and tickets you chose to watch, plus the occasional product update. Every email has an unsubscribe link.</p>
       <h2>What we store</h2>
@@ -2868,14 +2868,19 @@ async function startPriorityCheckout(env: Env, s: any, kind: PriorityKind, item:
     "metadata[kind]": kind,
     success_url: `${env.SITE_URL}${successPath}`,
     cancel_url: `${env.SITE_URL}/my-alerts`,
-    // Collect WhatsApp numbers before launch (optional) - see the WhatsApp waitlist.
-    "custom_fields[0][key]": "whatsapp",
-    "custom_fields[0][label][type]": "custom",
-    "custom_fields[0][label][custom]": "WhatsApp number for alerts (optional)",
-    "custom_fields[0][type]": "text",
-    "custom_fields[0][optional]": "true",
-    "custom_text[submit][message]": `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll message you on WhatsApp to switch your alerts on - reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
+    // Once WhatsApp is live nobody types a number: they link from My alerts by sending START, so the
+    // number is always right. Before launch, checkout collected numbers for the waitlist.
+    "custom_text[submit][message]": whatsappLive(env)
+      ? `WhatsApp alerts: after paying, tap "Get alerts on WhatsApp" in My alerts. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`
+      : `Add a WhatsApp number (with country code, e.g. +41 79 123 45 67) and we'll message you on WhatsApp to switch your alerts on - reply START. One-off payment, no subscription. By paying you agree to our terms and refund policy: ${env.SITE_URL}/terms`,
   });
+  if (!whatsappLive(env)) {
+    params.set("custom_fields[0][key]", "whatsapp");
+    params.set("custom_fields[0][label][type]", "custom");
+    params.set("custom_fields[0][label][custom]", "WhatsApp number for alerts (optional)");
+    params.set("custom_fields[0][type]", "text");
+    params.set("custom_fields[0][optional]", "true");
+  }
   for (const [k, v] of Object.entries(item.metadata)) params.set(`metadata[${k}]`, v);
   try {
     const resp = await fetch("https://api.stripe.com/v1/checkout/sessions", {
@@ -9314,7 +9319,7 @@ const worker = {
       if (url.pathname === "/priority/checkout" && req.method === "POST") return await handlePriorityCheckout(req, env);
       if (url.pathname === "/watching" && req.method === "GET") return await handleWatchingPage(req, env);
       if (url.pathname === "/terms" && req.method === "GET") return handleTermsPage(env);
-      if (url.pathname === "/privacy" && req.method === "GET") return handlePrivacyPage();
+      if (url.pathname === "/privacy" && req.method === "GET") return handlePrivacyPage(env);
       if (url.pathname === "/priority/thanks" && req.method === "GET") return handlePriorityThanks();
       if (url.pathname === "/telegram/link" && req.method === "POST") return await handleTelegramLink(req, env);
       if (url.pathname === "/telegram/unlink" && req.method === "POST") return await handleTelegramUnlink(req, env);
