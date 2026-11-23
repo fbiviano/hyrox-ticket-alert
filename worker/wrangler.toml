@@ -30,7 +30,7 @@ WHATSAPP_PUBLIC_NUMBER = "41766892203"
 WHATSAPP_APP_ID = "1854886458861233"
 # WhatsApp linking for every verified subscriber (own number live and template approved 2026-11-20).
 WHATSAPP_OPEN_TO_ALL = "1"
-# Free plan = 1 race; more races need Priority (see mayAddFreeRace). Live since 2026-11-20.
+# Free plan = 1 alert (one ticket type or one race); more needs Priority (see mayAddFree). 1 race since 2026-11-20, 1 ticket type since 2026-11-23.
 FREE_RACE_LIMIT = "1"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 # Priority: free watchers get an alert this many minutes after Priority holders (only for alerts
@@ -119,7 +119,7 @@ PRIORITY_OPEN_TO_ALL = "1"
 TICKET_GRID = "1"
 # Emails are written to email_log as "dry run" instead of being sent - staging never mails anyone.
 EMAIL_DRY_RUN = "1"
-# Free plan = 1 race (see mayAddFreeRace).
+# Free plan = 1 alert: one ticket type or one race (see mayAddFree).
 FREE_RACE_LIMIT = "1"
 TELEGRAM_BOT_USERNAME = "Alerts_hyrox_bot"
 

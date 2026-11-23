@@ -50,7 +50,7 @@ export interface Env {
   WHATSAPP_APP_ID?: string; // the Meta app's id (not secret)
   WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
   WA_INVITE_KEY?: string; // temporary secret for the one-off /admin/whatsapp/invite-waitlist email
-  FREE_RACE_LIMIT?: string; // "1" = free users watch 1 race; more needs Priority (see mayAddFreeRace)
+  FREE_RACE_LIMIT?: string; // "1" = free users get 1 alert (one ticket type or one race); more needs Priority (see mayAddFree)
   GSC_KEY?: string; // Google service-account key (JSON) with read access to Search Console - SEO report
   BING_API_KEY?: string; // Bing Webmaster Tools API key - SEO report
 }
@@ -4017,14 +4017,15 @@ async function handleNudgeButton(env: Env, cb: any): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Free plan: 1 race. A race counts once however many of its ticket types are watched. Races covered
-// by Priority ($3 this race, or the season pass) don't count. Past races and race-launch watches whose
-// shop already went live don't count either. People over the limit when it started keep what they
-// have; they just can't add another free race. A blocked add is parked in pending_watches and becomes
-// a real watch when the Priority payment for it completes (Stripe webhook, metadata.pending_id).
+// Free plan: 1 alert - one ticket type, or one "tell me when this race launches" watch (changed
+// 2026-11-23; was 1 race with all its ticket types). Ticket types and races covered by Priority ($3
+// this race, or the season pass) don't count. Past races and race-launch watches whose shop already
+// went live don't count either. People over the limit when it started keep what they have; they just
+// can't add another free alert. A blocked add is parked in pending_watches and becomes a real watch
+// when the Priority payment for it completes (Stripe webhook, metadata.pending_id).
 // Switched by var FREE_RACE_LIMIT = "1"; unset = no limit.
 // ---------------------------------------------------------------------------
-const FREE_RACES = 1;
+const FREE_ALERTS = 1;
 
 function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[]): Promise<unknown> {
   const stmts: D1PreparedStatement[] = [];
@@ -4047,39 +4048,49 @@ function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[
   return stmts.length ? env.DB.batch(stmts) : Promise.resolve();
 }
 
-/** Names of the races this subscriber watches for free right now (not covered by Priority, not past). */
-async function freeWatchedRaces(env: Env, subscriberId: number): Promise<string[]> {
+/** What this subscriber watches for free right now (not covered by Priority, not past): one label per
+ * ticket type, plus one per race-launch watch. */
+async function freeWatchedItems(env: Env, subscriberId: number): Promise<string[]> {
   const rows = await env.DB.prepare(
-    `SELECT DISTINCT x.event_name AS name FROM subscriptions x
+    `SELECT x.event_name AS name, x.ticket_name AS ticket FROM subscriptions x
        WHERE x.subscriber_id = ?1 AND x.purchased_at IS NULL AND (x.event_date IS NULL OR x.event_date >= date('now'))
          AND NOT ${hasTicketPrioritySql("?1", "x.event_name")}
-     UNION
-     SELECT DISTINCT sw.event_title AS name FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
+     UNION ALL
+     SELECT sw.event_title AS name, NULL AS ticket FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url
        WHERE w.subscriber_id = ?1 AND sw.resolved = 0 AND (sw.event_date IS NULL OR sw.event_date >= date('now'))
          AND NOT ${hasRacePrioritySql("?1", "w.event_url")}`
   )
     .bind(subscriberId)
     .all<any>();
-  return (rows.results || []).map((r: any) => String(r.name));
+  return (rows.results || []).map((r: any) => {
+    const race = shortRaceName(String(r.name)).name || String(r.name);
+    return r.ticket ? `${race} - ${String(r.ticket).replace(/^HYROX /i, "")}` : `${race} (launch alert)`;
+  });
 }
 
-/** May this subscriber add a watch on this race for free? */
-async function mayAddFreeRace(env: Env, s: any, race: { eventName?: string; eventUrl?: string }): Promise<boolean> {
+/** May this subscriber add these watches for free? A ticket add passes ticketValues, a race-launch
+ * watch passes eventUrl. Free = 1 alert in total (see FREE_ALERTS). */
+async function mayAddFree(env: Env, s: any, add: { ticketValues?: string[]; eventUrl?: string }): Promise<boolean> {
   if (env.FREE_RACE_LIMIT !== "1") return true;
   if (await hasSeasonPass(env, s.id)) return true;
-  if (race.eventName) {
-    if (await ownsTicketPriority(env, s.id, race.eventName)) return true;
-    const same = await env.DB.prepare("SELECT 1 AS x FROM subscriptions WHERE subscriber_id = ? AND event_name = ? AND purchased_at IS NULL LIMIT 1")
-      .bind(s.id, race.eventName)
-      .first<any>();
-    if (same) return true; // more ticket types for a race they already watch
+  let adding = 0;
+  if (add.ticketValues) {
+    const picked = add.ticketValues.map(decodeTicket).filter(Boolean) as any[];
+    if (picked.length && (await ownsTicketPriority(env, s.id, picked[0].event_name))) return true;
+    for (const t of picked) {
+      const same = await env.DB.prepare("SELECT 1 AS x FROM subscriptions WHERE subscriber_id = ? AND event_name = ? AND ticket_name = ? LIMIT 1")
+        .bind(s.id, t.event_name, t.ticket_name)
+        .first<any>();
+      if (!same) adding++;
+    }
   }
-  if (race.eventUrl) {
-    if (await ownsRacePriority(env, s.id, race.eventUrl)) return true;
-    const same = await env.DB.prepare("SELECT 1 AS x FROM sale_watchers WHERE subscriber_id = ? AND event_url = ?").bind(s.id, race.eventUrl).first<any>();
-    if (same) return true;
+  if (add.eventUrl) {
+    if (await ownsRacePriority(env, s.id, add.eventUrl)) return true;
+    const same = await env.DB.prepare("SELECT 1 AS x FROM sale_watchers WHERE subscriber_id = ? AND event_url = ?").bind(s.id, add.eventUrl).first<any>();
+    if (!same) adding++;
   }
-  return (await freeWatchedRaces(env, s.id)).length < FREE_RACES;
+  if (adding === 0) return true; // nothing new
+  return (await freeWatchedItems(env, s.id)).length + adding <= FREE_ALERTS;
 }
 
 async function parkPendingWatch(env: Env, subscriberId: number, kind: "ticket" | "race", payload: unknown): Promise<string> {
@@ -4125,23 +4136,39 @@ function pendingRaceName(p: any): string {
   return String(payload?.event_title || "this race");
 }
 
+/** What the parked add is, for the limit page: "HYROX Rome - Doubles Women, Doubles Mixed". */
+function pendingWhat(p: any): string {
+  const payload = JSON.parse(String(p.payload || "null"));
+  const race = shortRaceName(pendingRaceName(p)).name || pendingRaceName(p);
+  if (p.kind === "ticket" && Array.isArray(payload)) {
+    const names = (payload.map((v: any) => decodeTicket(String(v))).filter(Boolean) as any[]).map((t) => String(t.ticket_name).replace(/^HYROX /i, ""));
+    return names.length ? `${race} - ${names.join(", ")}` : race;
+  }
+  return race;
+}
+
 async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   const id = new URL(req.url).searchParams.get("p") || "";
   const p = await env.DB.prepare("SELECT * FROM pending_watches WHERE id = ?").bind(id).first<any>();
   if (!p) return page("Not found", `<div class="card"><p>This link has expired. <a href="/my-alerts">My alerts</a></p></div>`);
-  const current = await freeWatchedRaces(env, Number(p.subscriber_id));
+  const current = await freeWatchedItems(env, Number(p.subscriber_id));
   const race = shortRaceName(pendingRaceName(p)).name || pendingRaceName(p);
   const seasonCents = await seasonPriceFor(env, Number(p.subscriber_id));
   const btn = (choice: string, label: string) =>
     `<form method="POST" action="/free-limit/checkout" style="display:inline-block;margin:0 8px 8px 0"><input type="hidden" name="p" value="${escapeHtml(id)}"><input type="hidden" name="choice" value="${choice}"><button type="submit">${label}</button></form>`;
   return page(
-    "Free alerts cover 1 race",
+    "Free alerts cover 1 ticket type",
     `<div class="card">
-      <h1>Free alerts cover 1 race</h1>
-      <p>You already get free alerts for <b>${escapeHtml(current.map((n) => shortRaceName(n).name || n).join(", ") || "another race")}</b>. To also watch <b>${escapeHtml(race)}</b>:</p>
+      <h1>Free alerts cover 1 ticket type</h1>
+      ${
+        current.length
+          ? `<p>Your free alert is already in use: <b>${escapeHtml(current.join(", "))}</b>. To also watch <b>${escapeHtml(pendingWhat(p))}</b>:</p>`
+          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. The free alert covers one. To watch them all:</p>`
+      }
       <p>${btn("one", `&#9889; Priority for ${escapeHtml(race)} - ${PRIORITY_PRICE_LABEL}`)}${btn("season", `&#9889; Season Priority - all races - ${money(seasonCents)}`)}</p>
       <p class="consent">Priority alerts you before everyone else, WhatsApp included. One-off payment, no subscription. It speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a></p>
-      <p>Or swap for free: remove your current race in <a href="/my-alerts">My alerts</a>, then add ${escapeHtml(race)} again.</p>
+      <p>Priority for ${escapeHtml(race)} covers every ticket type at that race.</p>
+      <p>${current.length ? `Or swap for free: remove your current alert in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick just one - free.`}</p>
     </div>`
   );
 }
@@ -4174,7 +4201,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
 
   const first = ticketValues.map(decodeTicket).find(Boolean);
   const choice = String(form.get("priority") || "");
-  const overLimit = !!first && !(await mayAddFreeRace(env, subscriber, { eventName: first.event_name }));
+  const overLimit = !!first && !(await mayAddFree(env, subscriber, { ticketValues }));
   if (!overLimit) await saveTicketWatches(env, subscriber.id, ticketValues);
   {
     const picked = ticketValues.map(decodeTicket).filter(Boolean) as any[];
@@ -4259,7 +4286,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
     await env.DB.prepare("UPDATE sale_watch SET resolved = 0, event_date = NULL, updated_at = datetime('now') WHERE event_url = ?").bind(eventUrl).run();
   }
   const choice = String(form.get("priority") || "");
-  const overLimit = !(await mayAddFreeRace(env, subscriber, { eventUrl }));
+  const overLimit = !(await mayAddFree(env, subscriber, { eventUrl }));
   if (!overLimit) {
     await env.DB.prepare("INSERT OR IGNORE INTO sale_watchers (subscriber_id, event_url) VALUES (?, ?)")
       .bind(subscriber.id, eventUrl)
