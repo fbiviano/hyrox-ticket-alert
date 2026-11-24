@@ -50,7 +50,7 @@ export interface Env {
   WHATSAPP_APP_ID?: string; // the Meta app's id (not secret)
   WHATSAPP_OPEN_TO_ALL?: string; // "1" = every verified subscriber may link; unset = admin only
   WA_INVITE_KEY?: string; // temporary secret for the one-off /admin/whatsapp/invite-waitlist email
-  FREE_RACE_LIMIT?: string; // "1" = free users get 1 alert (one ticket type or one race); more needs Priority (see mayAddFree)
+  FREE_RACE_LIMIT?: string; // "1" = free users get FREE_ALERTS alerts (ticket types or races); more needs Priority (see mayAddFree)
   GSC_KEY?: string; // Google service-account key (JSON) with read access to Search Console - SEO report
   BING_API_KEY?: string; // Bing Webmaster Tools API key - SEO report
 }
@@ -4017,15 +4017,15 @@ async function handleNudgeButton(env: Env, cb: any): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Free plan: 1 alert - one ticket type, or one "tell me when this race launches" watch (changed
-// 2026-11-23; was 1 race with all its ticket types). Ticket types and races covered by Priority ($3
+// Free plan: 2 alerts - each ticket type, or each "tell me when this race launches" watch, is one
+// (1 race 2026-11-20, 1 alert 2026-11-23, 2 alerts since 2026-11-24). Ticket types and races covered by Priority ($3
 // this race, or the season pass) don't count. Past races and race-launch watches whose shop already
 // went live don't count either. People over the limit when it started keep what they have; they just
 // can't add another free alert. A blocked add is parked in pending_watches and becomes a real watch
 // when the Priority payment for it completes (Stripe webhook, metadata.pending_id).
 // Switched by var FREE_RACE_LIMIT = "1"; unset = no limit.
 // ---------------------------------------------------------------------------
-const FREE_ALERTS = 1;
+const FREE_ALERTS = 2;
 
 function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[]): Promise<unknown> {
   const stmts: D1PreparedStatement[] = [];
@@ -4069,7 +4069,7 @@ async function freeWatchedItems(env: Env, subscriberId: number): Promise<string[
 }
 
 /** May this subscriber add these watches for free? A ticket add passes ticketValues, a race-launch
- * watch passes eventUrl. Free = 1 alert in total (see FREE_ALERTS). */
+ * watch passes eventUrl. Free = FREE_ALERTS alerts in total. */
 async function mayAddFree(env: Env, s: any, add: { ticketValues?: string[]; eventUrl?: string }): Promise<boolean> {
   if (env.FREE_RACE_LIMIT !== "1") return true;
   if (await hasSeasonPass(env, s.id)) return true;
@@ -4157,18 +4157,18 @@ async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   const btn = (choice: string, label: string) =>
     `<form method="POST" action="/free-limit/checkout" style="display:inline-block;margin:0 8px 8px 0"><input type="hidden" name="p" value="${escapeHtml(id)}"><input type="hidden" name="choice" value="${choice}"><button type="submit">${label}</button></form>`;
   return page(
-    "Free alerts cover 1 ticket type",
+    "Free alerts cover 2 ticket types",
     `<div class="card">
-      <h1>Free alerts cover 1 ticket type</h1>
+      <h1>Free alerts cover 2 ticket types</h1>
       ${
         current.length
-          ? `<p>Your free alert is already in use: <b>${escapeHtml(current.join(", "))}</b>. To also watch <b>${escapeHtml(pendingWhat(p))}</b>:</p>`
-          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. The free alert covers one. To watch them all:</p>`
+          ? `<p>Your free alerts are already in use: <b>${escapeHtml(current.join(", "))}</b>. To also watch <b>${escapeHtml(pendingWhat(p))}</b>:</p>`
+          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. Free alerts cover 2. To watch them all:</p>`
       }
       <p>${btn("one", `&#9889; Priority for ${escapeHtml(race)} - ${PRIORITY_PRICE_LABEL}`)}${btn("season", `&#9889; Season Priority - all races - ${money(seasonCents)}`)}</p>
       <p class="consent">Priority alerts you before everyone else, WhatsApp included. One-off payment, no subscription. It speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a></p>
       <p>Priority for ${escapeHtml(race)} covers every ticket type at that race.</p>
-      <p>${current.length ? `Or swap for free: remove your current alert in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick just one - free.`}</p>
+      <p>${current.length ? `Or swap for free: remove one of your current alerts in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick up to 2 - free.`}</p>
     </div>`
   );
 }
