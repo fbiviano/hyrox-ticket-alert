@@ -4017,15 +4017,16 @@ async function handleNudgeButton(env: Env, cb: any): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Free plan: 2 alerts - each ticket type, or each "tell me when this race launches" watch, is one
-// (1 race 2026-11-20, 1 alert 2026-11-23, 2 alerts since 2026-11-24). Ticket types and races covered by Priority ($3
+// Free plan: 3 alerts - each ticket type, or each "tell me when this race launches" watch, is one
+// (1 race 2026-11-20, 1 alert 2026-11-23, 3 alerts since 2026-11-24). When an add goes over, what still fits is saved
+// and only the rest is parked. Ticket types and races covered by Priority ($3
 // this race, or the season pass) don't count. Past races and race-launch watches whose shop already
 // went live don't count either. People over the limit when it started keep what they have; they just
 // can't add another free alert. A blocked add is parked in pending_watches and becomes a real watch
 // when the Priority payment for it completes (Stripe webhook, metadata.pending_id).
 // Switched by var FREE_RACE_LIMIT = "1"; unset = no limit.
 // ---------------------------------------------------------------------------
-const FREE_ALERTS = 2;
+const FREE_ALERTS = 3;
 
 function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[]): Promise<unknown> {
   const stmts: D1PreparedStatement[] = [];
@@ -4152,23 +4153,26 @@ async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   const p = await env.DB.prepare("SELECT * FROM pending_watches WHERE id = ?").bind(id).first<any>();
   if (!p) return page("Not found", `<div class="card"><p>This link has expired. <a href="/my-alerts">My alerts</a></p></div>`);
   const current = await freeWatchedItems(env, Number(p.subscriber_id));
+  const who = await env.DB.prepare("SELECT verified FROM subscribers WHERE id = ?").bind(p.subscriber_id).first<any>();
+  const confirmNote = who && !who.verified ? `<p><b>Check your inbox:</b> we sent you a link to confirm your email - your free alerts start once you click it.</p>` : "";
   const race = shortRaceName(pendingRaceName(p)).name || pendingRaceName(p);
   const seasonCents = await seasonPriceFor(env, Number(p.subscriber_id));
   const btn = (choice: string, label: string) =>
     `<form method="POST" action="/free-limit/checkout" style="display:inline-block;margin:0 8px 8px 0"><input type="hidden" name="p" value="${escapeHtml(id)}"><input type="hidden" name="choice" value="${choice}"><button type="submit">${label}</button></form>`;
   return page(
-    "Free alerts cover 2 ticket types",
+    "Free alerts cover 3 ticket types",
     `<div class="card">
-      <h1>Free alerts cover 2 ticket types</h1>
+      <h1>Free alerts cover 3 ticket types</h1>
+      ${confirmNote}
       ${
         current.length
           ? `<p>Your free alerts are already in use: <b>${escapeHtml(current.join(", "))}</b>. To also watch <b>${escapeHtml(pendingWhat(p))}</b>:</p>`
-          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. Free alerts cover 2. To watch them all:</p>`
+          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. Free alerts cover 3. To watch them all:</p>`
       }
       <p>${btn("one", `&#9889; Priority for ${escapeHtml(race)} - ${PRIORITY_PRICE_LABEL}`)}${btn("season", `&#9889; Season Priority - all races - ${money(seasonCents)}`)}</p>
       <p class="consent">Priority alerts you before everyone else, WhatsApp included. One-off payment, no subscription. It speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a></p>
       <p>Priority for ${escapeHtml(race)} covers every ticket type at that race.</p>
-      <p>${current.length ? `Or swap for free: remove one of your current alerts in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick up to 2 - free.`}</p>
+      <p>${current.length ? `Or swap for free: remove one of your current alerts in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick up to 3 - free.`}</p>
     </div>`
   );
 }
@@ -4212,8 +4216,12 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     );
   }
   if (overLimit) {
-    // Not saved: parked until they pay for it (Priority for this race or the season).
-    const pendingId = await parkPendingWatch(env, subscriber.id, "ticket", ticketValues);
+    // Save the ones that still fit in the free plan; park the rest until they pay for it
+    // (Priority for this race or the season). New people still get their confirmation email.
+    const slots = Math.max(0, FREE_ALERTS - (await freeWatchedItems(env, subscriber.id)).length);
+    if (slots > 0) await saveTicketWatches(env, subscriber.id, ticketValues.slice(0, slots));
+    if (needsVerification) await sendVerificationEmailOnly(env, subscriber, verifyToken).catch(() => {});
+    const pendingId = await parkPendingWatch(env, subscriber.id, "ticket", ticketValues.slice(slots));
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     if ((choice === "1" || choice === "season") && subscriber.verified) {
       const p = await env.DB.prepare("SELECT * FROM pending_watches WHERE id = ?").bind(pendingId).first<any>();
@@ -4299,6 +4307,7 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   if (overLimit) {
     // Not saved: parked until they pay for it. Script callers get JSON for a Priority choice
     // (they open checkout_url) and otherwise follow the redirect to the limit page.
+    if (needsVerification) await sendVerificationEmailOnly(env, subscriber, verifyToken).catch(() => {});
     const pendingId = await parkPendingWatch(env, subscriber.id, "race", { event_url: eventUrl, event_title: eventTitle });
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     const limitUrl = `${env.SITE_URL}/free-limit?p=${pendingId}`;
