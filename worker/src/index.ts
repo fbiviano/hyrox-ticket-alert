@@ -4219,9 +4219,15 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     // Save the ones that still fit in the free plan; park the rest until they pay for it
     // (Priority for this race or the season). New people still get their confirmation email.
     const slots = Math.max(0, FREE_ALERTS - (await freeWatchedItems(env, subscriber.id)).length);
-    if (slots > 0) await saveTicketWatches(env, subscriber.id, ticketValues.slice(0, slots));
+    const fresh: string[] = []; // ticket types they don't watch yet (re-picks don't use up a free place)
+    for (const v of ticketValues) {
+      const t = decodeTicket(v);
+      const has = t && (await env.DB.prepare("SELECT 1 AS x FROM subscriptions WHERE subscriber_id = ? AND event_name = ? AND ticket_name = ?").bind(subscriber.id, t.event_name, t.ticket_name).first<any>());
+      if (t && !has) fresh.push(v);
+    }
+    if (slots > 0) await saveTicketWatches(env, subscriber.id, fresh.slice(0, slots));
     if (needsVerification) await sendVerificationEmailOnly(env, subscriber, verifyToken).catch(() => {});
-    const pendingId = await parkPendingWatch(env, subscriber.id, "ticket", ticketValues.slice(slots));
+    const pendingId = await parkPendingWatch(env, subscriber.id, "ticket", fresh.slice(slots));
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     if ((choice === "1" || choice === "season") && subscriber.verified) {
       const p = await env.DB.prepare("SELECT * FROM pending_watches WHERE id = ?").bind(pendingId).first<any>();
