@@ -4747,6 +4747,14 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
   return jsonResponse({ sent });
 }
 
+/** Spectator tickets of one shop as the ticket check last saw them: every spectator ticket the
+ * shop lists, not only the watched ones (people mostly watch what is sold out, so the watched
+ * rows alone would make a race look more sold out than it is). kv_meta "spectator:<shop address>". */
+type SpectatorSnapshot = { at: number; tickets: [string, string][] };
+const SPECTATOR_KEY = "spectator:";
+const SPECTATOR_FRESH_MS = 24 * 3600 * 1000;
+const SPECTATOR_REWRITE_MS = 6 * 3600 * 1000;
+
 /** Cron Trigger entry point: re-check every community-requested ticket and
  * fan out alerts on sold_out -> available. Every subscription flows through
  * here (there's no separate curated list on the public site). */
@@ -4765,6 +4773,16 @@ async function checkCommunityTickets(env: Env): Promise<void> {
   )
     .bind(todayIso())
     .all<any>();
+  const snapshots = new Map<string, SpectatorSnapshot>();
+  const { results: snapRows } = await env.DB.prepare("SELECT key, value FROM kv_meta WHERE substr(key, 1, 10) = 'spectator:'")
+    .all<any>()
+    .catch(() => ({ results: [] as any[] }));
+  for (const r of snapRows || []) {
+    try {
+      snapshots.set(r.key, JSON.parse(r.value));
+    } catch {}
+  }
+  const snapshotDone = new Set<string>();
   for (const row of results || []) {
     let event;
     try {
@@ -4775,6 +4793,23 @@ async function checkCommunityTickets(env: Env): Promise<void> {
       break;
     }
     if (!event) continue;
+    // Written only when something changed (or every six hours as a sign of life): this loop
+    // runs every two minutes.
+    const snapKey = SPECTATOR_KEY + String(row.shop_url).split("?")[0];
+    if (!snapshotDone.has(snapKey)) {
+      snapshotDone.add(snapKey);
+      const seen = new Map<string, string>();
+      for (const t of event.tickets) if (/spectator/i.test(t.name) && !seen.has(t.name)) seen.set(t.name, ticketStatus(t));
+      const tickets = [...seen];
+      const prev = snapshots.get(snapKey);
+      const same = !!prev && JSON.stringify(prev.tickets) === JSON.stringify(tickets);
+      if (!same || Date.now() - prev!.at > SPECTATOR_REWRITE_MS) {
+        await env.DB.prepare("INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)")
+          .bind(snapKey, JSON.stringify({ at: Date.now(), tickets }))
+          .run()
+          .catch((e) => console.error("spectator snapshot failed:", e));
+      }
+    }
     const ticket = event.tickets.find((t) => t.name === row.ticket_name);
     if (!ticket) continue;
     const newStatus = ticketStatus(ticket);
@@ -6984,7 +7019,37 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
 
   // Spectator tickets get their own section: "hyrox <city> spectator tickets" is a search of its own
   // (1,000/month for NYC alone), and the generic FAQ answer was all the page said about them.
-  const spectatorTracked = [...tracked].filter(([n]) => /spectator/i.test(n));
+  // Status for the title and description comes only from the shop's full spectator list, seen in
+  // the last 24 hours (Dallas race week: 571 views for "hyrox dallas spectator tickets", 1 click -
+  // the result said nothing about spectators). Without it the page lists the watched ones as before.
+  let spectatorAll: [string, string][] = [];
+  if (ev.on_sale && shopPath) {
+    const snapRow = await env.DB.prepare("SELECT value FROM kv_meta WHERE substr(key, 1, length(?1)) = ?1 ORDER BY length(key) LIMIT 1")
+      .bind(SPECTATOR_KEY + shopPath)
+      .first<any>()
+      .catch(() => null);
+    try {
+      const snap: SpectatorSnapshot | null = snapRow ? JSON.parse(snapRow.value) : null;
+      if (snap && Date.now() - snap.at < SPECTATOR_FRESH_MS && Array.isArray(snap.tickets)) spectatorAll = snap.tickets;
+    } catch {}
+  }
+  const spectatorSold = spectatorAll.filter(([, s]) => s === "sold_out").length;
+  const spectatorState: "sold_out" | "partly" | "available" | null = !spectatorAll.length
+    ? null
+    : spectatorSold === spectatorAll.length
+      ? "sold_out"
+      : spectatorSold
+        ? "partly"
+        : "available";
+  const spectatorSentence =
+    spectatorState === "sold_out"
+      ? `Spectator tickets for ${name} are sold out right now.`
+      : spectatorState === "partly"
+        ? `Some ${name} spectator tickets are sold out right now (${spectatorSold} of ${spectatorAll.length}).`
+        : spectatorState === "available"
+          ? `Spectator tickets for ${name} are available right now.`
+          : "";
+  const spectatorTracked = spectatorAll.length ? spectatorAll : [...tracked].filter(([n]) => /spectator/i.test(n));
   const spectatorHtml = `<div class="card"><h2>HYROX ${escapeHtml(city)} spectator tickets</h2>
       ${
         spectatorTracked.length
@@ -6993,6 +7058,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
               .join("")}</ul>`
           : ""
       }
+      ${spectatorSentence ? `<p><b>${escapeHtml(spectatorSentence)}</b> Last status we saw in the official shop.</p>` : ""}
       <p class="hint">${
         ev.on_sale
           ? `Spectator tickets for ${escapeHtml(name)} are sold on the official HYROX shop next to the race tickets`
@@ -7044,8 +7110,20 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
     ],
     [
       `Are there HYROX ${city} spectator tickets?`,
-      `At most HYROX races spectators need a ticket, often with free entry for young children. They are sold on the official HYROX shop next to the race tickets. Spectator tickets can sell out at the biggest events; you can set a free alert for them like for any other ticket type.`,
+      `${spectatorSentence ? `${spectatorSentence} ` : ""}At most HYROX races spectators need a ticket, often with free entry for young children. They are sold on the official HYROX shop next to the race tickets. Spectator tickets can sell out at the biggest events; you can set a free alert for them like for any other ticket type.`,
     ],
+    ...(spectatorState
+      ? ([
+          [
+            `Are HYROX ${city} spectator tickets sold out?`,
+            `${spectatorSentence} That is the last status we saw in the official HYROX shop. ${
+              spectatorState === "available"
+                ? "They can sell out close to the race; a free alert tells you if one you need comes back."
+                : "Sold-out spectator tickets come back when people's plans change: set a free alert for the day you need and we tell you the moment one is available."
+            }`,
+          ],
+        ] as [string, string][])
+      : []),
     [
       `Where do I buy HYROX ${city} tickets?`,
       `Only on the official HYROX shop (hyrox.com). RoxRaceAlerts is an independent alert service built by a HYROX athlete; we never sell or reserve tickets.`,
@@ -7098,9 +7176,16 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   // Search phrase first, then the brand (what people type: "<city> tickets sold out", "release
   // date", "waitlist"); each part only where it's true for this race.
   // "presale" added 2026-11-02: Search Console showed "<city> 2027 tickets presale" finding race pages.
-  const titleTail = ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Presale, Release Date & Alerts" : "Presale, Release Date & Waitlist";
+  // Spectator status added 2026-11-25; every word the title already had stays in it.
+  const titleTail = spectatorState === "sold_out"
+    ? "Spectator Sold Out, On Sale & Waitlist"
+    : spectatorState === "partly"
+      ? "Spectator Partly Sold Out, On Sale & Waitlist"
+      : spectatorState === "available"
+        ? "Spectator Available, On Sale, Sold Out & Waitlist"
+        : ev.on_sale ? "On Sale, Sold Out & Waitlist" : ev.presale_live_at ? "Presale, Release Date & Alerts" : "Presale, Release Date & Waitlist";
   const title = `HYROX ${cityShown} ${year} Tickets: ${titleTail} | RoxRaceAlerts`;
-  const description = `${status.sentence} Race day${endDate ? "s" : ""}: ${raceDays}${ev.venue_name ? ` at ${ev.venue_name}` : ""}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
+  const description = `${status.sentence}${spectatorSentence ? ` ${spectatorSentence}` : ""} Race day${endDate ? "s" : ""}: ${raceDays}${ev.venue_name ? ` at ${ev.venue_name}` : ""}. Free alert the second ${city} tickets go on sale or a sold-out ticket comes back.`;
   const pageUrl = `${env.SITE_URL}/hyrox/${ev.slug}`;
   const seo: PageSeo = {
     description,
