@@ -6965,7 +6965,7 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   const shopPath = ev.shop_url ? ev.shop_url.split("?")[0] : "";
   const { results: trackedRows } = await env.DB.prepare(
     // Prefix match written with substr: D1 rejects LIKE patterns as long as a shop URL.
-    `SELECT ticket_name, last_status FROM community_tickets WHERE (event_date IS NULL OR event_date >= ?1 OR ${raceRunningSql("shop_url")}) AND (instr(event_name, ?2) > 0 OR substr(shop_url, 1, length(?3)) = ?3) ORDER BY ticket_name`
+    `SELECT ticket_name, last_status, shop_url FROM community_tickets WHERE (event_date IS NULL OR event_date >= ?1 OR ${raceRunningSql("shop_url")}) AND (instr(event_name, ?2) > 0 OR substr(shop_url, 1, length(?3)) = ?3) ORDER BY ticket_name`
   )
     .bind(todayIso(), `HYROX ${city}`, shopPath || "\u0000")
     .all<any>();
@@ -7022,16 +7022,25 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
   // Status for the title and description comes only from the shop's full spectator list, seen in
   // the last 24 hours (Dallas race week: 571 views for "hyrox dallas spectator tickets", 1 click -
   // the result said nothing about spectators). Without it the page lists the watched ones as before.
+  // Found through this race's watched tickets: their shop address can be the /checkout/<id> form,
+  // which the directory's shop address doesn't start with.
   let spectatorAll: [string, string][] = [];
-  if (ev.on_sale && shopPath) {
-    const snapRow = await env.DB.prepare("SELECT value FROM kv_meta WHERE substr(key, 1, length(?1)) = ?1 ORDER BY length(key) LIMIT 1")
-      .bind(SPECTATOR_KEY + shopPath)
-      .first<any>()
-      .catch(() => null);
-    try {
-      const snap: SpectatorSnapshot | null = snapRow ? JSON.parse(snapRow.value) : null;
-      if (snap && Date.now() - snap.at < SPECTATOR_FRESH_MS && Array.isArray(snap.tickets)) spectatorAll = snap.tickets;
-    } catch {}
+  const snapKeys = [...new Set((trackedRows || []).filter((t) => t.shop_url).map((t) => SPECTATOR_KEY + String(t.shop_url).split("?")[0]))].slice(0, 5);
+  if (ev.on_sale && snapKeys.length) {
+    const { results: snapRows } = await env.DB.prepare(`SELECT value FROM kv_meta WHERE key IN (${snapKeys.map(() => "?").join(",")})`)
+      .bind(...snapKeys)
+      .all<any>()
+      .catch(() => ({ results: [] as any[] }));
+    let newest = 0;
+    for (const r of snapRows || []) {
+      try {
+        const snap: SpectatorSnapshot = JSON.parse(r.value);
+        if (Date.now() - snap.at < SPECTATOR_FRESH_MS && Array.isArray(snap.tickets) && snap.tickets.length && snap.at > newest) {
+          newest = snap.at;
+          spectatorAll = snap.tickets;
+        }
+      } catch {}
+    }
   }
   const spectatorSold = spectatorAll.filter(([, s]) => s === "sold_out").length;
   const spectatorState: "sold_out" | "partly" | "available" | null = !spectatorAll.length
