@@ -2219,6 +2219,8 @@ async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
   const norm = text.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
 
   if (WA_STOP_WORDS.has(norm)) {
+    const who = await env.DB.prepare("SELECT email FROM subscribers WHERE whatsapp_phone = ?").bind(from).first<any>();
+    if (who) await pingAdmin(env, `📵 WhatsApp turned off: ${who.email}`);
     await env.DB.prepare(
       "UPDATE subscribers SET whatsapp_phone = NULL, whatsapp_linked_at = NULL, whatsapp_opted_out_at = datetime('now') WHERE whatsapp_phone = ?"
     )
@@ -2231,7 +2233,7 @@ async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
   const upper = text.toUpperCase();
   const code = upper.match(/^(?:START\s+)?([A-HJ-NP-Z2-9]{6})$/)?.[1];
   if (code) {
-    const s = await env.DB.prepare("SELECT id FROM subscribers WHERE whatsapp_code = ? AND whatsapp_code_expires > datetime('now')")
+    const s = await env.DB.prepare("SELECT id, email FROM subscribers WHERE whatsapp_code = ? AND whatsapp_code_expires > datetime('now')")
       .bind(code)
       .first<any>();
     if (s) {
@@ -2241,6 +2243,7 @@ async function handleWhatsAppInbound(env: Env, m: any): Promise<void> {
         .bind(from, s.id)
         .run();
       await sendWhatsAppReply(env, from, "You're set! WhatsApp alerts from RoxRaceAlerts are on: you'll get the same HYROX ticket alerts as by email. Reply STOP any time to turn them off.");
+      await pingAdmin(env, `📱 WhatsApp linked: ${s.email}`);
       return;
     }
   }
@@ -8441,7 +8444,12 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
               (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM race_priority WHERE livemode = 1)
                 + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM ticket_priority WHERE livemode = 1)
                 + (SELECT COALESCE(SUM(wants_whatsapp), 0) FROM season_pass WHERE livemode = 1) AS wa_yes,
-              (SELECT COUNT(*) FROM subscribers WHERE whatsapp_waitlist_phone IS NOT NULL) AS wa_list,
+              (SELECT COUNT(*) FROM subscribers WHERE whatsapp_waitlist_phone IS NOT NULL AND whatsapp_phone IS NULL) AS wa_list,
+              (SELECT COUNT(*) FROM subscribers WHERE whatsapp_phone IS NOT NULL) AS wa_linked,
+              (SELECT COUNT(*) FROM subscribers WHERE whatsapp_linked_at >= datetime('now', '-7 days')) AS wa_linked_7d,
+              (SELECT COUNT(*) FROM whatsapp_log WHERE template LIKE 'ticket_alert%' AND ok = 1 AND created_at >= datetime('now', '-30 days')) AS wa_sent_30d,
+              (SELECT COUNT(*) FROM whatsapp_log WHERE template LIKE 'ticket_alert%' AND delivery_status = 'read' AND created_at >= datetime('now', '-30 days')) AS wa_read_30d,
+              (SELECT COUNT(*) FROM whatsapp_log WHERE template LIKE 'ticket_alert%' AND (ok = 0 OR delivery_status = 'failed') AND created_at >= datetime('now', '-30 days')) AS wa_failed_30d,
               (SELECT COUNT(*) FROM race_priority WHERE livemode = 0) + (SELECT COUNT(*) FROM season_pass WHERE livemode = 0)
                 + (SELECT COUNT(*) FROM ticket_priority WHERE livemode = 0) AS test_n`
     )
@@ -8491,8 +8499,15 @@ async function handleAnalyticsAdminPage(req: Request, env: Env): Promise<Respons
         ${tile(prio?.ticket_n || 0, "ticket passes")}
         ${tile(prio?.season_n || 0, "season passes")}
         ${tile(money((prio?.race_c || 0) + (prio?.ticket_c || 0) + (prio?.season_c || 0)), "revenue (before Stripe fees)")}
-        ${tile(prio?.wa_yes || 0, "buyers who want WhatsApp")}
-        ${tile(prio?.wa_list || 0, "numbers on the WhatsApp waitlist")}
+      </div>
+      <h2>WhatsApp</h2>
+      <div class="tiles">
+        ${tile(prio?.wa_linked || 0, `people linked WhatsApp (${prio?.wa_linked_7d || 0} in the last 7 days)`)}
+        ${tile(prio?.wa_sent_30d || 0, "WhatsApp alerts sent (30 days)")}
+        ${tile(prio?.wa_read_30d || 0, "of those read")}
+        ${tile(prio?.wa_failed_30d || 0, "failed (30 days)")}
+        ${tile(prio?.wa_list || 0, "old waitlist numbers, not linked yet")}
+        ${tile(prio?.wa_yes || 0, "buyers who ticked WhatsApp at checkout")}
       </div>
       ${buyersHtml}
     </div>`;
