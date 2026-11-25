@@ -4749,7 +4749,8 @@ async function handleNotify(req: Request, env: Env): Promise<Response> {
 
 /** Spectator tickets of one shop as the ticket check last saw them: every spectator ticket the
  * shop lists, not only the watched ones (people mostly watch what is sold out, so the watched
- * rows alone would make a race look more sold out than it is). kv_meta "spectator:<shop address>". */
+ * rows alone would make a race look more sold out than it is). kv_meta "spectator:<shop address>".
+ * Status is available, sold_out, or off (the shop has the ticket switched off). */
 type SpectatorSnapshot = { at: number; tickets: [string, string][] };
 const SPECTATOR_KEY = "spectator:";
 const SPECTATOR_FRESH_MS = 24 * 3600 * 1000;
@@ -4799,7 +4800,7 @@ async function checkCommunityTickets(env: Env): Promise<void> {
     if (!snapshotDone.has(snapKey)) {
       snapshotDone.add(snapKey);
       const seen = new Map<string, string>();
-      for (const t of event.tickets) if (/spectator/i.test(t.name) && !seen.has(t.name)) seen.set(t.name, ticketStatus(t));
+      for (const t of event.tickets) if (/spectator/i.test(t.name) && !seen.has(t.name)) seen.set(t.name, t.active ? ticketStatus(t) : "off");
       const tickets = [...seen];
       const prev = snapshots.get(snapKey);
       const same = !!prev && JSON.stringify(prev.tickets) === JSON.stringify(tickets);
@@ -7039,7 +7040,10 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
           newest = snap.at;
           // Paid spectator tickets only: the free under-12 add-on reads as sold out in most shops
           // while the day itself is on sale, which would turn every US race into "partly sold out".
-          spectatorAll = snap.tickets.filter(([n]) => !/child|u12/i.test(n));
+          // "off" = switched off in the shop (not released yet, sale closed, no such race day):
+          // checked 2026-11-25, Milan's spectator tickets were off and never sold, while a really
+          // sold-out day (Johannesburg Saturday) stays switched on with nothing left.
+          spectatorAll = snap.tickets.filter(([n, st]) => st !== "off" && !/child|u12/i.test(n));
         }
       } catch {}
     }
