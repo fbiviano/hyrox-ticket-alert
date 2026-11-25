@@ -3195,8 +3195,11 @@ interface SubscriberLookup {
 }
 
 /** Shared by handleSubscribe and handleWatchSale: use the session if there
- * is one, otherwise look up/create a subscriber by the submitted email,
- * same verification-gating either way. Returns a Response directly if the
+ * is one, otherwise look up/create a subscriber by the submitted email.
+ * Since 2026-11-25 there is no confirmation click: alerts start right away and
+ * needsVerification only means "new here - send the welcome email" (sendWelcomeEmail).
+ * verify_token stays set until they click a link in that email (handleVerify), which
+ * is what referrals count, so fake addresses can't earn a friend reward. Returns a Response directly if the
  * email was missing/invalid, so callers can just `return` it. */
 async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Promise<SubscriberLookup | Response> {
   let subscriber = await getSessionSubscriber(req, env);
@@ -3219,26 +3222,66 @@ async function getOrCreateSubscriber(req: Request, env: Env, form: FormData): Pr
       const src = parseCookies(req)[SRC_COOKIE] || "";
       try {
         await env.DB.prepare(
-          "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by, source) VALUES (?, 0, ?, ?, ?, ?)"
+          "INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by, source) VALUES (?, 1, ?, ?, ?, ?)"
         )
           .bind(email, verifyToken, unsubToken, referrer?.id ?? null, /^[a-z0-9_-]{1,20}$/.test(src) ? src : null)
           .run();
       } catch (e) {
         // A sign-up must never fail over tracking (e.g. code deployed before the "source" column exists).
         if (!/no such column: source/.test(String(e))) throw e;
-        await env.DB.prepare("INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by) VALUES (?, 0, ?, ?, ?)")
+        await env.DB.prepare("INSERT INTO subscribers (email, verified, verify_token, unsubscribe_token, referred_by) VALUES (?, 1, ?, ?, ?)")
           .bind(email, verifyToken, unsubToken, referrer?.id ?? null)
           .run();
       }
       subscriber = await env.DB.prepare("SELECT * FROM subscribers WHERE email = ?").bind(email).first<any>();
       needsVerification = true;
     } else if (!subscriber.verified) {
-      await env.DB.prepare("UPDATE subscribers SET verify_token = ? WHERE id = ?").bind(verifyToken, subscriber.id).run();
+      // Never confirmed under the old flow, or stopped after a bounce: they just typed it again, so on again.
+      await env.DB.prepare("UPDATE subscribers SET verified = 1, verify_token = COALESCE(verify_token, ?) WHERE id = ?").bind(verifyToken, subscriber.id).run();
+      subscriber = { ...subscriber, verified: 1 };
       needsVerification = true;
     }
   }
 
   return { subscriber, needsVerification, verifyToken };
+}
+
+/** "Your alert is on" - replaces the old confirm-your-email step (2026-11-25). Lists what they
+ * watch, a "My alerts" link (through /verify, so the click also counts as a confirmed address)
+ * and a one-click way out for someone whose address was typed by mistake. Never throws. */
+async function sendWelcomeEmail(env: Env, s: any): Promise<void> {
+  try {
+    const { results: races } = await env.DB.prepare(
+      `SELECT sw.event_title FROM sale_watchers w JOIN sale_watch sw ON sw.event_url = w.event_url WHERE w.subscriber_id = ? ORDER BY sw.event_title`
+    )
+      .bind(s.id)
+      .all<any>();
+    const { results: tickets } = await env.DB.prepare(
+      "SELECT event_name, ticket_name FROM subscriptions WHERE subscriber_id = ? AND purchased_at IS NULL ORDER BY event_name, ticket_name"
+    )
+      .bind(s.id)
+      .all<any>();
+    const items = [
+      ...(races || []).map((r: any) => `${shortRaceName(String(r.event_title)).name || r.event_title} - we'll email you the moment tickets open`),
+      ...(tickets || []).map((t: any) => `${shortRaceName(String(t.event_name)).name || t.event_name} - ${String(t.ticket_name).replace(/^HYROX /i, "")}`),
+    ];
+    const fresh = await env.DB.prepare("SELECT verify_token, unsubscribe_token FROM subscribers WHERE id = ?").bind(s.id).first<any>();
+    const unsubToken = fresh?.unsubscribe_token || s.unsubscribe_token;
+    const manage = fresh?.verify_token ? `${env.SITE_URL}/verify?token=${fresh.verify_token}` : `${env.SITE_URL}/my-alerts?token=${unsubToken}`;
+    const unsub = `${env.SITE_URL}/unsubscribe?token=${unsubToken}`;
+    const subject = items.length === 1 ? `Your alert is on: ${items[0].split(" - ")[0]}` : "Your HYROX ticket alerts are on";
+    const listHtml = items.length ? `<p>You're watching:</p><ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : "";
+    const listText = items.length ? `You're watching:\n${items.map((i) => `- ${i}`).join("\n")}\n\n` : "";
+    await sendEmail(
+      env,
+      s.email,
+      subject,
+      `<p>You're all set - your RoxRaceAlerts alert is on. We check the official HYROX shop around the clock and email you the moment a spot opens.</p>${listHtml}<p>Tip: add this address to your contacts so alerts never land in spam.</p><p><a href="${manage}">Manage my alerts</a></p>${IG_FOLLOW_HTML}<p><small>Not you, or a typo? <a href="${unsub}">Remove this email address</a>.</small></p>`,
+      `You're all set - your RoxRaceAlerts alert is on. We check the official HYROX shop around the clock and email you the moment a spot opens.\n\n${listText}Tip: add this address to your contacts so alerts never land in spam.\n\nManage my alerts: ${manage}${IG_FOLLOW_TEXT}\n\nNot you, or a typo? Remove this email address: ${unsub}`
+    );
+  } catch (e) {
+    console.error(`Failed to send welcome email to ${s.email}:`, e);
+  }
 }
 
 /** Sends the confirmation email and, since a session cookie normally only
@@ -3477,7 +3520,7 @@ function inboxKey(email: string): string {
 async function referralCount(env: Env, subscriber: { id: number; email: string }): Promise<number> {
   const { results } = await env.DB.prepare(
     `SELECT s.email FROM subscribers s
-     WHERE s.referred_by = ? AND s.verified = 1
+     WHERE s.referred_by = ? AND s.verified = 1 AND s.verify_token IS NULL
        AND (EXISTS(SELECT 1 FROM sale_watchers w WHERE w.subscriber_id = s.id) OR EXISTS(SELECT 1 FROM subscriptions t WHERE t.subscriber_id = s.id))`
   )
     .bind(subscriber.id)
@@ -3775,6 +3818,20 @@ async function handleResendWebhook(req: Request, env: Env): Promise<Response> {
     await env.DB.prepare("INSERT OR IGNORE INTO email_events (resend_id, type, created_at) VALUES (?, ?, ?)")
       .bind(emailId, type, String(evt.created_at || new Date().toISOString()))
       .run();
+  }
+  if ((type === "bounced" || type === "complained") && emailId) {
+    // Address doesn't exist or they marked us as spam: stop emailing it (protects delivery of
+    // everyone else's alerts). verified = 0 keeps it out of every alert; the nudge stamps keep
+    // the old confirm reminders from writing to it. Typing the address again turns it back on.
+    const row = await env.DB.prepare("SELECT to_address FROM email_log WHERE resend_id = ? LIMIT 1").bind(emailId).first<any>();
+    if (row?.to_address) {
+      const r = await env.DB.prepare(
+        "UPDATE subscribers SET verified = 0, nudge_sent_at = COALESCE(nudge_sent_at, datetime('now')), final_nudge_sent_at = COALESCE(final_nudge_sent_at, datetime('now')) WHERE email = ? AND verified = 1"
+      )
+        .bind(String(row.to_address).toLowerCase())
+        .run();
+      if (r.meta.changes) await pingAdmin(env, `${type === "bounced" ? "📭 Email bounced" : "🚫 Marked as spam"}: ${row.to_address} - alerts to it stopped`);
+    }
   }
   return new Response("ok");
 }
@@ -4154,7 +4211,7 @@ async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   if (!p) return page("Not found", `<div class="card"><p>This link has expired. <a href="/my-alerts">My alerts</a></p></div>`);
   const current = await freeWatchedItems(env, Number(p.subscriber_id));
   const who = await env.DB.prepare("SELECT verified FROM subscribers WHERE id = ?").bind(p.subscriber_id).first<any>();
-  const confirmNote = who && !who.verified ? `<p><b>Check your inbox:</b> we sent you a link to confirm your email - your free alerts start once you click it.</p>` : "";
+  const confirmNote = who && !who.verified ? `<p>Alerts to this address are paused because an email to it bounced. Add your alert again with the right address.</p>` : "";
   const race = shortRaceName(pendingRaceName(p)).name || pendingRaceName(p);
   const seasonCents = await seasonPriceFor(env, Number(p.subscriber_id));
   const btn = (choice: string, label: string) =>
@@ -4212,7 +4269,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     const names = picked.map((t) => t.ticket_name).join(", ");
     await pingAdmin(
       env,
-      `🎫 Ticket watch: ${subscriber.email}${needsVerification ? " (new - not yet confirmed)" : ""}\n${picked[0]?.event_name || "?"}: ${names}${overLimit ? "\n🔒 over the free limit - offered Priority" : ""}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
+      `🎫 Ticket watch: ${subscriber.email}${needsVerification ? " (new)" : ""}\n${picked[0]?.event_name || "?"}: ${names}${overLimit ? "\n🔒 over the free limit - offered Priority" : ""}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
     );
   }
   if (overLimit) {
@@ -4226,7 +4283,7 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
       if (t && !has) fresh.push(v);
     }
     if (slots > 0) await saveTicketWatches(env, subscriber.id, fresh.slice(0, slots));
-    if (needsVerification) await sendVerificationEmailOnly(env, subscriber, verifyToken).catch(() => {});
+    if (needsVerification) await sendWelcomeEmail(env, subscriber);
     const pendingId = await parkPendingWatch(env, subscriber.id, "ticket", fresh.slice(slots));
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     if ((choice === "1" || choice === "season") && subscriber.verified) {
@@ -4253,28 +4310,18 @@ async function handleSubscribe(req: Request, env: Env): Promise<Response> {
     }
   }
   if (pick) {
-    if (needsVerification) {
-      // Never take money from someone we can't reach to confirm their email.
-      try {
-        await sendVerificationEmailOnly(env, subscriber, verifyToken);
-      } catch {
-        return page("Try again", `<div class="card"><p>We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged. <a href="/">Back</a></p></div>`);
-      }
-    }
-    const url = await startPriorityCheckout(env, subscriber, pick.kind, pick.item, needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+    if (needsVerification) await sendWelcomeEmail(env, subscriber);
+    const url = await startPriorityCheckout(env, subscriber, pick.kind, pick.item, "/my-alerts?priority=success");
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     if (url) return new Response(null, { status: 303, headers: { Location: url, ...cookie } });
     return page(
       "Payment unavailable",
-      `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved${needsVerification ? " - confirm your email (we've sent a link) to switch it on" : ""}. <a href="/my-alerts">My alerts</a></p></div>`,
+      `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved. <a href="/my-alerts">My alerts</a></p></div>`,
       cookie
     );
   }
 
-  if (needsVerification) {
-    return sendVerificationEmail(env, subscriber, verifyToken);
-  }
-
+  if (needsVerification) await sendWelcomeEmail(env, subscriber);
   return redirectHome(env, subscriber.unsubscribe_token);
 }
 
@@ -4308,12 +4355,12 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
   }
   await pingAdmin(
     env,
-    `🏁 Race watch: ${subscriber.email}${needsVerification ? " (new - not yet confirmed)" : ""}\n${eventTitle}${overLimit ? "\n🔒 over the free limit - offered Priority" : ""}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
+    `🏁 Race watch: ${subscriber.email}${needsVerification ? " (new)" : ""}\n${eventTitle}${overLimit ? "\n🔒 over the free limit - offered Priority" : ""}${form.get("priority") === "1" || form.get("priority") === "season" ? "\n⚡ chose Priority - going to checkout" : ""}`
   );
   if (overLimit) {
     // Not saved: parked until they pay for it. Script callers get JSON for a Priority choice
     // (they open checkout_url) and otherwise follow the redirect to the limit page.
-    if (needsVerification) await sendVerificationEmailOnly(env, subscriber, verifyToken).catch(() => {});
+    if (needsVerification) await sendWelcomeEmail(env, subscriber);
     const pendingId = await parkPendingWatch(env, subscriber.id, "race", { event_url: eventUrl, event_title: eventTitle });
     const cookie = { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) };
     const limitUrl = `${env.SITE_URL}/free-limit?p=${pendingId}`;
@@ -4342,24 +4389,15 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
       if (race && !race.resolved && !(await ownsRacePriority(env, subscriber.id, eventUrl))) pick = { kind: "race", item: racePriorityItem(env, race) };
     }
     if (pick) {
-      if (needsVerification) {
-        // Never take money from someone we can't reach to confirm their email.
-        try {
-          await sendVerificationEmailOnly(env, subscriber, verifyToken);
-        } catch {
-          return jsonResponse({ error: "We couldn't send your confirmation email just now - please try again in a minute. Nothing was charged." }, 502);
-        }
-      }
-      const url = await startPriorityCheckout(env, subscriber, pick.kind, pick.item, needsVerification ? "/priority/thanks" : "/my-alerts?priority=success");
+      if (needsVerification) await sendWelcomeEmail(env, subscriber);
+      const url = await startPriorityCheckout(env, subscriber, pick.kind, pick.item, "/my-alerts?priority=success");
       // Race pages post the form itself (field nav=1), no script: answering with JSON showed the
       // buyer a page of raw text instead of the checkout (found 2026-11-10).
       if (form.get("nav") === "1") {
         if (url) return new Response(null, { status: 303, headers: { Location: url, "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) } });
         return page(
           "Payment could not start",
-          `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved${
-            needsVerification ? "; confirm your email (we've sent a link) to switch it on" : ""
-          }.</p><p><a href="/my-alerts">My alerts</a></p></div>`,
+          `<div class="card"><p>We couldn't start the payment just now - nothing was charged. Your free alert is saved.</p><p><a href="/my-alerts">My alerts</a></p></div>`,
           { "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) }
         );
       }
@@ -4367,16 +4405,14 @@ async function handleWatchSale(req: Request, env: Env): Promise<Response> {
         JSON.stringify(
           url
             ? { checkout_url: url }
-            : { error: `We couldn't start the payment just now - nothing was charged. Your free alert is saved${needsVerification ? "; confirm your email (we've sent a link) to switch it on" : ""}.` }
+            : { error: `We couldn't start the payment just now - nothing was charged. Your free alert is saved.` }
         ),
         { status: url ? 200 : 502, headers: { "content-type": "application/json", "Set-Cookie": sessionCookieHeader(subscriber.unsubscribe_token) } }
       );
     }
   }
 
-  if (needsVerification) {
-    return sendVerificationEmail(env, subscriber, verifyToken);
-  }
+  if (needsVerification) await sendWelcomeEmail(env, subscriber);
 
   if (priorityOpen(env, subscriber) && (await priorityCandidates(env, subscriber.id, eventUrl)).length) {
     return new Response(null, {
