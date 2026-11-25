@@ -7037,7 +7037,9 @@ async function handleRacePage(req: Request, env: Env, slug: string): Promise<Res
         const snap: SpectatorSnapshot = JSON.parse(r.value);
         if (Date.now() - snap.at < SPECTATOR_FRESH_MS && Array.isArray(snap.tickets) && snap.tickets.length && snap.at > newest) {
           newest = snap.at;
-          spectatorAll = snap.tickets;
+          // Paid spectator tickets only: the free under-12 add-on reads as sold out in most shops
+          // while the day itself is on sale, which would turn every US race into "partly sold out".
+          spectatorAll = snap.tickets.filter(([n]) => !/child|u12/i.test(n));
         }
       } catch {}
     }
