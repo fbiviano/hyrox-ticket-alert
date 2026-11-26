@@ -503,6 +503,9 @@ a{color:#111}
 #resolveResult .tcathead{margin:0 0 6px;font-size:0.95rem;font-weight:700;color:#333}
 .tcathead a{font-weight:normal;margin-left:6px;color:#111;font-size:0.88rem}
 .tline{display:block;margin:7px 0;font-size:0.92rem}
+.limit-warn{position:sticky;bottom:8px;z-index:5;margin:12px 0;padding:10px 12px;border-radius:8px;background:#fff4d6;border:1px solid #e0b100;color:#5c4400;font-size:0.92rem;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.limit-warn[hidden]{display:none}
+button.free-locked{opacity:.45;cursor:not-allowed}
 .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tstat.sold{background:#fdecec;color:#b00}
 .tstat.avail{background:#e6f4ea;color:#1e7e34}
@@ -725,6 +728,8 @@ const RESOLVE_SCRIPT = `<script>
       updateClearX();
       if (browseDetails) browseDetails.open = true;
       if (submitBtn) submitBtn.style.display = 'none';
+      var lw = document.getElementById('limitWarn');
+      if (lw) lw.hidden = true;
       input.focus();
     });
   }
@@ -752,7 +757,7 @@ const RESOLVE_SCRIPT = `<script>
     return { t: t, day: day, base: base, cat: cat, pro: /\\bPRO\\b/.test(u), sold: t.status === 'sold_out' };
   }
   function ticketLine(p) {
-    return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
+    return '<label class="tline"><input type="checkbox" name="ticket" data-name="' + esc(p.t.name) + '" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.base) + '</label>';
   }
   function renderTicketPicker(data) {
     if (!document.getElementById('ticketGridOn')) {
@@ -760,7 +765,7 @@ const RESOLVE_SCRIPT = `<script>
       var plain = '<p><b>' + esc(data.event_name) + '</b></p>';
       for (var k = 0; k < data.tickets.length; k++) {
         var tk = data.tickets[k];
-        plain += '<label><input type="checkbox" name="ticket" value="' + esc(tk.encoded) + '"> [' + esc(tk.status.toUpperCase()) + '] ' + esc(tk.name) + '</label>';
+        plain += '<label><input type="checkbox" name="ticket" data-name="' + esc(tk.name) + '" value="' + esc(tk.encoded) + '"> [' + esc(tk.status.toUpperCase()) + '] ' + esc(tk.name) + '</label>';
       }
       return plain;
     }
@@ -771,7 +776,7 @@ const RESOLVE_SCRIPT = `<script>
     var byName = function(a, b) { return nameKey(a) < nameKey(b) ? -1 : 1; };
     if (parsed.length < 8) {
       return html + parsed.slice().sort(function(a, b) { return (a.sold ? 0 : 1) - (b.sold ? 0 : 1); }).map(function(p) {
-        return '<label class="tline"><input type="checkbox" name="ticket" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
+        return '<label class="tline"><input type="checkbox" name="ticket" data-name="' + esc(p.t.name) + '" value="' + esc(p.t.encoded) + '"> <span class="tstat ' + (p.sold ? 'sold' : 'avail') + '">' + (p.sold ? 'Sold out' : 'Available') + '</span> ' + esc(p.t.name) + '</label>';
       }).join('');
     }
     html += '<p class="hint">Tick the tickets you want to watch. For sold-out tickets we alert you the moment a place comes back.</p>';
@@ -790,7 +795,46 @@ const RESOLVE_SCRIPT = `<script>
     });
     return html;
   }
-  function afterPickerRender() {}
+  // Free covers a few ticket types: say so the moment someone ticks one too many, and lock the
+  // free button until they untick or choose Priority.
+  var limitEl = document.getElementById('freeLimit');
+  var limitWarn = document.getElementById('limitWarn');
+  var pickerInfo = { covered: false, watched: [] };
+  function checkFreeLimit() {
+    if (!limitEl || !limitWarn) return;
+    var form = document.getElementById('signupForm');
+    var freeBtn = form ? form.querySelector('button[name="priority"][value="0"]') : null;
+    var prioBtn = form ? form.querySelector('button[name="priority"][value="1"]') : null;
+    var left = parseInt(limitEl.getAttribute('data-left'), 10) || 0;
+    var max = limitEl.getAttribute('data-max');
+    var picked = 0;
+    var boxes = out.querySelectorAll('input[name="ticket"]:checked');
+    for (var i = 0; i < boxes.length; i++) {
+      if (pickerInfo.watched.indexOf(boxes[i].getAttribute('data-name')) < 0) picked++;
+    }
+    var over = pickerInfo.covered ? 0 : picked - left;
+    if (over > 0) {
+      var msg = left > 0
+        ? 'Free alerts cover ' + max + ' ticket types. You picked ' + picked + ': untick ' + over + ' to stay free'
+        : 'Your ' + max + ' free alerts are already in use';
+      limitWarn.textContent = msg + (prioBtn ? (left > 0 ? ', or choose Priority (' : '. Choose Priority (') + limitEl.getAttribute('data-price') + ', every ticket type at this race) to watch them all.' : '.');
+      limitWarn.hidden = false;
+    } else {
+      limitWarn.hidden = true;
+    }
+    // Locked only when there is a Priority button to take instead.
+    if (freeBtn && prioBtn) {
+      freeBtn.disabled = over > 0;
+      freeBtn.classList.toggle('free-locked', over > 0);
+    }
+  }
+  out.addEventListener('change', function(e) {
+    if (e.target && e.target.name === 'ticket') checkFreeLimit();
+  });
+  function afterPickerRender(data) {
+    pickerInfo = { covered: !!(data && data.covered), watched: (data && data.watched) || [] };
+    checkFreeLimit();
+  }
 
   async function doFind(url) {
     url = url.trim();
@@ -875,7 +919,7 @@ const RESOLVE_SCRIPT = `<script>
         return;
       }
       out.innerHTML = renderTicketPicker(data);
-      afterPickerRender();
+      afterPickerRender(data);
       if (submitBtn) submitBtn.style.display = 'block';
     } catch (e) {
       out.innerHTML = '<p>Something went wrong. Try again.</p>';
@@ -1389,7 +1433,8 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
       </div>
       <button type="button" id="findBtn">Find tickets</button>
     </div>
-    <div id="resolveResult"></div>`;
+    <div id="resolveResult"></div>
+    <p id="limitWarn" class="limit-warn" role="status" hidden></p>`;
 
   const browseSection = `<details class="browse" id="browseEvents" open>
       <summary class="browse-toggle">On sale now &amp; not on sale yet <span class="chev">&#9656;</span></summary>
@@ -1419,6 +1464,13 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const seasonLabel = seasonButtonLabel(await seasonPriceFor(env, subscriber?.id));
   const seasonOffer = (button: string): string | null => button;
   const gridFlag = env.TICKET_GRID === "1" ? '<span id="ticketGridOn" hidden></span>' : "";
+  // Free places left, so the picker can say "free covers 3" while people tick, not after they
+  // submit (2026-11-26: people picked five, typed their email, and only then met the limit).
+  const freeLeft = subscriber ? Math.max(0, FREE_ALERTS - (await freeWatchedItems(env, subscriber.id)).length) : FREE_ALERTS;
+  const limitFlag =
+    env.FREE_RACE_LIMIT === "1" && !seasonHeld
+      ? `<span id="freeLimit" hidden data-left="${freeLeft}" data-max="${FREE_ALERTS}" data-price="${PRIORITY_PRICE_LABEL}"></span>`
+      : "";
   const priorityFlag = offerPriority
     ? `<span id="priorityOffer" hidden data-price="${PRIORITY_PRICE_LABEL}" data-choice="${escapeHtml(
         priorityChoiceHtml(
@@ -1457,7 +1509,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                     : `<button type="submit" name="priority" value="0">Add selected ticket(s)</button>`
                 }
               </div>
-            </form>${priorityFlag}${gridFlag}
+            </form>${priorityFlag}${gridFlag}${limitFlag}
             ${browseSection}
           </div>
           ${faq}
@@ -1505,7 +1557,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
                   : `<button type="submit" name="priority" value="0">Subscribe</button>`
               }
             </div>
-          </form>${priorityFlag}${gridFlag}
+          </form>${priorityFlag}${gridFlag}${limitFlag}
           ${browseSection}
         </div>
         ${faq}
@@ -3191,7 +3243,14 @@ async function handleResolve(req: Request, env: Env): Promise<Response> {
     });
     return { name: t.name, status, encoded };
   });
-  return jsonResponse({ event_name: found.event.name, tickets });
+  // For the picker's free-limit warning: Priority for this race lifts the limit, and ticket types
+  // already watched don't use up a free place when ticked again.
+  const me = await getSessionSubscriber(req, env);
+  const covered = me ? await ownsTicketPriority(env, me.id, found.event.name) : false;
+  const watched = me
+    ? ((await env.DB.prepare("SELECT ticket_name FROM subscriptions WHERE subscriber_id = ? AND event_name = ?").bind(me.id, found.event.name).all<any>()).results || []).map((r: any) => String(r.ticket_name))
+    : [];
+  return jsonResponse({ event_name: found.event.name, tickets, covered, watched });
 }
 
 interface SubscriberLookup {
