@@ -800,6 +800,17 @@ const RESOLVE_SCRIPT = `<script>
   var limitEl = document.getElementById('freeLimit');
   var limitWarn = document.getElementById('limitWarn');
   var pickerInfo = { covered: false, watched: [] };
+  var warnSeen = false;
+  function limitStat(e) {
+    if (!limitEl) return;
+    try { navigator.sendBeacon('/limit-stat?e=' + e); } catch (err) {}
+  }
+  var signupForm = document.getElementById('signupForm');
+  if (signupForm) signupForm.addEventListener('submit', function(e) {
+    if (!warnSeen) return;
+    var v = e.submitter ? e.submitter.value : '0';
+    limitStat(v === '0' ? 'free_after' : 'priority_after');
+  });
   function checkFreeLimit() {
     if (!limitEl || !limitWarn) return;
     var form = document.getElementById('signupForm');
@@ -819,6 +830,7 @@ const RESOLVE_SCRIPT = `<script>
         : 'Your ' + max + ' free alerts are already in use';
       limitWarn.textContent = msg + (prioBtn ? (left > 0 ? ', or choose Priority (' : '. Choose Priority (') + limitEl.getAttribute('data-price') + ', every ticket type at this race) to watch them all.' : '.');
       limitWarn.hidden = false;
+      if (!warnSeen) { warnSeen = true; limitStat('shown'); }
     } else {
       limitWarn.hidden = true;
     }
@@ -833,6 +845,8 @@ const RESOLVE_SCRIPT = `<script>
   });
   function afterPickerRender(data) {
     pickerInfo = { covered: !!(data && data.covered), watched: (data && data.watched) || [] };
+    warnSeen = false;
+    if (!pickerInfo.covered) limitStat('picker');
     checkFreeLimit();
   }
 
@@ -1464,7 +1478,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   const seasonLabel = seasonButtonLabel(await seasonPriceFor(env, subscriber?.id));
   const seasonOffer = (button: string): string | null => button;
   const gridFlag = env.TICKET_GRID === "1" ? '<span id="ticketGridOn" hidden></span>' : "";
-  // Free places left, so the picker can say "free covers 3" while people tick, not after they
+  // Free places left, so the picker can say "free covers N" while people tick, not after they
   // submit (2026-11-26: people picked five, typed their email, and only then met the limit).
   const freeLeft = subscriber ? Math.max(0, FREE_ALERTS - (await freeWatchedItems(env, subscriber.id)).length) : FREE_ALERTS;
   const limitFlag =
@@ -4148,7 +4162,8 @@ async function handleNudgeButton(env: Env, cb: any): Promise<void> {
 // when the Priority payment for it completes (Stripe webhook, metadata.pending_id).
 // Switched by var FREE_RACE_LIMIT = "1"; unset = no limit.
 // ---------------------------------------------------------------------------
-const FREE_ALERTS = 3;
+// 2 since 2026-11-26 (was 3 from 2026-11-24): two-week trial, compared with the limitstat counters.
+const FREE_ALERTS = 2;
 
 function saveTicketWatches(env: Env, subscriberId: number, ticketValues: string[]): Promise<unknown> {
   const stmts: D1PreparedStatement[] = [];
@@ -4270,6 +4285,22 @@ function pendingWhat(p: any): string {
   return race;
 }
 
+/** Counts what happens around the picker's free-limit warning, per day and limit, in kv_meta
+ * "limitstat:<date>:<limit>:<event>": picker = a ticket list was shown, shown = the warning
+ * appeared, free_after / priority_after = submitted free (after unticking) or chose Priority after
+ * seeing it. Left without subscribing = shown - free_after - priority_after. No personal data. */
+const LIMIT_STAT_EVENTS = ["picker", "shown", "free_after", "priority_after"];
+async function handleLimitStat(req: Request, env: Env): Promise<Response> {
+  const e = new URL(req.url).searchParams.get("e") || "";
+  if (LIMIT_STAT_EVENTS.includes(e) && env.FREE_RACE_LIMIT === "1") {
+    await env.DB.prepare("INSERT INTO kv_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1")
+      .bind(`limitstat:${todayIso()}:${FREE_ALERTS}:${e}`)
+      .run()
+      .catch((err) => console.error("limitstat failed:", err));
+  }
+  return new Response(null, { status: 204 });
+}
+
 async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   const id = new URL(req.url).searchParams.get("p") || "";
   const p = await env.DB.prepare("SELECT * FROM pending_watches WHERE id = ?").bind(id).first<any>();
@@ -4282,19 +4313,19 @@ async function handleFreeLimitPage(req: Request, env: Env): Promise<Response> {
   const btn = (choice: string, label: string) =>
     `<form method="POST" action="/free-limit/checkout" style="display:inline-block;margin:0 8px 8px 0"><input type="hidden" name="p" value="${escapeHtml(id)}"><input type="hidden" name="choice" value="${choice}"><button type="submit">${label}</button></form>`;
   return page(
-    "Free alerts cover 3 ticket types",
+    `Free alerts cover ${FREE_ALERTS} ticket types`,
     `<div class="card">
-      <h1>Free alerts cover 3 ticket types</h1>
+      <h1>Free alerts cover ${FREE_ALERTS} ticket types</h1>
       ${confirmNote}
       ${
         current.length
           ? `<p>Your free alerts are already in use: <b>${escapeHtml(current.join(", "))}</b>. To also watch <b>${escapeHtml(pendingWhat(p))}</b>:</p>`
-          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. Free alerts cover 3. To watch them all:</p>`
+          : `<p>You picked several ticket types: <b>${escapeHtml(pendingWhat(p))}</b>. Free alerts cover ${FREE_ALERTS}. To watch them all:</p>`
       }
       <p>${btn("one", `&#9889; Priority for ${escapeHtml(race)} - ${PRIORITY_PRICE_LABEL}`)}${btn("season", `&#9889; Season Priority - all races - ${money(seasonCents)}`)}</p>
       <p class="consent">Priority alerts you before everyone else, WhatsApp included. One-off payment, no subscription. It speeds up your alerts; it doesn't reserve or guarantee a ticket. <a href="/terms">Terms &amp; refunds</a></p>
       <p>Priority for ${escapeHtml(race)} covers every ticket type at that race.</p>
-      <p>${current.length ? `Or swap for free: remove one of your current alerts in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick up to 3 - free.`}</p>
+      <p>${current.length ? `Or swap for free: remove one of your current alerts in <a href="/my-alerts">My alerts</a>, then add the one you want again.` : `Or <a href="javascript:history.back()">go back</a> and pick up to ${FREE_ALERTS} - free.`}</p>
     </div>`
   );
 }
@@ -9781,6 +9812,7 @@ const worker = {
       if (url.pathname === "/login" && req.method === "POST") return await handleLogin(req, env);
       if (url.pathname === "/watch-sale" && req.method === "POST") return await handleWatchSale(req, env);
       if (url.pathname === "/free-limit" && req.method === "GET") return await handleFreeLimitPage(req, env);
+      if (url.pathname === "/limit-stat" && req.method === "POST") return await handleLimitStat(req, env);
       if (url.pathname === "/free-limit/checkout" && req.method === "POST") return await handleFreeLimitCheckout(req, env);
       if (url.pathname === "/verify" && req.method === "GET") return await handleVerify(req, env);
       if (url.pathname === "/unsubscribe" && req.method === "GET") return await handleUnsubscribe(req, env);
