@@ -503,16 +503,13 @@ a{color:#111}
 #resolveResult .tcathead{margin:0 0 6px;font-size:0.95rem;font-weight:700;color:#333}
 .tcathead a{font-weight:normal;margin-left:6px;color:#111;font-size:0.88rem}
 .tline{display:block;margin:7px 0;font-size:0.92rem}
-.limit-warn{position:sticky;bottom:8px;z-index:5;margin:12px 0;padding:10px 12px;border-radius:8px;background:#fff4d6;border:1px solid #e0b100;color:#5c4400;font-size:0.92rem;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.limit-warn{position:sticky;bottom:10px;z-index:5;margin:12px 0;padding:8px 8px 8px 14px;border-radius:999px;background:#fff;border:1px solid #ddd;color:#111;font-size:0.92rem;box-shadow:0 3px 12px rgba(0,0,0,.14);display:flex;align-items:center;justify-content:space-between;gap:10px}
 .limit-warn[hidden]{display:none}
+.limit-warn .pb-over{color:#9a6700}
+.limit-warn button{margin:0;width:auto;padding:7px 14px;border-radius:999px;font-size:0.88rem}
+.limit-note{margin:12px 0 0;padding:9px 12px;border-left:3px solid #e0a100;background:#fff8e6;border-radius:6px;font-size:0.9rem;color:#5c4400}
+.limit-note[hidden]{display:none}
 button.free-locked{opacity:.45;cursor:not-allowed}
-.limit-warn b{display:block;margin-bottom:4px}
-.limit-warn .lw-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:8px}
-.limit-warn .lw-actions button{margin:0;width:auto}
-.limit-warn .lw-note{font-size:0.82rem;margin-top:6px}
-.limit-warn .lw-note:empty{display:none}
-.limit-warn .lw-perks{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:0.85rem}
-.limit-warn .lw-perks li{margin:0}
 .plan.prio.pick-me{border:2px solid #e0a100;box-shadow:0 0 0 3px #ffe7a8}
 .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tstat.sold{background:#fdecec;color:#b00}
@@ -820,49 +817,53 @@ const RESOLVE_SCRIPT = `<script>
     limitStat(v === '0' ? 'free_after' : 'priority_after');
   });
   function checkFreeLimit() {
-    if (!limitEl || !limitWarn) return;
+    if (!limitWarn) return;
     var form = document.getElementById('signupForm');
     var freeBtn = form ? form.querySelector('button[name="priority"][value="0"]') : null;
     var prioBtn = form ? form.querySelector('button[name="priority"][value="1"]') : null;
-    var left = parseInt(limitEl.getAttribute('data-left'), 10) || 0;
-    var max = limitEl.getAttribute('data-max');
-    var picked = 0;
     var boxes = out.querySelectorAll('input[name="ticket"]:checked');
-    for (var i = 0; i < boxes.length; i++) {
-      if (pickerInfo.watched.indexOf(boxes[i].getAttribute('data-name')) < 0) picked++;
+    var left = 0, max = '', picked = 0, over = 0;
+    if (limitEl) {
+      left = parseInt(limitEl.getAttribute('data-left'), 10) || 0;
+      max = limitEl.getAttribute('data-max');
+      for (var i = 0; i < boxes.length; i++) {
+        if (pickerInfo.watched.indexOf(boxes[i].getAttribute('data-name')) < 0) picked++;
+      }
+      over = pickerInfo.covered ? 0 : Math.max(0, picked - left);
     }
-    var over = pickerInfo.covered ? 0 : picked - left;
-    var price = esc(limitEl.getAttribute('data-price') || '');
-    if (over > 0) {
-      // Two clear ways out, side by side: untick, or one tap to Priority (2026-11-26: the plain
-      // sentence left people unsure what to do next or how to pay).
-      var head = left > 0
-        ? 'Free covers ' + max + ' ticket types - you picked ' + picked + '.'
-        : 'Your ' + max + ' free alerts are already in use.';
-      limitWarn.innerHTML = '<b>' + head + '</b>' +
-        '<div class="lw-actions">' +
-        (left > 0 ? '<span>Untick ' + over + ' to stay free, or</span>' : '') +
-        (prioBtn ? '<button type="button" id="lwPrio">&#9889; Watch all ' + picked + ' with Priority - ' + price + '</button>' : '') +
-        '</div>' +
-        (prioBtn ? '<ul class="lw-perks"><li>&#9889; Alerted first, before free users</li><li>&#128172; WhatsApp notification</li><li>&#9989; Every ticket type at this race</li><li>&#128176; ' + price + ' once, no subscription</li></ul>' : '') +
-        '<div class="lw-note" id="lwNote"></div>';
-      limitWarn.hidden = false;
-      var lwPrio = document.getElementById('lwPrio');
-      if (lwPrio) lwPrio.addEventListener('click', function() {
-        var emailIn = form ? form.querySelector('input[name="email"]') : null;
-        if (emailIn && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailIn.value.trim())) {
-          emailIn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          emailIn.focus();
-          var note = document.getElementById('lwNote');
-          if (note) note.textContent = 'Enter your email first, then tap the button again to go to payment.';
-          return;
-        }
-        prioBtn.click();
-      });
-      if (!warnSeen) { warnSeen = true; limitStat('shown'); }
-    } else {
+    // A slim bar while ticking: how many are selected and a way down to the email step (the list
+    // can be 100+ tickets long). Over the free limit it only adds a few quiet words; the choice
+    // itself is explained next to the buttons (2026-11-26: a big yellow box over the list felt
+    // intrusive and didn't lead anyone down the page).
+    if (!boxes.length) {
       limitWarn.hidden = true;
+    } else {
+      limitWarn.innerHTML = '<span><b>' + boxes.length + ' selected</b>' +
+        (over > 0 ? '<span class="pb-over"> &middot; free covers ' + max + '</span>' : '') + '</span>' +
+        '<button type="button" id="pbGo">Continue &darr;</button>';
+      limitWarn.hidden = false;
+      document.getElementById('pbGo').addEventListener('click', function() {
+        var step = document.querySelector('.submit-step');
+        if (step) step.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     }
+    var grid = form ? form.querySelector('.plan-grid') : null;
+    var note = document.getElementById('limitNote');
+    if (!note && grid) {
+      note = document.createElement('p');
+      note.id = 'limitNote';
+      note.className = 'limit-note';
+      grid.parentNode.insertBefore(note, grid);
+    }
+    if (note) {
+      note.hidden = !(over > 0);
+      if (over > 0) {
+        note.textContent = left > 0
+          ? 'Free covers ' + max + ' ticket types and you picked ' + picked + '. Untick ' + over + ' above to stay free, or choose Priority to watch them all.'
+          : 'Your ' + max + ' free alerts are already in use. Choose Priority to add more.';
+      }
+    }
+    if (over > 0 && !warnSeen) { warnSeen = true; limitStat('shown'); }
     // Locked only when there is a Priority button to take instead; its label says why.
     if (freeBtn && prioBtn) {
       if (!freeBtn.getAttribute('data-label')) freeBtn.setAttribute('data-label', freeBtn.textContent);
