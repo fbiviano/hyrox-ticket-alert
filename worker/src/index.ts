@@ -589,6 +589,10 @@ body.wide{max-width:980px}
 .side-compact button{font-size:0.85rem;padding:7px 12px;margin:2px 4px 2px 0}
 .hero h1,.hero h2{font-size:1.6rem;margin:0 0 6px}
 .hero-sub{color:#555;font-size:0.95rem;margin:0}
+.hero h1 .eyebrow{display:block;font-size:0.75rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#777;margin:0 0 4px}
+.hero h1 .h1-main::first-letter{text-transform:uppercase}
+.hero h1 .h1-main{display:block}
+.hero h1 .sr-colon{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .stats-line{color:#555;font-size:0.9rem;margin:10px 0 0}.stats-line b{color:#111}
 .hint{color:#555;font-size:0.9rem;margin-top:0}
 .sponsors{display:flex;flex-direction:column;gap:8px;margin-top:10px}
@@ -1397,7 +1401,7 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // didn't know we cover them.
   const SPECTATOR_LINE = "Coming to watch? Spectator tickets sell out too - we alert you when they're back.";
   const hero = `<div class="hero">
-    <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
+    <h1><span class="eyebrow">HYROX race alerts<span class="sr-colon">: </span></span><span class="h1-main">get notified when tickets go on sale or come back</span></h1>
     <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back.</p>
   </div>`;
 
