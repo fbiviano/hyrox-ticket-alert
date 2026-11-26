@@ -506,6 +506,11 @@ a{color:#111}
 .limit-warn{position:sticky;bottom:8px;z-index:5;margin:12px 0;padding:10px 12px;border-radius:8px;background:#fff4d6;border:1px solid #e0b100;color:#5c4400;font-size:0.92rem;box-shadow:0 2px 8px rgba(0,0,0,.12)}
 .limit-warn[hidden]{display:none}
 button.free-locked{opacity:.45;cursor:not-allowed}
+.limit-warn b{display:block;margin-bottom:4px}
+.limit-warn .lw-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:8px}
+.limit-warn .lw-actions button{margin:0;width:auto}
+.limit-warn .lw-note{font-size:0.82rem;margin-top:6px}
+.plan.prio.pick-me{border:2px solid #e0a100;box-shadow:0 0 0 3px #ffe7a8}
 .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tstat.sold{background:#fdecec;color:#b00}
 .tstat.avail{background:#e6f4ea;color:#1e7e34}
@@ -824,20 +829,44 @@ const RESOLVE_SCRIPT = `<script>
       if (pickerInfo.watched.indexOf(boxes[i].getAttribute('data-name')) < 0) picked++;
     }
     var over = pickerInfo.covered ? 0 : picked - left;
+    var price = esc(limitEl.getAttribute('data-price') || '');
     if (over > 0) {
-      var msg = left > 0
-        ? 'Free alerts cover ' + max + ' ticket types. You picked ' + picked + ': untick ' + over + ' to stay free'
-        : 'Your ' + max + ' free alerts are already in use';
-      limitWarn.textContent = msg + (prioBtn ? (left > 0 ? ', or choose Priority (' : '. Choose Priority (') + limitEl.getAttribute('data-price') + ', every ticket type at this race) to watch them all.' : '.');
+      // Two clear ways out, side by side: untick, or one tap to Priority (2026-11-26: the plain
+      // sentence left people unsure what to do next or how to pay).
+      var head = left > 0
+        ? 'Free covers ' + max + ' ticket types - you picked ' + picked + '.'
+        : 'Your ' + max + ' free alerts are already in use.';
+      limitWarn.innerHTML = '<b>' + head + '</b>' +
+        '<div class="lw-actions">' +
+        (left > 0 ? '<span>Untick ' + over + ' to stay free, or</span>' : '') +
+        (prioBtn ? '<button type="button" id="lwPrio">&#9889; Watch all ' + picked + ' with Priority - ' + price + '</button>' : '') +
+        '</div>' +
+        '<div class="lw-note" id="lwNote">' + (prioBtn ? 'Priority = every ticket type at this race, alerted first, one-off payment.' : '') + '</div>';
       limitWarn.hidden = false;
+      var lwPrio = document.getElementById('lwPrio');
+      if (lwPrio) lwPrio.addEventListener('click', function() {
+        var emailIn = form ? form.querySelector('input[name="email"]') : null;
+        if (emailIn && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailIn.value.trim())) {
+          emailIn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          emailIn.focus();
+          var note = document.getElementById('lwNote');
+          if (note) note.textContent = 'Enter your email first, then tap the button again to go to payment.';
+          return;
+        }
+        prioBtn.click();
+      });
       if (!warnSeen) { warnSeen = true; limitStat('shown'); }
     } else {
       limitWarn.hidden = true;
     }
-    // Locked only when there is a Priority button to take instead.
+    // Locked only when there is a Priority button to take instead; its label says why.
     if (freeBtn && prioBtn) {
+      if (!freeBtn.getAttribute('data-label')) freeBtn.setAttribute('data-label', freeBtn.textContent);
       freeBtn.disabled = over > 0;
       freeBtn.classList.toggle('free-locked', over > 0);
+      freeBtn.textContent = over > 0 ? 'Free covers ' + max + ' - untick ' + (left > 0 ? over : 'to stay free') : freeBtn.getAttribute('data-label');
+      var prioCard = prioBtn.closest('.plan');
+      if (prioCard) prioCard.classList.toggle('pick-me', over > 0);
     }
   }
   out.addEventListener('change', function(e) {
