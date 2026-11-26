@@ -1396,11 +1396,9 @@ async function handleSignupPage(req: Request, env: Env, previewPartners = false)
   // 2026-11-02: 2 of the 3 Nashville buyers paid for spectator tickets - family and friends
   // didn't know we cover them.
   const SPECTATOR_LINE = "Coming to watch? Spectator tickets sell out too - we alert you when they're back.";
-  const stats = await siteStats(env);
   const hero = `<div class="hero">
     <h1>HYROX race alerts: get notified when tickets go on sale or come back</h1>
     <p class="hero-sub">Free alerts for every HYROX race worldwide: tickets on sale, pre-sales, and sold-out spots coming back.</p>
-    ${stats.athletes >= 50 ? `<p class="stats-line"><b>${stats.athletes}</b> athletes &middot; <b>${roundDown(stats.alerts)}+</b> alerts sent &middot; <b>${roundDown(stats.returns)}+</b> sold-out tickets <a href="/tickets-back">spotted coming back</a></p>` : ""}
   </div>`;
 
   const sideOnSaleCard = `<div class="card" id="sideOnSaleCard">
