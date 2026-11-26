@@ -510,6 +510,9 @@ button.free-locked{opacity:.45;cursor:not-allowed}
 .limit-warn .lw-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:8px}
 .limit-warn .lw-actions button{margin:0;width:auto}
 .limit-warn .lw-note{font-size:0.82rem;margin-top:6px}
+.limit-warn .lw-note:empty{display:none}
+.limit-warn .lw-perks{list-style:none;padding:0;margin:8px 0 0;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:0.85rem}
+.limit-warn .lw-perks li{margin:0}
 .plan.prio.pick-me{border:2px solid #e0a100;box-shadow:0 0 0 3px #ffe7a8}
 .tstat{font-size:0.72rem;padding:1px 7px;border-radius:8px;margin-right:4px}
 .tstat.sold{background:#fdecec;color:#b00}
@@ -841,7 +844,8 @@ const RESOLVE_SCRIPT = `<script>
         (left > 0 ? '<span>Untick ' + over + ' to stay free, or</span>' : '') +
         (prioBtn ? '<button type="button" id="lwPrio">&#9889; Watch all ' + picked + ' with Priority - ' + price + '</button>' : '') +
         '</div>' +
-        '<div class="lw-note" id="lwNote">' + (prioBtn ? 'Priority = every ticket type at this race, alerted first, one-off payment.' : '') + '</div>';
+        (prioBtn ? '<ul class="lw-perks"><li>&#9889; Alerted first, before free users</li><li>&#128172; WhatsApp notification</li><li>&#9989; Every ticket type at this race</li><li>&#128176; ' + price + ' once, no subscription</li></ul>' : '') +
+        '<div class="lw-note" id="lwNote"></div>';
       limitWarn.hidden = false;
       var lwPrio = document.getElementById('lwPrio');
       if (lwPrio) lwPrio.addEventListener('click', function() {
